@@ -4,7 +4,10 @@ import fs from "node:fs";
 import { BoundedTtlSet } from "../utils/bounded-ttl-cache.ts";
 import { writePrivateFileAtomic } from "../utils/private-files.ts";
 import { normalizeWeRelayRelayBaseUrl } from "./relay-protocol.ts";
-import { encodeWeRelayTaskShortCode } from "./relay-task-short-code.ts";
+import {
+  decodeWeRelayTaskShortCode,
+  encodeWeRelayTaskShortCode,
+} from "./relay-task-short-code.ts";
 
 export const WERELAY_RELAY_TASK_LINK_REGISTER_PATH =
   "/__werelay/device/task-links";
@@ -153,6 +156,8 @@ type PendingRegistration = WeRelayRelayTaskLinkTarget & {
   alias: string;
   retryMs: number;
   timer?: ReturnType<typeof setTimeout>;
+  confirmed: Promise<void>;
+  confirm: () => void;
 };
 
 export class WeRelayRelayTaskLinkClient {
@@ -198,6 +203,85 @@ export class WeRelayRelayTaskLinkClient {
     return `${this.relayUrl}${pathname}${query ? `?${query}` : ""}`;
   }
 
+  async buildConfirmedTaskUrl(
+    threadId: string,
+    adapter: string,
+    searchParams: URLSearchParams,
+    options: { timeoutMs?: number } = {},
+  ): Promise<string> {
+    const target = normalizeTarget({ adapter, threadId });
+    const alias = createWeRelayRelayTaskLinkAlias(
+      this.deviceToken,
+      target.adapter,
+      target.threadId,
+    );
+    if (!this.registered.has(alias)) {
+      const registration = this.ensureRegistered(alias, target);
+      const timeoutMs = Math.max(1, options.timeoutMs ?? 5_000);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        registration?.confirmed ?? Promise.resolve(),
+        new Promise<void>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("短链接暂时无法生成，请稍后重试。")), timeoutMs);
+          timer.unref?.();
+        }),
+      ]).finally(() => {
+        if (timer) clearTimeout(timer);
+      });
+    }
+    if (!this.registered.has(alias)) {
+      throw new Error("短链接暂时无法生成，请稍后重试。");
+    }
+    const query = searchParams.toString();
+    return `${this.relayUrl}/${alias}${query ? `?${query}` : ""}`;
+  }
+
+  async confirmTaskLinksInText(
+    text: string,
+    options: { timeoutMs?: number } = {},
+  ): Promise<{ text: string; unresolvedCount: number }> {
+    const candidates = Array.from(new Set(
+      Array.from(text.matchAll(/https?:\/\/[^\s<>"'，。；！？、]+/gi))
+        .map((match) => match[0]),
+    ));
+    let resolvedText = text;
+    let unresolvedCount = 0;
+    for (const candidate of candidates) {
+      let url: URL;
+      try {
+        url = new URL(candidate);
+      } catch {
+        continue;
+      }
+      if (url.origin !== new URL(this.relayUrl).origin) continue;
+      const encodedTarget = url.pathname.match(/^\/t\/([^/]+)$/)?.[1];
+      if (!encodedTarget) continue;
+      const target = decodeWeRelayTaskShortCode(encodedTarget);
+      if (!target) continue;
+      let replacement = "";
+      try {
+        replacement = await this.buildConfirmedTaskUrl(
+          target.threadId,
+          target.adapter,
+          url.searchParams,
+          options,
+        );
+      } catch {
+        unresolvedCount += 1;
+      }
+      resolvedText = resolvedText.split(candidate).join(replacement);
+    }
+    resolvedText = resolvedText
+      .replace(/[ \t]+\n/g, "\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+    if (unresolvedCount > 0) {
+      const notice = "任务短链接暂时无法生成，可发送“任务”从列表进入。";
+      resolvedText = resolvedText ? `${resolvedText}\n\n${notice}` : notice;
+    }
+    return { text: resolvedText, unresolvedCount };
+  }
+
   async close(): Promise<void> {
     this.abortController.abort();
     for (const registration of this.pending.values()) {
@@ -209,15 +293,22 @@ export class WeRelayRelayTaskLinkClient {
   private ensureRegistered(
     alias: string,
     target: WeRelayRelayTaskLinkTarget,
-  ): void {
-    if (this.registered.has(alias) || this.pending.has(alias)) return;
+  ): PendingRegistration | null {
+    if (this.registered.has(alias)) return null;
+    const existing = this.pending.get(alias);
+    if (existing) return existing;
+    let confirm: () => void = () => {};
+    const confirmed = new Promise<void>((resolve) => { confirm = resolve; });
     const registration: PendingRegistration = {
       alias,
       ...target,
       retryMs: REGISTER_RETRY_MIN_MS,
+      confirmed,
+      confirm,
     };
     this.pending.set(alias, registration);
     void this.register(registration);
+    return registration;
   }
 
   private async register(registration: PendingRegistration): Promise<void> {
@@ -245,6 +336,7 @@ export class WeRelayRelayTaskLinkClient {
       }
       this.pending.delete(registration.alias);
       this.registered.add(registration.alias);
+      registration.confirm();
       return;
     } catch {
       if (this.abortController.signal.aborted) return;

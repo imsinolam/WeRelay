@@ -1218,6 +1218,19 @@ describe("werelay-daemon helpers", () => {
     expect(shouldSendCodexMobileTaskLink("completed", undefined)).toBe(false);
   });
 
+  test("confirms Relay task aliases before any WeChat text is sent", () => {
+    const daemonSource = fs.readFileSync(
+      path.join(process.cwd(), "src/daemon/werelay-daemon.ts"),
+      "utf8",
+    );
+    const prepareStart = daemonSource.indexOf("  private async prepareWechatMessageTaskLinks");
+    const queueEnd = daemonSource.indexOf("\n  private trackWechatForwardTask", prepareStart);
+    const queueBlock = daemonSource.slice(prepareStart, queueEnd);
+    expect(queueBlock).toContain("confirmTaskLinksInText(text)");
+    expect(queueBlock).toContain("sendWechatMessageNow(senderId, preparedText, context)");
+    expect(queueBlock).not.toContain("sendWechatMessageNow(senderId, text, context)");
+  });
+
   test("adds one concise mobile link to task-scoped messages", () => {
     const url = "http://198.51.100.10/?task=0000000a&key=secret";
     expect(appendCodexMobileTaskLink("已收到，处理中。", url)).toBe(

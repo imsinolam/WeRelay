@@ -2760,9 +2760,10 @@ export const CODEX_MOBILE_JS = String.raw`
     }
   }
 
-  function adapterApiPath(path) {
+  function adapterApiPath(path, requestedAdapter) {
     var url = new URL(path, window.location.origin);
-    if (state.currentAdapter) url.searchParams.set("adapter", state.currentAdapter);
+    var adapter = requestedAdapter === undefined ? state.currentAdapter : requestedAdapter;
+    if (adapter) url.searchParams.set("adapter", adapter);
     return url.pathname + url.search;
   }
 
@@ -5300,6 +5301,34 @@ export const CODEX_MOBILE_JS = String.raw`
     return "已完成 · " + duration;
   }
 
+  function currentPendingDelivery() {
+    return state.pendingMessages.find(function (pending) {
+      return pending.threadId === state.currentThreadId &&
+        (!pending.adapter || pending.adapter === state.currentAdapter) &&
+        pending.displayInTranscript !== false &&
+        (pending.status === "contacting_computer" ||
+          pending.status === "forwarding_to_agent" ||
+          pending.status === "sending");
+    }) || null;
+  }
+
+  function deliveryHeaderLabel(pending) {
+    var duration = formatRunDuration(Date.now() - Number(pending.createdAtMs || Date.now()));
+    if (pending.status === "forwarding_to_agent") {
+      return "电脑正在组织发送给 " + adapterName(pending.adapter || state.currentAdapter) + " · " + duration;
+    }
+    return "正在尝试发送给电脑 · " + duration;
+  }
+
+  function renderDeliveryHeader(pending) {
+    var row = document.createElement("div");
+    row.className = "run-header sending";
+    row.id = "delivery-header";
+    row.innerHTML = '<span class="run-header-dot"></span><span class="run-header-label">' +
+      escapeHtml(deliveryHeaderLabel(pending)) + "</span>";
+    return row;
+  }
+
   function renderRunHeader(summary) {
     var row = document.createElement("div");
     var stopping = summary.status === "running" &&
@@ -5616,6 +5645,12 @@ export const CODEX_MOBILE_JS = String.raw`
     if (state.switchingAdapter) {
       updateHeader();
     }
+    var delivery = currentPendingDelivery();
+    var deliveryHeader = document.getElementById("delivery-header");
+    if (deliveryHeader && delivery) {
+      var deliveryLabel = deliveryHeader.querySelector(".run-header-label");
+      if (deliveryLabel) deliveryLabel.textContent = deliveryHeaderLabel(delivery);
+    }
     var header = document.getElementById("run-header");
     var messages = state.serverMessages.concat(visiblePendingMessages().map(function (pending) {
       return Object.assign({ role: "user", pending: true }, pending);
@@ -5924,8 +5959,12 @@ export const CODEX_MOBILE_JS = String.raw`
           ? "任务创建失败，点击重试后自动发送"
           : message.status === "waiting_to_send"
             ? "任务已创建，正在发送…"
-            : message.status === "sending"
-        ? "正在发送到 " + currentAdapterName() + "…"
+            : message.status === "contacting_computer"
+              ? "正在尝试发送给电脑…"
+              : message.status === "forwarding_to_agent"
+                ? "电脑正在组织发送给 " + adapterName(message.adapter || state.currentAdapter) + "…"
+                : message.status === "sending"
+                  ? "正在尝试发送给电脑…"
         : message.status === "failed"
           ? "发送失败"
           : message.status === "unconfirmed"
@@ -5933,8 +5972,9 @@ export const CODEX_MOBILE_JS = String.raw`
             : message.status === "queued"
               ? "已排队 · 等待当前任务完成"
               : "已发送 · 正在处理";
-      var retry = message.status === "failed" || message.status === "waiting_task_retry"
-        ? '<button class="message-retry" type="button" data-retry="' + escapeHtml(message.clientId) + '">重试</button>'
+      var retry = message.status === "failed" || message.status === "waiting_task_retry" || message.status === "unconfirmed"
+        ? '<button class="message-retry" type="button" data-retry="' + escapeHtml(message.clientId) + '">' +
+          (message.status === "unconfirmed" ? "检查状态" : "重试") + "</button>"
         : "";
       deliveryHtml = '<div class="message-delivery ' + (
         message.status === "failed" || message.status === "waiting_task_retry" ? "failed" : ""
@@ -6024,6 +6064,7 @@ export const CODEX_MOBILE_JS = String.raw`
       Date.now()
     );
     var headerIndex = runHeaderInsertIndex(messages, summary);
+    var pendingDelivery = currentPendingDelivery();
     if (!messages.length && !summary && !state.pendingApproval && state.approvalResults.length === 0 && state.progressItems.length === 0) {
       state.messageNodes = Object.create(null);
       var emptyTask = currentTask();
@@ -6112,6 +6153,7 @@ export const CODEX_MOBILE_JS = String.raw`
       var trailingFailure = renderRunFailure(summary);
       if (trailingFailure) nodes.push(trailingFailure);
     }
+    if (pendingDelivery) nodes.push(renderDeliveryHeader(pendingDelivery));
     var responsePending = renderResponsePendingIndicator(summary);
     if (responsePending) nodes.push(responsePending);
     syncChildOrder(messagesEl, nodes);
@@ -6610,7 +6652,6 @@ export const CODEX_MOBILE_JS = String.raw`
       var pending = waiting[index];
       pending.waitingForTaskCreation = false;
       pending.status = "waiting_to_send";
-      beginOptimisticRunIfNeeded(pending);
       await submitPendingMessage(pending);
     }
   }
@@ -6997,10 +7038,11 @@ export const CODEX_MOBILE_JS = String.raw`
       clientId: "mobile-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8),
       createdAtMs: Date.now(),
       threadId: state.currentThreadId,
+      adapter: state.currentAdapter,
       text: text,
       images: images.slice(),
       imageCount: images.length,
-      status: "sending",
+      status: "contacting_computer",
       turnId: "",
       queued: false,
       optimisticRun: false,
@@ -7014,11 +7056,12 @@ export const CODEX_MOBILE_JS = String.raw`
 
   async function submitPendingMessage(pending) {
     var requestedThreadId = pending.threadId;
+    var requestedAdapter = pending.adapter || state.currentAdapter;
     state.sending = true;
-    pending.status = "sending";
+    pending.status = "contacting_computer";
     renderMessages(true);
     updateHeader();
-    showToast("正在发送…");
+    showToast("正在尝试发送给电脑…");
     try {
       var images = (pending.images || []).map(function (image) {
         return {
@@ -7027,11 +7070,36 @@ export const CODEX_MOBILE_JS = String.raw`
           dataBase64: image.dataBase64
         };
       });
-      var result = await api(adapterApiPath("/api/tasks/" + encodeURIComponent(requestedThreadId) + "/messages"), {
+      var result = await api(adapterApiPath(
+        "/api/tasks/" + encodeURIComponent(requestedThreadId) + "/messages",
+        requestedAdapter
+      ), {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ text: pending.text, images: images })
+        body: JSON.stringify({
+          clientId: pending.clientId,
+          text: pending.text,
+          images: images
+        })
       });
+      var deliveryChecks = 0;
+      while (result && result.status === "forwarding") {
+        pending.status = "forwarding_to_agent";
+        renderMessages(true);
+        deliveryChecks += 1;
+        if (deliveryChecks >= 100) {
+          throw new Error(currentAdapterName() + " 暂未确认收到这条消息，请先检查任务状态。");
+        }
+        await new Promise(function (resolve) { setTimeout(resolve, 650); });
+        result = await api(adapterApiPath(
+          "/api/tasks/" + encodeURIComponent(requestedThreadId) +
+          "/message-deliveries/" + encodeURIComponent(pending.clientId),
+          requestedAdapter
+        ));
+      }
+      if (result && result.status === "failed") {
+        throw new Error(result.error || "消息发送失败。");
+      }
       if (result.duplicate) {
         state.pendingMessages = state.pendingMessages.filter(function (message) {
           return message.clientId !== pending.clientId;
@@ -7074,6 +7142,7 @@ export const CODEX_MOBILE_JS = String.raw`
         showToast("已加入待发送");
         await loadMessages(false);
       } else {
+        beginOptimisticRunIfNeeded(pending);
         pending.displayInTranscript = true;
         renderQueuedMessages(state.queuedMessages);
         if (pending.optimisticRun) {
@@ -7090,7 +7159,7 @@ export const CODEX_MOBILE_JS = String.raw`
             receivedAtMs: Date.now()
           };
         }
-        showToast("已发送，" + currentAdapterName() + " 正在处理");
+        showToast("已交给 " + currentAdapterName() + "，正在处理");
       }
       renderMessages(true);
       setTimeout(function () {
@@ -7161,7 +7230,6 @@ export const CODEX_MOBILE_JS = String.raw`
     pending.baselineUserKeys = state.serverMessages.filter(function (message) {
       return message.role === "user";
     }).map(messagePageKey);
-    beginOptimisticRunIfNeeded(pending);
     renderMessages(true);
     submitPendingMessage(pending);
   }
@@ -7199,8 +7267,6 @@ export const CODEX_MOBILE_JS = String.raw`
       pending.status = task.localCreationState === "failed"
         ? "waiting_task_retry"
         : "creating_task";
-    } else if (!likelyQueued) {
-      beginOptimisticRunIfNeeded(pending);
     }
     state.composerRevision += 1;
     state.pendingMessages.push(pending);

@@ -259,6 +259,150 @@ describe("mobile task short links", () => {
   });
 });
 
+describe("mobile message delivery stages", () => {
+  test("acknowledges computer receipt before the Agent confirms the turn", async () => {
+    const authStore = createAuthStore("delivery stages password");
+    const sessionCookie = `codex_mobile_session=${authStore.createSessionToken()}`;
+    let finishSend: ((value: { queued: false; turnId: string }) => void) | undefined;
+    let failSend: ((error: Error) => void) | undefined;
+    let sendCalls = 0;
+    const server = await startCodexMobileServer({
+      host: "127.0.0.1",
+      port: 0,
+      lanAddress: "127.0.0.1",
+      accessToken: "mobile-secret",
+      authStore,
+      listTasks: async () => [],
+      readMessages: async (threadId) => ({
+        threadId,
+        messages: [],
+        queuedMessages: [],
+      }),
+      sendMessage: async () => {
+        sendCalls += 1;
+        return await new Promise((resolve, reject) => {
+          finishSend = resolve;
+          failSend = reject;
+        });
+      },
+    });
+
+    try {
+      const root = `http://127.0.0.1:${server.port}`;
+      const headers = {
+        cookie: sessionCookie,
+        "content-type": "application/json",
+      };
+      const response = await fetch(`${root}/api/tasks/thread-1/messages`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          clientId: "mobile-delivery-1",
+          text: "继续处理",
+          images: [],
+        }),
+      });
+      expect(response.status).toBe(202);
+      expect(await response.json()).toEqual({
+        ok: true,
+        clientId: "mobile-delivery-1",
+        status: "forwarding",
+      });
+      expect(sendCalls).toBe(1);
+
+      const forwarding = await fetch(
+        `${root}/api/tasks/thread-1/message-deliveries/mobile-delivery-1`,
+        { headers: { cookie: sessionCookie } },
+      );
+      expect(await forwarding.json()).toEqual({
+        clientId: "mobile-delivery-1",
+        status: "forwarding",
+      });
+
+      finishSend?.({ queued: false, turnId: "turn-1" });
+      await Bun.sleep(0);
+      const delivered = await fetch(
+        `${root}/api/tasks/thread-1/message-deliveries/mobile-delivery-1`,
+        { headers: { cookie: sessionCookie } },
+      );
+      expect(await delivered.json()).toEqual({
+        clientId: "mobile-delivery-1",
+        status: "sent",
+        queued: false,
+        turnId: "turn-1",
+      });
+
+      const duplicatePost = await fetch(`${root}/api/tasks/thread-1/messages`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          clientId: "mobile-delivery-1",
+          text: "继续处理",
+          images: [],
+        }),
+      });
+      expect(duplicatePost.status).toBe(202);
+      expect(sendCalls).toBe(1);
+
+      finishSend = undefined;
+      const failedPost = await fetch(`${root}/api/tasks/thread-1/messages`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          clientId: "mobile-delivery-2",
+          text: "检查失败状态",
+          images: [],
+        }),
+      });
+      expect(failedPost.status).toBe(202);
+      expect(sendCalls).toBe(2);
+      expect(failSend).toBeDefined();
+      failSend?.(new Error("Codex 暂未确认收到这条消息。"));
+      await Bun.sleep(0);
+      const failedDelivery = await fetch(
+        `${root}/api/tasks/thread-1/message-deliveries/mobile-delivery-2`,
+        { headers: { cookie: sessionCookie } },
+      );
+      expect(await failedDelivery.json()).toEqual({
+        clientId: "mobile-delivery-2",
+        status: "failed",
+        error: "Codex 暂未确认收到这条消息。",
+      });
+    } finally {
+      await server.close();
+    }
+  });
+
+  test("shows transport and Agent forwarding as separate mobile states", () => {
+    const mobileWebSource = fs.readFileSync(
+      path.join(process.cwd(), "src/daemon/codex-mobile-web.ts"),
+      "utf8",
+    );
+    expect(mobileWebSource).toContain("正在尝试发送给电脑");
+    expect(mobileWebSource).toContain("电脑正在组织发送给");
+    expect(CODEX_MOBILE_JS).toContain("message-deliveries");
+    expect(CODEX_MOBILE_JS).toContain("clientId: pending.clientId");
+    expect(CODEX_MOBILE_JS).toContain("adapter: state.currentAdapter");
+    expect(CODEX_MOBILE_JS).toContain("requestedAdapter");
+    const submitStart = CODEX_MOBILE_JS.indexOf("  async function submitPendingMessage");
+    const submitEnd = CODEX_MOBILE_JS.indexOf("\n  function beginOptimisticRunIfNeeded", submitStart);
+    const submitBlock = CODEX_MOBILE_JS.slice(submitStart, submitEnd);
+    const duplicateBranch = submitBlock.indexOf("if (result.duplicate)");
+    const optimisticStart = submitBlock.indexOf("beginOptimisticRunIfNeeded(pending)");
+    expect(duplicateBranch).toBeGreaterThan(0);
+    expect(optimisticStart).toBeGreaterThan(duplicateBranch);
+    const creationSubmitStart = CODEX_MOBILE_JS.indexOf(
+      "  async function submitMessagesWaitingForTaskCreation",
+    );
+    const creationSubmitEnd = CODEX_MOBILE_JS.indexOf(
+      "\n  async function createTask",
+      creationSubmitStart,
+    );
+    expect(CODEX_MOBILE_JS.slice(creationSubmitStart, creationSubmitEnd))
+      .not.toContain("beginOptimisticRunIfNeeded(pending)");
+  });
+});
+
 describe("mobile document title", () => {
   test("tracks task selection, async task loading, rename, and stable fallback", () => {
     const state = {

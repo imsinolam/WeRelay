@@ -7804,14 +7804,28 @@ class WeRelayDaemon {
     }
   }
 
+  private async prepareWechatMessageTaskLinks(text: string): Promise<string> {
+    if (!this.deskRelayRelayTaskLinks || !text.includes("/t/")) {
+      return text;
+    }
+    const resolved = await this.deskRelayRelayTaskLinks.confirmTaskLinksInText(text);
+    if (resolved.unresolvedCount > 0) {
+      appendDaemonLog(
+        `wechat_task_short_link_unavailable: count=${resolved.unresolvedCount}`,
+      );
+    }
+    return resolved.text;
+  }
+
   private queueWechatMessage(
     senderId: string,
     text: string,
     context: WechatSendContext = "message",
   ): Promise<boolean> {
-    return this.queueWechatTextAction(
-      () => this.sendWechatMessageNow(senderId, text, context),
-    );
+    return this.queueWechatTextAction(async () => {
+      const preparedText = await this.prepareWechatMessageTaskLinks(text);
+      return await this.sendWechatMessageNow(senderId, preparedText, context);
+    });
   }
 
   private queueWechatMessages(
@@ -7822,7 +7836,8 @@ class WeRelayDaemon {
     return this.queueWechatTextAction(async () => {
       let sentCount = 0;
       for (const text of texts) {
-        if (!await this.sendWechatMessageNow(senderId, text, context)) {
+        const preparedText = await this.prepareWechatMessageTaskLinks(text);
+        if (!await this.sendWechatMessageNow(senderId, preparedText, context)) {
           break;
         }
         sentCount += 1;
