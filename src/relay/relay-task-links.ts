@@ -222,8 +222,10 @@ export class WeRelayRelayTaskLinkClient {
       await Promise.race([
         registration?.confirmed ?? Promise.resolve(),
         new Promise<void>((_, reject) => {
+          // This deadline is part of the awaited operation, so it must stay
+          // referenced. Bun on Windows may never fire an unref'ed timer when
+          // the pending promise is otherwise the only remaining work.
           timer = setTimeout(() => reject(new Error("短链接暂时无法生成，请稍后重试。")), timeoutMs);
-          timer.unref?.();
         }),
       ]).finally(() => {
         if (timer) clearTimeout(timer);

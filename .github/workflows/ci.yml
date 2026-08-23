@@ -12,7 +12,7 @@
 #   -> select the `Quality (ubuntu-latest)`, `Quality (macos-latest)`,
 #      `Quality (windows-latest)`, and `Secret scan` checks
 # 让该门禁真正阻止不合格 PR 合并,需在 main 分支保护规则里勾选
-# "Require status checks to pass before merging" 并选中上面的三个 Quality 检查。
+# "Require status checks to pass before merging" 并选中上面的四项检查。
 
 name: CI
 

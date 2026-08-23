@@ -30,11 +30,12 @@ describe("public safety script", () => {
     const privateHost = ["relay", "sinolin", "com"].join(".");
     const directory = createSafetyFixture(`Service: https://${privateHost}`);
     const result = spawnSync(
-      process.execPath,
+      "node",
       ["scripts/check-public-safety.mjs"],
       { cwd: directory, encoding: "utf8" },
     );
 
+    expect(result.error).toBeUndefined();
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(
       "personal production domain must use a reserved example domain",
@@ -44,11 +45,12 @@ describe("public safety script", () => {
   test("allows reserved example domains", () => {
     const directory = createSafetyFixture("Service: https://relay.example.com");
     const result = spawnSync(
-      process.execPath,
+      "node",
       ["scripts/check-public-safety.mjs"],
       { cwd: directory, encoding: "utf8" },
     );
 
+    expect(result.error).toBeUndefined();
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("Public safety check passed");
   });
