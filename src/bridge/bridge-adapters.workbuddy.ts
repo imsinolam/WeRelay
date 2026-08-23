@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
@@ -22,6 +23,8 @@ import { selectAcpPermissionOption } from "./bridge-adapters.acp.ts";
 import { nowIso, truncatePreview } from "./bridge-utils.ts";
 import {
   WorkBuddyDesktopRpcClient,
+  isWorkBuddyMainProcessRunning,
+  resolveWorkBuddyDesktopSocketPath,
   type WorkBuddyDesktopRpcClientOptions,
   type WorkBuddyDesktopRpcClientLike,
 } from "./workbuddy-desktop-rpc.ts";
@@ -98,6 +101,11 @@ type WorkBuddyAcpCredentials = {
 type PendingWorkBuddyRequest = {
   resolve(value: unknown): void;
   reject(reason?: unknown): void;
+};
+
+export type WorkBuddySidecarSession = {
+  sessionId: string;
+  acpEndpoint: string;
 };
 
 const WORKBUDDY_HOST_SESSION_PREFIX = "__workbuddy_cli_host__";
@@ -207,14 +215,7 @@ async function callWorkBuddySidecar(
   });
 }
 
-export async function resolveWorkBuddyDesktopAcpEndpoint(): Promise<string> {
-  const override = process.env.WORKBUDDY_ACP_ENDPOINT?.trim();
-  if (override) {
-    if (!isLoopbackAcpEndpoint(override)) {
-      throw new Error("WORKBUDDY_ACP_ENDPOINT 必须指向本机 /api/v1/acp。");
-    }
-    return override;
-  }
+export async function listWorkBuddySidecarSessions(): Promise<WorkBuddySidecarSession[]> {
   const value = await callWorkBuddySidecar(
     resolveWorkBuddySidecarSocketPath(),
     "session.list",
@@ -222,20 +223,249 @@ export async function resolveWorkBuddyDesktopAcpEndpoint(): Promise<string> {
   if (!Array.isArray(value)) {
     throw new Error("WorkBuddy sidecar 未返回活动会话。");
   }
-  for (const entry of value) {
-    if (!isRecord(entry)) continue;
+  return value.flatMap((entry): WorkBuddySidecarSession[] => {
+    if (!isRecord(entry)) return [];
     const sessionId = readString(entry.sessionId);
-    const endpoint = readString(entry.acpEndpoint);
-    if (
-      sessionId?.startsWith(WORKBUDDY_HOST_SESSION_PREFIX) &&
-      endpoint &&
-      isLoopbackAcpEndpoint(endpoint)
-    ) {
-      return endpoint;
-    }
-  }
-  throw new Error("WorkBuddy Desktop 的 ACP 服务尚未就绪，请先打开 WorkBuddy。");
+    const acpEndpoint = readString(entry.acpEndpoint);
+    return sessionId && acpEndpoint && isLoopbackAcpEndpoint(acpEndpoint)
+      ? [{ sessionId, acpEndpoint }]
+      : [];
+  });
 }
+
+export async function resolveWorkBuddyDesktopAcpEndpoint(
+  sessionId?: string,
+): Promise<string> {
+  const override = process.env.WORKBUDDY_ACP_ENDPOINT?.trim();
+  if (override) {
+    if (!isLoopbackAcpEndpoint(override)) {
+      throw new Error("WORKBUDDY_ACP_ENDPOINT 必须指向本机 /api/v1/acp。");
+    }
+    return override;
+  }
+  const sessions = await listWorkBuddySidecarSessions();
+  const target = sessionId
+    ? sessions.find((entry) => entry.sessionId === sessionId)
+    : sessions.find((entry) => entry.sessionId.startsWith(WORKBUDDY_HOST_SESSION_PREFIX));
+  if (target) return target.acpEndpoint;
+  throw new Error(sessionId
+    ? "指定的 WorkBuddy 桌面任务尚未就绪。"
+    : "WorkBuddy Desktop 的 ACP 服务尚未就绪，请先打开 WorkBuddy。");
+}
+
+export function buildWorkBuddyDesktopTaskUrl(sessionId: string): string {
+  const normalized = sessionId.trim();
+  if (!normalized) throw new Error("WorkBuddy 任务编号无效。");
+  return `workbuddy://chat/${encodeURIComponent(normalized)}`;
+}
+
+export async function openWorkBuddyDesktopTask(sessionId: string): Promise<void> {
+  if (process.platform !== "darwin") {
+    throw new Error("WorkBuddy 桌面任务唤起目前仅支持 macOS。");
+  }
+  const url = buildWorkBuddyDesktopTaskUrl(sessionId);
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn("/usr/bin/open", ["-g", url], {
+      detached: true,
+      stdio: "ignore",
+    });
+    child.once("error", reject);
+    child.once("exit", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error("WorkBuddy 任务唤起失败。"));
+    });
+  });
+}
+
+
+const WORKBUDDY_WINDOW_BOUNDS_SCRIPT = String.raw`tell application "System Events"
+  if not (exists process "WorkBuddy") then error "WorkBuddy 尚未打开"
+  tell process "WorkBuddy"
+    set frontmost to true
+    repeat with candidateWindow in windows
+      try
+        set candidatePosition to position of candidateWindow
+        set candidateSize to size of candidateWindow
+        if (item 1 of candidateSize) > 600 and (item 2 of candidateSize) > 400 then
+          return ((item 1 of candidatePosition) as text) & "," & ((item 2 of candidatePosition) as text) & "," & ((item 1 of candidateSize) as text) & "," & ((item 2 of candidateSize) as text)
+        end if
+      end try
+    end repeat
+  end tell
+end tell
+error "找不到 WorkBuddy 主窗口"`;
+
+const WORKBUDDY_NATIVE_CLICK_SCRIPT = String.raw`ObjC.import("ApplicationServices");
+function run(argv) {
+  const x = Number(argv[0]);
+  const y = Number(argv[1]);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error("点击坐标无效");
+  const point = { x, y };
+  const down = $.CGEventCreateMouseEvent(null, $.kCGEventLeftMouseDown, point, $.kCGMouseButtonLeft);
+  const up = $.CGEventCreateMouseEvent(null, $.kCGEventLeftMouseUp, point, $.kCGMouseButtonLeft);
+  $.CGEventPost($.kCGHIDEventTap, down);
+  delay(0.05);
+  $.CGEventPost($.kCGHIDEventTap, up);
+}`;
+
+export function buildWorkBuddyDesktopPromptScript(): string {
+  return String.raw`on run argv
+  if (count of argv) is not 3 then error "消息参数无效"
+  set messageText to item 1 of argv
+  set clipboardSentinel to item 2 of argv
+  set clipboardProbe to item 3 of argv
+  set previousClipboard to the clipboard as record
+  set insertedProbe to false
+  set insertedMessage to false
+  try
+    set the clipboard to clipboardSentinel
+    tell application "System Events"
+      if not (exists process "WorkBuddy") then error "WorkBuddy 尚未打开"
+      tell process "WorkBuddy"
+        keystroke "a" using command down
+        keystroke "c" using command down
+      end tell
+    end tell
+    delay 0.15
+    set composerText to my readWorkBuddyClipboardText(clipboardSentinel)
+    if composerText is not clipboardSentinel and composerText is not "" then error "WorkBuddy 目标任务输入框已有未发送内容"
+
+    set the clipboard to clipboardProbe
+    tell application "System Events"
+      tell process "WorkBuddy"
+        keystroke "v" using command down
+      end tell
+    end tell
+    set insertedProbe to true
+    delay 0.15
+    set the clipboard to clipboardSentinel
+    tell application "System Events"
+      tell process "WorkBuddy"
+        keystroke "a" using command down
+        keystroke "c" using command down
+      end tell
+    end tell
+    delay 0.15
+    set composerProbeText to my readWorkBuddyClipboardText("")
+    if composerProbeText is not clipboardProbe then error "无法定位 WorkBuddy 消息输入框"
+    tell application "System Events"
+      tell process "WorkBuddy"
+        key code 51
+      end tell
+    end tell
+    set insertedProbe to false
+
+    set the clipboard to messageText
+    tell application "System Events"
+      tell process "WorkBuddy"
+        keystroke "v" using command down
+      end tell
+    end tell
+    set insertedMessage to true
+    delay 0.15
+    set the clipboard to clipboardSentinel
+    tell application "System Events"
+      tell process "WorkBuddy"
+        keystroke "a" using command down
+        keystroke "c" using command down
+      end tell
+    end tell
+    delay 0.15
+    set pastedMessageText to my readWorkBuddyClipboardText("")
+    if pastedMessageText is not messageText then error "无法确认 WorkBuddy 消息已正确填入"
+    tell application "System Events"
+      tell process "WorkBuddy"
+        key code 36
+      end tell
+    end tell
+    set insertedMessage to false
+  on error errorMessage number errorNumber
+    if insertedProbe or insertedMessage then
+      try
+        tell application "System Events"
+          tell process "WorkBuddy"
+            keystroke "z" using command down
+          end tell
+        end tell
+      end try
+    end if
+    set the clipboard to previousClipboard
+    error errorMessage number errorNumber
+  end try
+  set the clipboard to previousClipboard
+end run
+
+on readWorkBuddyClipboardText(fallbackText)
+  try
+    return the clipboard as text
+  on error
+    try
+      return do shell script "/usr/bin/pbpaste -Prefer html | /usr/bin/textutil -convert txt -stdin -stdout"
+    on error
+      return fallbackText
+    end try
+  end try
+end readWorkBuddyClipboardText`;
+}
+
+const WORKBUDDY_DESKTOP_PROMPT_SCRIPT = buildWorkBuddyDesktopPromptScript();
+
+async function runOsaScript(
+  language: "AppleScript" | "JavaScript",
+  script: string,
+  args: string[] = [],
+): Promise<string> {
+  return await new Promise<string>((resolve, reject) => {
+    const child = spawn(
+      "/usr/bin/osascript",
+      ["-l", language, "-e", script, "--", ...args],
+      { stdio: ["ignore", "pipe", "pipe"] },
+    );
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr?.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    child.once("error", reject);
+    child.once("exit", (code) => {
+      if (code === 0) {
+        resolve(stdout.trim());
+        return;
+      }
+      const detail = stderr.trim().replace(/^.*?execution error:\s*/i, "").replace(/\s*\(-?\d+\)\s*$/, "");
+      reject(new Error(detail || "WorkBuddy 桌面操作失败。"));
+    });
+  });
+}
+
+export async function sendWorkBuddyDesktopPrompt(text: string): Promise<void> {
+  const normalized = text.trim();
+  if (!normalized) throw new Error("消息不能为空。");
+  if (process.platform !== "darwin") {
+    throw new Error("WorkBuddy 桌面消息写入目前仅支持 macOS。");
+  }
+  const boundsText = await runOsaScript("AppleScript", WORKBUDDY_WINDOW_BOUNDS_SCRIPT);
+  const bounds = boundsText.split(",").map((value) => Number(value.trim()));
+  if (bounds.length !== 4 || bounds.some((value) => !Number.isFinite(value))) {
+    throw new Error("无法读取 WorkBuddy 主窗口位置。");
+  }
+  const [x, y, width, height] = bounds as [number, number, number, number];
+  const clickX = Math.round(x + width * 0.326);
+  const clickY = Math.round(y + height - 135);
+  await runOsaScript("JavaScript", WORKBUDDY_NATIVE_CLICK_SCRIPT, [
+    String(clickX),
+    String(clickY),
+  ]);
+  const sentinel = `werelay-composer-${crypto.randomUUID()}`;
+  const probe = `werelay-composer-probe-${crypto.randomUUID()}`;
+  await runOsaScript("AppleScript", WORKBUDDY_DESKTOP_PROMPT_SCRIPT, [normalized, sentinel, probe]);
+}
+
 
 function workBuddyConfigDir(): string {
   return process.env.WORKBUDDY_CONFIG_DIR?.trim() ??
@@ -650,8 +880,8 @@ class WorkBuddyAcpHttpClient implements WorkBuddyAcpClientLike {
     const response = await fetch(this.endpoint, {
       method: "GET",
       headers: {
+        ...this.headers(this.requireCredentials()),
         Accept: "text/event-stream",
-        "acp-connection-id": this.requireCredentials().connectionId,
       },
       signal,
     });
@@ -736,12 +966,421 @@ class WorkBuddyAcpHttpClient implements WorkBuddyAcpClientLike {
   }
 }
 
-function defaultDependencies(): WorkBuddyAdapterDependencies {
+
+export type WorkBuddyHybridRpcClientDependencies = {
+  desktopHookAvailable(): boolean | Promise<boolean>;
+  desktopApplicationRunning(): boolean | Promise<boolean>;
+  createDesktopClient(options: WorkBuddyDesktopRpcClientOptions): WorkBuddyDesktopRpcClientLike;
+  listSidecarSessions(): Promise<WorkBuddySidecarSession[]>;
+  openDesktopSession(sessionId: string): Promise<void>;
+  sendDesktopPrompt(text: string): Promise<void>;
+  readSession(sessionId: string): Promise<WorkBuddySessionRow | null>;
+  readRunSummary(cwd: string, sessionId: string): Promise<BridgeSessionRunSummary | null>;
+  createAcpClient(
+    endpoint: string,
+    callbacks: WorkBuddyAcpCallbacks,
+  ): WorkBuddyAcpClientLike;
+  delay(ms: number): Promise<void>;
+  sessionReadyTimeoutMs: number;
+  sessionReadyPollIntervalMs: number;
+  promptAcceptanceTimeoutMs: number;
+  promptCompletionTimeoutMs: number;
+};
+
+async function probeWorkBuddyDesktopHook(
+  socketPath = resolveWorkBuddyDesktopSocketPath(),
+  timeoutMs = 300,
+): Promise<boolean> {
+  return await new Promise<boolean>((resolve) => {
+    let settled = false;
+    const socket = net.createConnection(socketPath);
+    const finish = (available: boolean) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(available);
+    };
+    socket.once("connect", () => finish(true));
+    socket.once("error", () => finish(false));
+    socket.setTimeout(timeoutMs, () => finish(false));
+  });
+}
+
+function defaultHybridDependencies(): WorkBuddyHybridRpcClientDependencies {
   return {
+    desktopHookAvailable: probeWorkBuddyDesktopHook,
+    desktopApplicationRunning: isWorkBuddyMainProcessRunning,
     createDesktopClient: (options) => new WorkBuddyDesktopRpcClient({
       callbacks: options,
       allowDesktopApplicationLaunch: options.allowDesktopApplicationLaunch,
     }),
+    listSidecarSessions: listWorkBuddySidecarSessions,
+    openDesktopSession: openWorkBuddyDesktopTask,
+    sendDesktopPrompt: sendWorkBuddyDesktopPrompt,
+    readSession: readWorkBuddyDesktopSession,
+    readRunSummary: readWorkBuddyDesktopRunSummary,
+    createAcpClient: (endpoint, callbacks) => new WorkBuddyAcpHttpClient(endpoint, callbacks),
+    delay: async (ms) => await new Promise((resolve) => setTimeout(resolve, ms)),
+    sessionReadyTimeoutMs: 15_000,
+    sessionReadyPollIntervalMs: 250,
+    promptAcceptanceTimeoutMs: 15_000,
+    promptCompletionTimeoutMs: 12 * 60 * 60 * 1_000,
+  };
+}
+
+export class WorkBuddyHybridRpcClient implements WorkBuddyDesktopRpcClientLike {
+  private readonly options: WorkBuddyDesktopRpcClientOptions;
+  private readonly dependencies: WorkBuddyHybridRpcClientDependencies;
+  private mode: "disconnected" | "desktop" | "sidecar" = "disconnected";
+  private desktopClient: WorkBuddyDesktopRpcClientLike | null = null;
+  private acpClient: WorkBuddyAcpClientLike | null = null;
+  private activeSessionId: string | null = null;
+  private activeEndpoint: string | null = null;
+  private pendingDesktopSession: { sessionId: string; cwd: string } | null = null;
+  private readonly permissionRequestIds = new Map<string, WorkBuddyRpcId>();
+
+  constructor(
+    options: WorkBuddyDesktopRpcClientOptions,
+    dependencies: Partial<WorkBuddyHybridRpcClientDependencies> = {},
+  ) {
+    this.options = options;
+    this.dependencies = { ...defaultHybridDependencies(), ...dependencies };
+  }
+
+  async connect(): Promise<void> {
+    if (this.mode !== "disconnected") return;
+
+    if (await this.dependencies.desktopHookAvailable()) {
+      const client = this.dependencies.createDesktopClient({
+        ...this.options,
+        allowDesktopApplicationLaunch: false,
+      });
+      try {
+        await client.connect();
+        this.desktopClient = client;
+        this.mode = "desktop";
+        return;
+      } catch {
+        await client.close().catch(() => undefined);
+      }
+    }
+
+    try {
+      await this.dependencies.listSidecarSessions();
+      this.mode = "sidecar";
+      return;
+    } catch (sidecarError) {
+      if (await this.dependencies.desktopApplicationRunning()) {
+        throw new Error(
+          "WorkBuddy 已打开，但桌面任务接口暂未就绪；WeRelay 不会自动重启应用。请稍后重试，或在 WorkBuddy 中重新打开目标任务。",
+          { cause: sidecarError },
+        );
+      }
+      if (this.options.allowDesktopApplicationLaunch !== true) {
+        throw new Error(
+          "WorkBuddy 尚未连接。请从网页或 ClawBot 明确选择 WorkBuddy 后重试。",
+          { cause: sidecarError },
+        );
+      }
+    }
+
+    const client = this.dependencies.createDesktopClient({
+      ...this.options,
+      allowDesktopApplicationLaunch: true,
+    });
+    try {
+      await client.connect();
+      this.desktopClient = client;
+      this.mode = "desktop";
+    } catch (error) {
+      await client.close().catch(() => undefined);
+      throw error;
+    }
+  }
+
+  async invoke(channel: string, ...args: unknown[]): Promise<unknown> {
+    if (this.mode === "desktop") {
+      if (!this.desktopClient) throw new Error("WorkBuddy Desktop 尚未连接。");
+      return await this.desktopClient.invoke(channel, ...args);
+    }
+    if (this.mode !== "sidecar") throw new Error("WorkBuddy Desktop 尚未连接。");
+
+    switch (channel) {
+      case "session:load":
+        return await this.loadSidecarSession(args);
+      case "session:sendMessage":
+        return await this.sendSidecarMessage(args);
+      case "session:cancel":
+        await this.notifySidecarSession("session/cancel", args);
+        return {};
+      case "session:resolvePermission":
+        await this.resolveSidecarPermission(args, false);
+        return {};
+      case "session:rejectPermission":
+        await this.resolveSidecarPermission(args, true);
+        return {};
+      case "session:create":
+        throw new Error(
+          "当前可以继续 WorkBuddy 桌面已有任务；新建任务请先在 WorkBuddy 桌面端创建。",
+        );
+      default:
+        throw new Error(`WorkBuddy 桌面任务接口暂不支持：${channel}`);
+    }
+  }
+
+  async close(): Promise<void> {
+    this.mode = "disconnected";
+    this.permissionRequestIds.clear();
+    const desktopClient = this.desktopClient;
+    const acpClient = this.acpClient;
+    this.desktopClient = null;
+    this.acpClient = null;
+    this.activeSessionId = null;
+    this.activeEndpoint = null;
+    this.pendingDesktopSession = null;
+    await Promise.all([
+      desktopClient?.close().catch(() => undefined),
+      acpClient?.close().catch(() => undefined),
+    ]);
+  }
+
+  private async loadSidecarSession(args: unknown[]): Promise<unknown> {
+    const sessionId = readString(args[0]);
+    const options = isRecord(args[1]) ? args[1] : {};
+    if (!sessionId) throw new Error("WorkBuddy 任务编号无效。");
+    const cwd = readString(options.cwd);
+    if (!cwd) throw new Error("WorkBuddy 任务目录无效。");
+
+    const existing = (await this.dependencies.listSidecarSessions())
+      .find((entry) => entry.sessionId === sessionId);
+    if (existing) {
+      await this.attachSidecarSession(sessionId, cwd, existing);
+      this.pendingDesktopSession = null;
+      return {};
+    }
+
+    await this.closeActiveAcpClient();
+    await this.dependencies.openDesktopSession(sessionId);
+    await this.dependencies.delay(800);
+    this.pendingDesktopSession = { sessionId, cwd };
+    return {};
+  }
+
+  private async attachSidecarSession(
+    sessionId: string,
+    cwd: string,
+    session: WorkBuddySidecarSession,
+  ): Promise<void> {
+    if (
+      this.acpClient &&
+      this.activeSessionId === sessionId &&
+      this.activeEndpoint === session.acpEndpoint
+    ) {
+      return;
+    }
+
+    await this.closeActiveAcpClient();
+    const client = this.dependencies.createAcpClient(
+      session.acpEndpoint,
+      {
+        onNotification: (method, params) => this.handleAcpNotification(sessionId, method, params),
+        onRequest: (id, method, params) => this.handleAcpRequest(sessionId, id, method, params),
+      },
+    );
+    this.acpClient = client;
+    this.activeSessionId = sessionId;
+    this.activeEndpoint = session.acpEndpoint;
+    try {
+      await client.connect();
+      await client.request("session/load", {
+        sessionId,
+        cwd,
+        mcpServers: [],
+      });
+    } catch (error) {
+      this.acpClient = null;
+      this.activeSessionId = null;
+      this.activeEndpoint = null;
+      await client.close().catch(() => undefined);
+      throw error;
+    }
+  }
+
+  private async closeActiveAcpClient(): Promise<void> {
+    const previous = this.acpClient;
+    this.acpClient = null;
+    this.activeSessionId = null;
+    this.activeEndpoint = null;
+    this.permissionRequestIds.clear();
+    await previous?.close().catch(() => undefined);
+  }
+
+  private async waitForSidecarSession(sessionId: string): Promise<WorkBuddySidecarSession> {
+    const deadline = Date.now() + this.dependencies.sessionReadyTimeoutMs;
+    while (Date.now() < deadline) {
+      const target = (await this.dependencies.listSidecarSessions().catch(() => []))
+        .find((entry) => entry.sessionId === sessionId);
+      if (target) return target;
+      await this.dependencies.delay(this.dependencies.sessionReadyPollIntervalMs);
+    }
+    throw new Error("WorkBuddy 已打开目标任务，但未确认收到消息；未切换到其他任务，也没有新建替代任务。");
+  }
+
+  private async sendSidecarMessage(args: unknown[]): Promise<unknown> {
+    const sessionId = readString(args[0]);
+    if (!sessionId) throw new Error("WorkBuddy 任务编号无效。");
+    const payload = isRecord(args[1]) ? args[1] : {};
+    const prompt = Array.isArray(payload.content) ? payload.content : [];
+    if (prompt.length === 0) throw new Error("消息不能为空。");
+
+    if (this.acpClient && this.activeSessionId === sessionId) {
+      return await this.acpClient.request("session/prompt", { sessionId, prompt });
+    }
+
+    const pending = this.pendingDesktopSession;
+    if (!pending || pending.sessionId !== sessionId) {
+      throw new Error("WorkBuddy 指定任务尚未连接。");
+    }
+    const textParts: string[] = [];
+    for (const item of prompt) {
+      if (!isRecord(item) || item.type !== "text" || typeof item.text !== "string") {
+        throw new Error("WorkBuddy 目标任务当前未运行；请先在桌面打开该任务后再发送图片或附件。");
+      }
+      if (item.text.trim()) textParts.push(item.text);
+    }
+    const text = textParts.join("\n").trim();
+    if (!text) throw new Error("消息不能为空。");
+    const before = await this.dependencies.readSession(sessionId);
+    if (!before) throw new Error("WorkBuddy 桌面端找不到该任务。");
+    const baselineActivityAt = before.lastActivityAt ?? before.updatedAt;
+    const baselineRunSummary = await this.dependencies.readRunSummary(pending.cwd, sessionId);
+    const baselineRunStartedAt = baselineRunSummary?.startedAtMs ?? baselineActivityAt;
+
+    await this.dependencies.openDesktopSession(sessionId);
+    await this.dependencies.delay(500);
+    await this.dependencies.sendDesktopPrompt(text);
+    const sidecarSession = await this.waitForSidecarSession(sessionId);
+    await this.attachSidecarSession(sessionId, pending.cwd, sidecarSession);
+    await this.waitForDesktopPromptCompletion(
+      sessionId,
+      pending.cwd,
+      baselineActivityAt,
+      baselineRunStartedAt,
+    );
+    this.pendingDesktopSession = null;
+    return {};
+  }
+
+  private async waitForDesktopPromptCompletion(
+    sessionId: string,
+    cwd: string,
+    baselineActivityAt: number,
+    baselineRunStartedAt: number,
+  ): Promise<void> {
+    const acceptedDeadline = Date.now() + this.dependencies.promptAcceptanceTimeoutMs;
+    const completionDeadline = Date.now() + this.dependencies.promptCompletionTimeoutMs;
+    let accepted = false;
+    let observedActiveTurn = false;
+    while (Date.now() < completionDeadline) {
+      const [row, runSummary] = await Promise.all([
+        this.dependencies.readSession(sessionId),
+        this.dependencies.readRunSummary(cwd, sessionId).catch(() => null),
+      ]);
+      if (!row) throw new Error("WorkBuddy 桌面端找不到该任务。");
+      const activityAt = row.lastActivityAt ?? row.updatedAt;
+      const runStartedAt = runSummary?.startedAtMs;
+      const hasNewTranscriptTurn = typeof runStartedAt === "number" &&
+        runStartedAt > baselineRunStartedAt;
+      if (activityAt > baselineActivityAt || hasNewTranscriptTurn) accepted = true;
+
+      const rowIsActive = runtimeStatusForWorkBuddyRow(row).type === "active";
+      const transcriptIsActive = hasNewTranscriptTurn && runSummary?.status === "running";
+      if (rowIsActive || transcriptIsActive) observedActiveTurn = true;
+
+      const transcriptIsTerminal = hasNewTranscriptTurn && (
+        runSummary?.status === "completed" ||
+        runSummary?.status === "failed" ||
+        runSummary?.status === "interrupted"
+      );
+      if (accepted && (transcriptIsTerminal || (observedActiveTurn && !rowIsActive))) return;
+      if (!accepted && Date.now() >= acceptedDeadline) {
+        throw new Error("WorkBuddy 已打开目标任务，但未确认收到消息；请检查桌面输入框后重试。");
+      }
+      await this.dependencies.delay(this.dependencies.sessionReadyPollIntervalMs);
+    }
+    throw new Error("WorkBuddy 任务运行时间过长，WeRelay 已停止等待完成通知。");
+  }
+
+  private async notifySidecarSession(method: string, args: unknown[]): Promise<void> {
+    const sessionId = this.requireActiveSession(args[0]);
+    await this.requireAcpClient().notify(method, { sessionId });
+  }
+
+  private async resolveSidecarPermission(args: unknown[], deny: boolean): Promise<void> {
+    const sessionId = this.requireActiveSession(args[0]);
+    const requestId = readString(args[1]);
+    if (!requestId) throw new Error("WorkBuddy 审批请求已失效。");
+    const rpcId = this.permissionRequestIds.get(requestId);
+    if (rpcId === undefined) throw new Error("WorkBuddy 审批请求已失效。");
+    const optionId = readString(args[2]);
+    if (!deny && !optionId) throw new Error("WorkBuddy 审批选项无效。");
+    await this.requireAcpClient().respond(rpcId, deny
+      ? { outcome: { outcome: "cancelled" } }
+      : { outcome: { outcome: "selected", optionId } });
+    this.permissionRequestIds.delete(requestId);
+    this.options.onEvent(`session:event:${sessionId}`, {
+      sessionId,
+      type: "permissionResolved",
+      requestId,
+    });
+  }
+
+  private handleAcpNotification(sessionId: string, method: string, params: unknown): void {
+    if (method !== "session/update" && method !== "_x.ai/session/update") return;
+    const payload = isRecord(params) ? params : {};
+    const update = isRecord(payload.update) ? payload.update : null;
+    if (!update) return;
+    this.options.onEvent(`session:event:${sessionId}`, { sessionId, update });
+  }
+
+  private handleAcpRequest(
+    sessionId: string,
+    id: WorkBuddyRpcId,
+    method: string,
+    params: unknown,
+  ): void {
+    if (method !== "session/request_permission" || !isRecord(params)) {
+      void this.requireAcpClient().respond(id, { outcome: { outcome: "cancelled" } })
+        .catch(() => undefined);
+      return;
+    }
+    const requestId = String(id);
+    this.permissionRequestIds.set(requestId, id);
+    this.options.onEvent(`session:event:${sessionId}`, {
+      sessionId,
+      type: "permissionRequest",
+      requestId,
+      request: params,
+    });
+  }
+
+  private requireActiveSession(value: unknown): string {
+    const sessionId = readString(value);
+    if (!sessionId || sessionId !== this.activeSessionId) {
+      throw new Error("WorkBuddy 指定任务尚未连接。");
+    }
+    return sessionId;
+  }
+
+  private requireAcpClient(): WorkBuddyAcpClientLike {
+    if (!this.acpClient) throw new Error("WorkBuddy 指定任务尚未连接。");
+    return this.acpClient;
+  }
+}
+
+function defaultDependencies(): WorkBuddyAdapterDependencies {
+  return {
+    createDesktopClient: (options) => new WorkBuddyHybridRpcClient(options),
     listSessions: listWorkBuddyDesktopSessions,
     readSession: readWorkBuddyDesktopSession,
     readMessages: readWorkBuddyDesktopMessages,
@@ -757,6 +1396,7 @@ function runtimeStatusForWorkBuddyRow(
   if (status === "error" || status === "failed") return { type: "systemError" };
   if (
     status === "running" ||
+    status === "working" ||
     status === "pending" ||
     status === "busy" ||
     status === "processing"

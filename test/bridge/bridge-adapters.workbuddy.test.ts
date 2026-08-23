@@ -4,6 +4,9 @@ import { describe, expect, test } from "bun:test";
 
 import {
   WorkBuddyDesktopAdapter,
+  WorkBuddyHybridRpcClient,
+  buildWorkBuddyDesktopPromptScript,
+  buildWorkBuddyDesktopTaskUrl,
   parseWorkBuddyTranscript,
   parseWorkBuddyTranscriptRunSummary,
   resolveWorkBuddySidecarSocketPath,
@@ -25,6 +28,17 @@ function deferred<T>() {
 }
 
 describe("WorkBuddy Desktop adapter", () => {
+  test("probes an empty WorkBuddy composer before deciding focus failed", () => {
+    const script = buildWorkBuddyDesktopPromptScript();
+
+    expect(script).toContain("set clipboardProbe to item 3 of argv");
+    expect(script).toContain("set the clipboard to clipboardProbe");
+    expect(script).toContain('if composerText is not clipboardSentinel and composerText is not "" then error');
+    expect(script).toContain("/usr/bin/pbpaste -Prefer html | /usr/bin/textutil -convert txt -stdin -stdout");
+    expect(script).toContain("if composerProbeText is not clipboardProbe then error");
+    expect(script).not.toContain("if composerText is clipboardSentinel then error");
+  });
+
   test("reproduces the WorkBuddy sidecar socket path", () => {
     const configDir = "/Users/test/.workbuddy";
     const uid = 501;
@@ -40,6 +54,251 @@ describe("WorkBuddy Desktop adapter", () => {
       configDir,
       platform: "win32",
     })).toBe(`\\\\.\\pipe\\workbuddy-${instanceHash}-sidecar-control`);
+  });
+
+  test("opens and attaches to the exact existing WorkBuddy task without restarting the app", async () => {
+    const hookLaunchPermissions: boolean[] = [];
+    const openedSessions: string[] = [];
+    const desktopPrompts: string[] = [];
+    const acpCalls: Array<{ method: string; params: Record<string, unknown> }> = [];
+    const desktopEvents: Array<{ channel: string; data: unknown }> = [];
+    let targetVisible = false;
+    const client = new WorkBuddyHybridRpcClient({
+      allowDesktopApplicationLaunch: true,
+      onEvent: (channel, data) => desktopEvents.push({ channel, data }),
+    }, {
+      desktopHookAvailable: () => false,
+      createDesktopClient: (options) => {
+        hookLaunchPermissions.push(options.allowDesktopApplicationLaunch === true);
+        return {
+          connect: async () => {
+            throw new Error("不应重启 WorkBuddy");
+          },
+          invoke: async () => ({}),
+          close: async () => undefined,
+        };
+      },
+      listSidecarSessions: async () => targetVisible
+        ? [{ sessionId: "target-session", acpEndpoint: "http://127.0.0.1:43123/api/v1/acp" }]
+        : [{ sessionId: "__workbuddy_cli_host__-1", acpEndpoint: "http://127.0.0.1:43122/api/v1/acp" }],
+      openDesktopSession: async (sessionId) => {
+        openedSessions.push(sessionId);
+      },
+      sendDesktopPrompt: async (text) => {
+        desktopPrompts.push(text);
+        targetVisible = true;
+      },
+      readSession: async () => ({
+        id: "target-session",
+        cwd: "/repo",
+        title: "目标任务",
+        customTitle: null,
+        status: "completed",
+        createdAt: 1,
+        updatedAt: targetVisible ? 2 : 1,
+        lastActivityAt: targetVisible ? 2 : 1,
+        projectId: null,
+      }),
+      readRunSummary: async () => targetVisible
+        ? { status: "completed", startedAtMs: 2, completedAtMs: 3, durationMs: 1 }
+        : { status: "completed", startedAtMs: 1, completedAtMs: 1, durationMs: 0 },
+      createAcpClient: (_endpoint, callbacks) => ({
+        connect: async () => {
+          acpCalls.push({ method: "initialize", params: {} });
+        },
+        request: async (method, params) => {
+          acpCalls.push({ method, params });
+          if (method === "session/load") {
+            callbacks.onNotification("session/update", {
+              sessionId: "target-session",
+              update: {
+                sessionUpdate: "agent_message_chunk",
+                content: { type: "text", text: "已收到" },
+              },
+            });
+          }
+          return {};
+        },
+        notify: async (method, params) => {
+          acpCalls.push({ method, params });
+        },
+        respond: async () => undefined,
+        close: async () => undefined,
+      }),
+      delay: async () => undefined,
+      sessionReadyTimeoutMs: 100,
+    });
+
+    expect(buildWorkBuddyDesktopTaskUrl("target-session"))
+      .toBe("workbuddy://chat/target-session");
+    await client.connect();
+    await client.invoke("session:load", "target-session", { cwd: "/repo" });
+    await client.invoke("session:sendMessage", "target-session", {
+      content: [{ type: "text", text: "继续处理" }],
+    });
+
+    expect(hookLaunchPermissions).toEqual([]);
+    expect(openedSessions).toEqual(["target-session", "target-session"]);
+    expect(desktopPrompts).toEqual(["继续处理"]);
+    expect(acpCalls.map((call) => call.method)).toEqual([
+      "initialize",
+      "session/load",
+    ]);
+    expect(desktopEvents).toContainEqual({
+      channel: "session:event:target-session",
+      data: {
+        sessionId: "target-session",
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "已收到" },
+        },
+      },
+    });
+    await client.close();
+  });
+
+  test("waits for the new WorkBuddy turn instead of treating the accepted idle snapshot as completed", async () => {
+    let targetVisible = false;
+    let sessionReadCount = 0;
+    const client = new WorkBuddyHybridRpcClient({
+      onEvent: () => undefined,
+    }, {
+      desktopHookAvailable: () => false,
+      desktopApplicationRunning: () => true,
+      listSidecarSessions: async () => targetVisible
+        ? [{ sessionId: "target-session", acpEndpoint: "http://127.0.0.1:43123/api/v1/acp" }]
+        : [{ sessionId: "__workbuddy_cli_host__-1", acpEndpoint: "http://127.0.0.1:43122/api/v1/acp" }],
+      openDesktopSession: async () => undefined,
+      sendDesktopPrompt: async () => {
+        targetVisible = true;
+      },
+      readSession: async () => {
+        sessionReadCount += 1;
+        const phase = sessionReadCount === 1
+          ? { status: "completed", activityAt: 1 }
+          : sessionReadCount === 2
+            ? { status: "completed", activityAt: 2 }
+            : sessionReadCount === 3
+              ? { status: "working", activityAt: 2 }
+              : { status: "completed", activityAt: 3 };
+        return {
+          id: "target-session",
+          cwd: "/repo",
+          title: "目标任务",
+          customTitle: null,
+          status: phase.status,
+          createdAt: 1,
+          updatedAt: phase.activityAt,
+          lastActivityAt: phase.activityAt,
+          projectId: null,
+        };
+      },
+      readRunSummary: async () => null,
+      createAcpClient: () => ({
+        connect: async () => undefined,
+        request: async () => ({}),
+        notify: async () => undefined,
+        respond: async () => undefined,
+        close: async () => undefined,
+      }),
+      delay: async () => undefined,
+      sessionReadyTimeoutMs: 100,
+      promptAcceptanceTimeoutMs: 100,
+      promptCompletionTimeoutMs: 100,
+    });
+
+    await client.connect();
+    await client.invoke("session:load", "target-session", { cwd: "/repo" });
+    await client.invoke("session:sendMessage", "target-session", {
+      content: [{ type: "text", text: "继续处理" }],
+    });
+
+    expect(sessionReadCount).toBe(4);
+    await client.close();
+  });
+
+  test("does not restart an already-open WorkBuddy when neither desktop interface is ready", async () => {
+    let desktopClientCreated = false;
+    const client = new WorkBuddyHybridRpcClient({
+      allowDesktopApplicationLaunch: true,
+      onEvent: () => undefined,
+    }, {
+      desktopHookAvailable: () => false,
+      desktopApplicationRunning: () => true,
+      createDesktopClient: () => {
+        desktopClientCreated = true;
+        return {
+          connect: async () => undefined,
+          invoke: async () => ({}),
+          close: async () => undefined,
+        };
+      },
+      listSidecarSessions: async () => {
+        throw new Error("sidecar unavailable");
+      },
+    });
+
+    await expect(client.connect()).rejects.toThrow("不会自动重启应用");
+    expect(desktopClientCreated).toBe(false);
+  });
+
+  test("forwards WorkBuddy ACP approvals to the existing desktop task", async () => {
+    let onRequest: ((id: string | number, method: string, params: unknown) => void) | null = null;
+    const responses: Array<{ id: string | number; result: unknown }> = [];
+    const events: Array<{ channel: string; data: unknown }> = [];
+    const client = new WorkBuddyHybridRpcClient({
+      onEvent: (channel, data) => events.push({ channel, data }),
+    }, {
+      desktopHookAvailable: () => false,
+      desktopApplicationRunning: () => true,
+      listSidecarSessions: async () => [{
+        sessionId: "target-session",
+        acpEndpoint: "http://127.0.0.1:43123/api/v1/acp",
+      }],
+      createAcpClient: (_endpoint, callbacks) => {
+        onRequest = callbacks.onRequest;
+        return {
+          connect: async () => undefined,
+          request: async () => ({}),
+          notify: async () => undefined,
+          respond: async (id, result) => responses.push({ id, result }),
+          close: async () => undefined,
+        };
+      },
+    });
+
+    await client.connect();
+    await client.invoke("session:load", "target-session", { cwd: "/repo" });
+    onRequest?.(42, "session/request_permission", {
+      sessionId: "target-session",
+      options: [{ optionId: "allow_once", kind: "allow_once" }],
+      toolCall: { title: "读取服务器状态" },
+    });
+    expect(events.at(-1)).toEqual({
+      channel: "session:event:target-session",
+      data: {
+        sessionId: "target-session",
+        type: "permissionRequest",
+        requestId: "42",
+        request: {
+          sessionId: "target-session",
+          options: [{ optionId: "allow_once", kind: "allow_once" }],
+          toolCall: { title: "读取服务器状态" },
+        },
+      },
+    });
+
+    await client.invoke(
+      "session:resolvePermission",
+      "target-session",
+      "42",
+      "allow_once",
+    );
+    expect(responses).toEqual([{
+      id: 42,
+      result: { outcome: { outcome: "selected", optionId: "allow_once" } },
+    }]);
+    await client.close();
   });
 
   test("parses and replaces updated transcript messages by id", () => {

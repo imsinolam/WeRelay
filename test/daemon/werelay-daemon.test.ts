@@ -1918,6 +1918,7 @@ describe("werelay-daemon helpers", () => {
       "() => connected.runtime.resumeSession(sessionId)",
     );
     expect(activationBlock).toContain("global_task_resume_retry:");
+    expect(activationBlock).toContain("initialSharedSessionId: candidate.sessionId");
   });
 
   test("routes global task commands and number-colon messages through adapter plus session identity", () => {

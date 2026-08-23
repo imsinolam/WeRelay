@@ -281,7 +281,7 @@ async function listWorkBuddyMainProcessIds(): Promise<number[]> {
     .map((record) => record.pid);
 }
 
-async function isWorkBuddyMainProcessRunning(): Promise<boolean> {
+export async function isWorkBuddyMainProcessRunning(): Promise<boolean> {
   return (await listWorkBuddyMainProcessIds()).length > 0;
 }
 

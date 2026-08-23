@@ -3084,6 +3084,7 @@ class WeRelayDaemon {
       reuseExistingVisible?: boolean;
       activate?: boolean;
       userInitiated?: boolean;
+      initialSharedSessionId?: string;
     } = {},
   ): Promise<{
     activeAdapter: DaemonAdapterKind;
@@ -3118,6 +3119,7 @@ class WeRelayDaemon {
       slot = await this.createSlot(adapter, {
         profile: options.profile ?? this.profile,
         sessionStartMode: createSessionStartMode,
+        initialSharedSessionId: options.initialSharedSessionId,
         allowDesktopApplicationLaunch:
           resolveDaemonDesktopApplicationLaunchPermission({
             automaticLaunchEnabled: this.allowDesktopApplicationLaunch,
@@ -3309,6 +3311,7 @@ class WeRelayDaemon {
     options: {
       profile?: string;
       sessionStartMode?: BridgeSessionStartMode;
+      initialSharedSessionId?: string;
       allowDesktopApplicationLaunch?: boolean;
     },
   ): Promise<DaemonSlot> {
@@ -3317,7 +3320,7 @@ class WeRelayDaemon {
       ? this.stateStore.getCodexWechatThreadId()
       : undefined;
     const initialSharedSessionId = options.sessionStartMode !== "new"
-      ? this.stateStore.getAdapterSessionId(adapter)
+      ? options.initialSharedSessionId ?? this.stateStore.getAdapterSessionId(adapter)
       : undefined;
     const runtime = createRuntimeHost(buildDaemonRuntimeOptions({
       adapter,
@@ -7016,6 +7019,7 @@ class WeRelayDaemon {
           sessionStartMode: "restore",
           activate: false,
           userInitiated: true,
+          initialSharedSessionId: candidate.sessionId,
         });
         if (!result.activated) {
           throw new Error(result.activationReason ?? `${formatDaemonAdapterLabel(adapter)} 不可用。`);
