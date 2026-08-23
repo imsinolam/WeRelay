@@ -2334,7 +2334,7 @@ describe("Codex mobile web rendering", () => {
 
   test("gives every task-board card a direct task link", () => {
     const href = loadMobileTaskBoardHref(
-      "https://werelay.sinolin.com/?view=board&board=completed&appv=123",
+      "https://relay.example.com/?view=board&board=completed&appv=123",
     );
 
     expect(href({ adapter: "workbuddy", threadId: "task-123" })).toBe(

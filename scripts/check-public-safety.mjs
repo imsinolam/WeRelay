@@ -36,6 +36,7 @@ const binaryExtensions = new Set([
   ".zip",
 ]);
 const rasterImagePattern = /\.(?:gif|jpe?g|png|webp)$/i;
+const privateDomainSuffix = ["sinolin", "com"].join(".");
 const reviewedRasterAssets = new Map([
   [
     "docs/images/werelay-four-panel-white-paper-boy-v10-handoff-comic.png",
@@ -152,6 +153,13 @@ function addTextFindings(text, source, findings) {
       if (name && !allowedHomeNames.has(name) && name !== "用户名") {
         findings.push(`${source}: ${home.label} contains non-placeholder user "${match[1]}"`);
       }
+    }
+  }
+
+  for (const match of text.matchAll(/\b(?:[a-z0-9-]+\.)+[a-z]{2,}\b/gi)) {
+    const hostname = match[0].toLowerCase();
+    if (hostname === privateDomainSuffix || hostname.endsWith(`.${privateDomainSuffix}`)) {
+      findings.push(`${source}: personal production domain must use a reserved example domain`);
     }
   }
 
