@@ -6,6 +6,8 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 
+import { containsPersonalProductionDomain } from "./public-safety-rules.mjs";
+
 const root = process.cwd();
 const scanHistory = process.argv.includes("--history");
 const allowedHomeNames = new Set([
@@ -36,7 +38,6 @@ const binaryExtensions = new Set([
   ".zip",
 ]);
 const rasterImagePattern = /\.(?:gif|jpe?g|png|webp)$/i;
-const privateDomainSuffix = ["sinolin", "com"].join(".");
 const reviewedRasterAssets = new Map([
   [
     "docs/images/werelay-four-panel-white-paper-boy-v10-handoff-comic.png",
@@ -156,11 +157,8 @@ function addTextFindings(text, source, findings) {
     }
   }
 
-  for (const match of text.matchAll(/\b(?:[a-z0-9-]+\.)+[a-z]{2,}\b/gi)) {
-    const hostname = match[0].toLowerCase();
-    if (hostname === privateDomainSuffix || hostname.endsWith(`.${privateDomainSuffix}`)) {
-      findings.push(`${source}: personal production domain must use a reserved example domain`);
-    }
+  if (containsPersonalProductionDomain(text)) {
+    findings.push(`${source}: personal production domain must use a reserved example domain`);
   }
 
   const seenAddresses = new Set();

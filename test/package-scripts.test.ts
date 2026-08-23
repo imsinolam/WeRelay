@@ -26,7 +26,14 @@ describe("package quality scripts", () => {
       path.resolve(import.meta.dir, "..", "scripts/check-public-safety.mjs"),
       "utf8",
     );
-    expect(safetyScript).toContain('["sinolin", "com"].join(".")');
+    const safetyRules = fs.readFileSync(
+      path.resolve(import.meta.dir, "..", "scripts/public-safety-rules.mjs"),
+      "utf8",
+    );
+    expect(safetyScript).toContain(
+      'from "./public-safety-rules.mjs"',
+    );
+    expect(safetyRules).toContain('["sinolin", "com"].join(".")');
     expect(safetyScript).toContain(
       "personal production domain must use a reserved example domain",
     );
