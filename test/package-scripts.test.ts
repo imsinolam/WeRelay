@@ -32,6 +32,27 @@ describe("package quality scripts", () => {
     );
   });
 
+  test("gates protected main pushes through a checked candidate branch", () => {
+    const workflow = fs.readFileSync(
+      path.resolve(import.meta.dir, "..", ".github/workflows/ci.yml"),
+      "utf8",
+    );
+    const helper = fs.readFileSync(
+      path.resolve(
+        import.meta.dir,
+        "..",
+        "deploy/github-publish-server/werelay-github-publish-remote",
+      ),
+      "utf8",
+    );
+    expect(workflow).toContain('"werelay-release-candidate/**"');
+    expect(helper).toContain("werelay-release-candidate/");
+    expect(helper).toContain("wait_for_required_checks");
+    expect(helper).toContain("candidate commit is not a fast-forward of GitHub main");
+    expect(helper).toContain("GitHub main changed while candidate checks were running");
+    expect(helper).toContain("Secret scan|Quality (ubuntu-latest)|Quality (macos-latest)|Quality (windows-latest)");
+  });
+
   test("ships the server-only GitHub publishing entrypoint", () => {
     expect(packageJson.files).toContain("scripts/publish-github-via-server.mjs");
     expect(packageJson.scripts["github:publish:server"]).toBe(

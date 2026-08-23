@@ -8,12 +8,17 @@ BARE_REPO="$BASE_DIR/repo.git"
 WORK_ROOT="$BASE_DIR/work"
 SSH_CONFIG="${WERELAY_GITHUB_SSH_CONFIG:-$HOME/.ssh/werelay_github_config}"
 GITHUB_REPO="${WERELAY_GITHUB_REPOSITORY:-git@github.com:imsinolam/WeRelay.git}"
+GITHUB_API_REPO="${WERELAY_GITHUB_API_REPOSITORY:-imsinolam/WeRelay}"
 LOG_FILE="$BASE_DIR/push.log"
 AUTHOR_NAME="${WERELAY_GITHUB_AUTHOR_NAME:-imsinolam}"
 AUTHOR_EMAIL="${WERELAY_GITHUB_AUTHOR_EMAIL:-imsinolam@users.noreply.github.com}"
+REQUIRED_CHECKS="${WERELAY_GITHUB_REQUIRED_CHECKS:-Secret scan|Quality (ubuntu-latest)|Quality (macos-latest)|Quality (windows-latest)}"
+CHECK_TIMEOUT_SECONDS="${WERELAY_GITHUB_CHECK_TIMEOUT_SECONDS:-1200}"
+CHECK_POLL_SECONDS="${WERELAY_GITHUB_CHECK_POLL_SECONDS:-30}"
 WORK_DIR=""
 REPOSITORY=""
 ARCHIVE=""
+REMOTE_CANDIDATE_REF=""
 
 fail() {
   printf 'ERROR: %s\n' "$*" >&2
@@ -21,6 +26,9 @@ fail() {
 }
 
 cleanup() {
+  if [[ -n "$REMOTE_CANDIDATE_REF" && -d "$BARE_REPO" ]]; then
+    git --git-dir="$BARE_REPO" push origin ":$REMOTE_CANDIDATE_REF" >/dev/null 2>&1 || true
+  fi
   if [[ -n "$REPOSITORY" && -d "$REPOSITORY" && -d "$BARE_REPO" ]]; then
     git --git-dir="$BARE_REPO" worktree remove --force "$REPOSITORY" >/dev/null 2>&1 || true
   fi
@@ -29,6 +37,65 @@ cleanup() {
 }
 trap cleanup EXIT
 
+wait_for_required_checks() {
+  local commit="$1"
+  local deadline=$((SECONDS + CHECK_TIMEOUT_SECONDS))
+  local payload=""
+  local check_state=""
+  while (( SECONDS < deadline )); do
+    payload="$(curl -fsSL \
+      -H 'Accept: application/vnd.github+json' \
+      -H 'X-GitHub-Api-Version: 2022-11-28' \
+      "https://api.github.com/repos/$GITHUB_API_REPO/commits/$commit/check-runs?per_page=100")" \
+      || fail "GitHub check-run query failed"
+    check_state="$(printf '%s' "$payload" | node -e '
+      let input = "";
+      process.stdin.on("data", (chunk) => { input += chunk; });
+      process.stdin.on("end", () => {
+        const required = process.argv[1].split("|").filter(Boolean);
+        const payload = JSON.parse(input);
+        if (!Array.isArray(payload.check_runs)) {
+          console.log(`FAIL ${payload.message || "invalid GitHub check-run response"}`);
+          return;
+        }
+        const latest = new Map();
+        for (const run of payload.check_runs) {
+          if (!latest.has(run.name)) latest.set(run.name, run);
+        }
+        const pending = [];
+        const failed = [];
+        for (const name of required) {
+          const run = latest.get(name);
+          if (!run || run.status !== "completed") pending.push(name);
+          else if (run.conclusion !== "success") failed.push(`${name}=${run.conclusion || "unknown"}`);
+        }
+        if (failed.length > 0) console.log(`FAIL ${failed.join(", ")}`);
+        else if (pending.length > 0) console.log(`PENDING ${pending.join(", ")}`);
+        else console.log("PASS");
+      });
+    ' "$REQUIRED_CHECKS")"
+    case "$check_state" in
+      PASS)
+        printf 'CHECKS_PASSED %s\n' "$commit"
+        return 0
+        ;;
+      FAIL*)
+        fail "required GitHub checks failed: ${check_state#FAIL }"
+        ;;
+      PENDING*)
+        printf 'CHECKS_WAITING %s\n' "${check_state#PENDING }"
+        sleep "$CHECK_POLL_SECONDS"
+        ;;
+      *)
+        fail "unexpected GitHub check state: $check_state"
+        ;;
+    esac
+  done
+  fail "timed out waiting for required GitHub checks"
+}
+
+[[ "$CHECK_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] || fail "check timeout must be a positive integer"
+[[ "$CHECK_POLL_SECONDS" =~ ^[1-9][0-9]*$ ]] || fail "check poll interval must be a positive integer"
 [[ $# -eq 3 && "$2" == "--message-base64url" ]] || fail "usage: werelay-github-publish-remote <snapshot.tar.gz> --message-base64url <encoded-message>"
 ARCHIVE="$1"
 COMMIT_MESSAGE="$(node -e 'process.stdout.write(Buffer.from(process.argv[1], "base64url").toString("utf8"))' "$3")"
@@ -71,10 +138,11 @@ CURRENT_ORIGIN="$(git --git-dir="$BARE_REPO" remote get-url origin 2>/dev/null |
 export GIT_SSH_COMMAND="ssh -F $SSH_CONFIG"
 git --git-dir="$BARE_REPO" fetch --prune origin \
   '+refs/heads/main:refs/remotes/origin/main' >/dev/null
+BASE_COMMIT="$(git --git-dir="$BARE_REPO" rev-parse refs/remotes/origin/main 2>/dev/null || true)"
 
 REPOSITORY="$WORK_DIR/repository"
-if git --git-dir="$BARE_REPO" show-ref --verify --quiet refs/remotes/origin/main; then
-  git --git-dir="$BARE_REPO" worktree add --detach "$REPOSITORY" refs/remotes/origin/main >/dev/null
+if [[ -n "$BASE_COMMIT" ]]; then
+  git --git-dir="$BARE_REPO" worktree add --detach "$REPOSITORY" "$BASE_COMMIT" >/dev/null
 else
   git --git-dir="$BARE_REPO" worktree add --detach "$REPOSITORY" >/dev/null
   git -C "$REPOSITORY" switch --orphan main >/dev/null
@@ -98,8 +166,20 @@ if git -C "$REPOSITORY" diff --cached --quiet; then
 else
   git -C "$REPOSITORY" commit -m "$COMMIT_MESSAGE" >/dev/null
   COMMIT="$(git -C "$REPOSITORY" rev-parse HEAD)"
+  if [[ -n "$BASE_COMMIT" ]]; then
+    git --git-dir="$BARE_REPO" merge-base --is-ancestor "$BASE_COMMIT" "$COMMIT" \
+      || fail "candidate commit is not a fast-forward of GitHub main"
+  fi
+
+  REMOTE_CANDIDATE_REF="refs/heads/werelay-release-candidate/${RELEASE_ID#werelay-snapshot-}"
+  git --git-dir="$BARE_REPO" push origin "$COMMIT:$REMOTE_CANDIDATE_REF" >/dev/null
+  wait_for_required_checks "$COMMIT"
+
+  CURRENT_REMOTE_MAIN="$(git --git-dir="$BARE_REPO" ls-remote origin refs/heads/main | awk 'NR == 1 { print $1 }')"
+  [[ "$CURRENT_REMOTE_MAIN" == "$BASE_COMMIT" ]] \
+    || fail "GitHub main changed while candidate checks were running"
+  git --git-dir="$BARE_REPO" push origin "$COMMIT:refs/heads/main" >/dev/null
   git --git-dir="$BARE_REPO" update-ref refs/heads/main "$COMMIT"
-  git --git-dir="$BARE_REPO" push origin 'refs/heads/main:refs/heads/main' >/dev/null
 fi
 
 REMOTE_COMMIT="$(git --git-dir="$BARE_REPO" ls-remote origin refs/heads/main | awk 'NR == 1 { print $1 }')"
