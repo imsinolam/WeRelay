@@ -505,12 +505,15 @@ export class CodexDesktopIpcClient {
     });
     const requestOutcome = this.sendFollowerRequest(
       "thread-follower-start-turn",
-      1,
+      2,
       {
         conversationId: normalizedThreadId,
-        turnStartParams: {
-          input: items,
-          ...(options.model?.trim() ? { model: options.model.trim() } : {}),
+        turnStart: {
+          request: {
+            threadId: normalizedThreadId,
+            input: items,
+            ...(options.model?.trim() ? { model: options.model.trim() } : {}),
+          },
         },
       },
     ).then(

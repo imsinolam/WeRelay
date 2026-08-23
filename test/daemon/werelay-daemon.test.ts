@@ -19,6 +19,7 @@ import {
   buildDaemonRuntimeOptions,
   buildDaemonTaskCatalogRuntimeOptions,
   defaultDaemonSessionStartMode,
+  deferCodexCompletionObservationRetry,
   flushPendingDaemonRestartNotice,
   formatCodexTaskCompletionMessage,
   formatCodexTaskCompletionMessages,
@@ -60,6 +61,7 @@ import {
   selectCodexCompletionRequestPreview,
   sanitizeDaemonVisibleSessionMessage,
   shouldFollowCodexActiveTask,
+  shouldInferCodexIdleRecencyCompletion,
   shouldClearCodexActiveTaskForCompletion,
   shouldForwardDaemonFinalReply,
   shouldForwardCodexTaskCompletionEvent,
@@ -1477,6 +1479,67 @@ describe("werelay-daemon helpers", () => {
     expect(completed.completion).toEqual({
       outcome: "completed",
       startedAtMs: 1_000,
+    });
+
+    const retryAfterEvidenceLag = observeCodexTask({
+      ...completed.observation,
+      completionNotified: false,
+    }, {
+      sessionId: "thread_a",
+      title: "后台任务",
+      lastUpdatedAt: "2026-08-01T01:09:07.000Z",
+      runtimeStatus: { type: "idle" },
+    }, 550_000);
+    expect(retryAfterEvidenceLag.completion).toEqual({
+      outcome: "completed",
+      startedAtMs: 1_000,
+    });
+    expect(shouldInferCodexIdleRecencyCompletion(
+      {
+        ...completed.observation,
+        completionNotified: false,
+      },
+      {
+        sessionId: "thread_a",
+        title: "后台任务",
+        lastUpdatedAt: "2026-08-01T01:09:08.000Z",
+        runtimeStatus: { type: "idle" },
+      },
+    )).toBe(false);
+    expect(shouldInferCodexIdleRecencyCompletion(
+      {
+        title: "后台任务",
+        lastUpdatedAt: "2026-08-01T01:09:07.000Z",
+        status: "idle",
+        completionNotified: false,
+      },
+      {
+        sessionId: "thread_a",
+        title: "后台任务",
+        lastUpdatedAt: "2026-08-01T01:09:08.000Z",
+        runtimeStatus: { type: "idle" },
+      },
+    )).toBe(true);
+
+    expect(deferCodexCompletionObservationRetry(
+      {
+        title: "后台任务",
+        lastUpdatedAt: "2026-08-01T01:09:07.000Z",
+        status: "idle",
+        completionNotified: false,
+      },
+      {
+        title: "后台任务",
+        lastUpdatedAt: "2026-08-01T01:09:08.000Z",
+        status: "idle",
+        completionNotified: true,
+      },
+      true,
+    )).toEqual({
+      title: "后台任务",
+      lastUpdatedAt: "2026-08-01T01:09:07.000Z",
+      status: "idle",
+      completionNotified: false,
     });
 
     const temporarilyUnavailable = observeCodexTask(active.observation, {

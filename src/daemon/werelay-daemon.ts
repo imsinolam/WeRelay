@@ -2057,7 +2057,7 @@ export function shouldForwardDaemonFinalReply(
 
 const CODEX_COMPLETION_PREVIEW_MAX_CHARS = 280;
 
-type CodexTaskObservation = {
+export type CodexTaskObservation = {
   title: string;
   lastUpdatedAt: string;
   status: CodexMobileTaskStatus;
@@ -2442,7 +2442,12 @@ export function observeCodexTask(
     runningSinceMs: previous?.runningSinceMs,
     completionNotified: previous?.completionNotified ?? false,
   };
-  if (wasRunning && !previous?.completionNotified) {
+  const pendingCompletionEvidence = Boolean(
+    previous &&
+    !previous.completionNotified &&
+    previous.runningSinceMs !== undefined,
+  );
+  if ((wasRunning || pendingCompletionEvidence) && !previous?.completionNotified) {
     observation.completionNotified = true;
     return {
       observation,
@@ -2453,6 +2458,42 @@ export function observeCodexTask(
     };
   }
   return { observation };
+}
+
+export function shouldInferCodexIdleRecencyCompletion(
+  previous: CodexTaskObservation | null,
+  candidate: BridgeResumeSessionCandidate,
+): boolean {
+  if (!previous || previous.runningSinceMs !== undefined) {
+    return false;
+  }
+  const status = mapCodexMobileTaskStatus(candidate.runtimeStatus);
+  const runningNow = status === "running" || status === "approval" || status === "input";
+  const wasRunning = previous.status === "running" ||
+    previous.status === "approval" ||
+    previous.status === "input";
+  const ownerSettled = candidate.runtimeStatus?.type === "idle" ||
+    candidate.runtimeStatus?.type === "systemError";
+  return Boolean(
+    ownerSettled &&
+    !runningNow &&
+    !wasRunning &&
+    previous.lastUpdatedAt !== candidate.lastUpdatedAt,
+  );
+}
+
+export function deferCodexCompletionObservationRetry(
+  previous: CodexTaskObservation | null,
+  observation: CodexTaskObservation,
+  idleRecencyChanged: boolean,
+): CodexTaskObservation {
+  return {
+    ...observation,
+    ...(idleRecencyChanged && previous
+      ? { lastUpdatedAt: previous.lastUpdatedAt }
+      : {}),
+    completionNotified: false,
+  };
 }
 
 export function shouldQueueCodexMobileMessage(
@@ -5455,12 +5496,9 @@ class WeRelayDaemon {
         if (ownerSettled) {
           this.clearSlotTaskState(slot, candidate.sessionId);
         }
-        const idleRecencyChanged = Boolean(
-          ownerSettled &&
-          previous &&
-          !runningNow &&
-          !wasRunning &&
-          previous.lastUpdatedAt !== candidate.lastUpdatedAt,
+        const idleRecencyChanged = shouldInferCodexIdleRecencyCompletion(
+          previous,
+          candidate,
         );
         if (idleRecencyChanged) {
           observed.observation.completionNotified = true;
@@ -5504,8 +5542,14 @@ class WeRelayDaemon {
           runSummary: completionRunSummary,
           latestMessage: completionLatestMessage,
         })) {
-          observed.observation.completionNotified = false;
-          this.codexTaskObservations.set(candidate.sessionId, observed.observation);
+          this.codexTaskObservations.set(
+            candidate.sessionId,
+            deferCodexCompletionObservationRetry(
+              previous,
+              observed.observation,
+              idleRecencyChanged,
+            ),
+          );
           appendDaemonLog(
             `codex_completion_without_final_suppressed: thread=${candidate.sessionId} summary=${completionRunSummary?.status ?? "missing"} latest=${completionLatestMessage?.role ?? "missing"}`,
           );

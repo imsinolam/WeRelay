@@ -377,6 +377,16 @@ describe("Codex desktop IPC client", () => {
         return;
       }
       if (message.method === "thread-follower-start-turn") {
+        const params = message.params as Record<string, unknown>;
+        const turnStart = params.turnStart as Record<string, unknown> | undefined;
+        const request = turnStart?.request as Record<string, unknown> | undefined;
+        if (
+          message.version !== 2 ||
+          request?.threadId !== "thread-1" ||
+          !Array.isArray(request.input)
+        ) {
+          return;
+        }
         sendFrame(socket, {
           type: "response",
           requestId: message.requestId,
@@ -406,15 +416,18 @@ describe("Codex desktop IPC client", () => {
     expect(
       requests.find((request) => request.method === "thread-follower-start-turn"),
     ).toMatchObject({
-      version: 1,
+      version: 2,
       params: {
         conversationId: "thread-1",
-        turnStartParams: {
-          input: [
-            { type: "text", text: "真实桌面消息" },
-            { type: "localImage", path: "/tmp/mobile-image.png" },
-          ],
-          model: "gpt-5.6-terra",
+        turnStart: {
+          request: {
+            threadId: "thread-1",
+            input: [
+              { type: "text", text: "真实桌面消息" },
+              { type: "localImage", path: "/tmp/mobile-image.png" },
+            ],
+            model: "gpt-5.6-terra",
+          },
         },
       },
     });
