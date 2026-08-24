@@ -124,7 +124,7 @@ function findExecutable(name: string): string | null {
 function getPlatformPtyFix(platform: NodeJS.Platform): string {
   switch (platform) {
     case "linux":
-      return "sudo apt install build-essential python3 && npm install -g werelay@latest";
+      return "sudo apt install build-essential python3 && npm rebuild -g werelay";
     case "darwin":
       return "xcode-select --install && npm rebuild node-pty";
     case "win32":

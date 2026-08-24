@@ -4,7 +4,12 @@ import path from "node:path";
 
 const packageJson = JSON.parse(
   fs.readFileSync(path.resolve(import.meta.dir, "..", "package.json"), "utf8"),
-) as { scripts?: Record<string, string> };
+) as {
+  files?: string[];
+  private?: boolean;
+  publishConfig?: unknown;
+  scripts?: Record<string, string>;
+};
 
 describe("package quality scripts", () => {
   test("scans complete Git history for committed secrets in CI", () => {
@@ -67,10 +72,15 @@ describe("package quality scripts", () => {
     );
   });
 
-  test("prepack typechecks source before building the npm package", () => {
+  test("prepack typechecks source before building the local tarball", () => {
     expect(packageJson.scripts?.prepack).toBe(
       "npm run typecheck:src && npm run build",
     );
+  });
+
+  test("keeps GitHub as the only public distribution source", () => {
+    expect(packageJson.private).toBe(true);
+    expect(packageJson.publishConfig).toBeUndefined();
   });
 
   test("ships the DeepSeek Harness bridge entrypoints", () => {

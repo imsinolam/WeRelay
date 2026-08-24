@@ -49,7 +49,7 @@ export const messages: Record<string, string> = {
   // === Hook health check ===
   "hook.healthCheck.warning": "[Warning] No hook events received from Claude after 15s.\nThe hook system may not be working — Claude output will not reach WeChat.",
   "hook.healthCheck.logHint": "\nCheck: {logPath}",
-  "hook.healthCheck.fixes": "\nCommon fixes:\n- Ensure Node.js >= 24.0.0: node --version\n- Reinstall: npm install -g werelay@latest\n- Check firewall: allow localhost TCP connections",
+  "hook.healthCheck.fixes": "\nCommon fixes:\n- Ensure Node.js >= 24.0.0: node --version\n- Rebuild and install the local tarball by following the GitHub README\n- Check firewall: allow localhost TCP connections",
 
   // === PTY fallback ===
   "pty.fallback.warning": "[Warning] PTY unavailable — using fallback mode (TERM=dumb).\nCore features (messaging, approvals, session management) work normally; terminal rendering (colors, progress bars) may be degraded.\nFix: Linux install build-essential python3 | Windows run npm rebuild node-pty | macOS run xcode-select --install\nRun --doctor for detailed environment info.\n",
@@ -57,16 +57,16 @@ export const messages: Record<string, string> = {
   // === Spawn diagnostic ===
   "spawn.diagnostic.title": "Failed to start CLI process: {target}\nError: {error}",
   "spawn.diagnostic.fixesHeader": "\nPossible fixes:",
-  "spawn.diagnostic.nodePty": "- The node-pty native module is incompatible with your Node.js version.\n- Run: npm rebuild node-pty\n- Or reinstall: npm install -g werelay@latest",
+  "spawn.diagnostic.nodePty": "- The node-pty native module is incompatible with your Node.js version.\n- Run: npm rebuild -g werelay\n- If it still fails, rebuild and install the local tarball from the GitHub README",
   "spawn.diagnostic.xcode": "- Ensure Xcode CLI tools are installed: xcode-select --install",
-  "spawn.diagnostic.linuxBuildTools": "- Linux requires build tools for node-pty: sudo apt install build-essential python3\n- Then reinstall: npm install -g werelay@latest",
+  "spawn.diagnostic.linuxBuildTools": "- Linux requires build tools for node-pty: sudo apt install build-essential python3\n- Then run: npm rebuild -g werelay",
   "spawn.diagnostic.notFound": "- The command \"{target}\" was not found on PATH.\n- Verify it is installed and accessible from your terminal.",
-  "spawn.diagnostic.generic": "- Reinstall: npm install -g werelay@latest",
+  "spawn.diagnostic.generic": "- Rebuild and install the local tarball by following the GitHub README",
   "spawn.diagnostic.nodeVersion": "- Ensure Node.js >= 24.0.0: node --version",
   "spawn.diagnostic.winFull": "- Ensure Windows 10 build 18309+ (run 'winver' to check)\n- Install Visual C++ Redistributable: https://aka.ms/vs/17/release/vc_redist.x64.exe\n- Run: npm rebuild node-pty\n- Try running as Administrator",
 
   // === Version checker ===
-  "update.available": "[Update Available] Version {latest} is available (current: {current}).\nRun: npm install -g werelay@latest",
+  "update.available": "[Update Available] Version {latest} is available (current: {current}).\nGet the latest source from GitHub and reinstall the local tarball by following the README.",
   // === Doctor ===
   "doctor.title": "WeRelay Doctor",
   "doctor.section.environment": "Environment",

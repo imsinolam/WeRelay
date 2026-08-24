@@ -82,10 +82,22 @@ sudo ss -ltnp
 
 ## 五、安装 WeRelay Relay
 
-在服务器执行：
+WeRelay 没有 npm Registry 公共包。发布 Agent 应从已审核的 GitHub 源码生成本地 tarball，记录校验值，再把同一份产物上传到 Relay 服务器。详细的源码构建步骤见 [从 GitHub 安装与更新 WeRelay](GitHub源码安装与更新.md)。
+
+在已审核源码目录生成产物：
 
 ```bash
-sudo npm install -g werelay@latest
+npm ci
+PACKAGE_FILE="$(npm pack --silent)"
+shasum -a 256 "$PACKAGE_FILE"
+scp "$PACKAGE_FILE" relay-host:/tmp/werelay-release.tgz
+```
+
+在服务器安装并确认入口：
+
+```bash
+sudo npm install -g /tmp/werelay-release.tgz
+rm -f /tmp/werelay-release.tgz
 RELAY_BIN="$(command -v werelay-relay-server)"
 test -n "$RELAY_BIN"
 readlink -f "$RELAY_BIN"
@@ -93,7 +105,7 @@ npm root -g
 npm list -g werelay --depth=0
 ```
 
-记录 `RELAY_BIN` 的真实结果。后面的 systemd `ExecStart` 必须使用这个绝对路径，不能假设一定是 `/usr/local/bin/werelay-relay-server`。
+这里的 `npm install -g` 安装的是上传的本地 tarball，不会访问 npm Registry。记录 `RELAY_BIN` 的真实结果。后面的 systemd `ExecStart` 必须使用这个绝对路径，不能假设一定是 `/usr/local/bin/werelay-relay-server`。
 
 Relay 可执行文件和 Node.js 必须位于 `werelay` 服务账号能够访问的稳定系统路径。如果结果位于 `/root/.nvm`、某个普通用户的 `~/.nvm` 或其他受 `ProtectHome=true` 限制的目录，不要直接写入 systemd；应改用服务器认可的系统级 Node.js/npm 安装方式。也不要把 `ExecStart` 固定到某个会随 Node 升级变化的版本目录，否则 npm 已升级而服务仍可能运行旧副本。
 
@@ -149,7 +161,7 @@ root root 600 /etc/werelay-relay.env
 
 ## 八、配置 systemd
 
-npm 包中包含模板：
+安装后的本地 tarball 中包含模板：
 
 ```bash
 PKG_ROOT="$(npm root -g)/werelay"
@@ -200,7 +212,7 @@ sudo ss -ltnp | grep 14396
 
 ## 九、配置 HTTPS 入口
 
-仓库和 npm 包提供 Nginx 模板：
+GitHub 仓库和安装后的本地 tarball 提供 Nginx 模板：
 
 ```bash
 PKG_ROOT="$(npm root -g)/werelay"
@@ -412,11 +424,7 @@ sudo systemctl reload nginx
 
 ## 十四、升级
 
-服务器和电脑应升级到同一兼容版本，并分别重启：
-
-```bash
-npm install -g werelay@latest
-```
+服务器和电脑应安装从同一 GitHub 提交生成的 tarball，并分别重启。重复[第五节](#五安装-werelay-relay)的构建、校验、上传和安装步骤，不要从 npm Registry 安装。
 
 升级后重新完成：
 

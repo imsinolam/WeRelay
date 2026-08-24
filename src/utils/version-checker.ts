@@ -17,34 +17,39 @@ export interface VersionInfo {
   hasUpdate: boolean;
 }
 
-// npm registry 是权威更新源——它是用户实际安装的渠道;GitHub tags 作为回退,
-// 以便在 registry 暂时不可达或包尚未发布时仍能给出最新版本。
-const NPM_PACKAGE_NAME = "werelay";
-const DEFAULT_NPM_REGISTRY_URL = `https://registry.npmjs.org/${NPM_PACKAGE_NAME}/latest`;
+// GitHub 是唯一公开版本来源。优先使用正式 Release，其次兼容 tag；
+// 当前仓库尚未创建 Release/tag 时，再读取 main 分支的 package.json。
+const DEFAULT_GITHUB_RELEASE_URL =
+  "https://api.github.com/repos/imsinolam/WeRelay/releases/latest";
 const DEFAULT_GITHUB_TAGS_URL =
   "https://api.github.com/repos/imsinolam/WeRelay/tags?per_page=20";
+const DEFAULT_GITHUB_PACKAGE_URL =
+  "https://raw.githubusercontent.com/imsinolam/WeRelay/main/package.json";
 const FETCH_TIMEOUT_MS = 10_000;
 
 export interface FetchLatestVersionOptions {
-  /** 自定义 fetch 实现,测试时注入 mock。默认使用全局 fetch。 */
+  /** 自定义 fetch 实现，测试时注入 mock。默认使用全局 fetch。 */
   fetchImpl?: typeof fetch;
-  npmRegistryUrl?: string;
+  githubReleaseUrl?: string;
   githubTagsUrl?: string;
+  githubPackageUrl?: string;
   timeoutMs?: number;
 }
 
 type FetchDeps = {
   fetch: typeof fetch;
-  npmRegistryUrl: string;
+  githubReleaseUrl: string;
   githubTagsUrl: string;
+  githubPackageUrl: string;
   timeoutMs: number;
 };
 
 function resolveFetchDeps(options: FetchLatestVersionOptions): FetchDeps {
   return {
     fetch: options.fetchImpl ?? globalThis.fetch,
-    npmRegistryUrl: options.npmRegistryUrl ?? DEFAULT_NPM_REGISTRY_URL,
+    githubReleaseUrl: options.githubReleaseUrl ?? DEFAULT_GITHUB_RELEASE_URL,
     githubTagsUrl: options.githubTagsUrl ?? DEFAULT_GITHUB_TAGS_URL,
+    githubPackageUrl: options.githubPackageUrl ?? DEFAULT_GITHUB_PACKAGE_URL,
     timeoutMs: options.timeoutMs ?? FETCH_TIMEOUT_MS,
   };
 }
@@ -59,50 +64,70 @@ async function fetchJsonWithTimeout(
     const res = await deps.fetch(url, {
       method: "GET",
       signal: controller.signal,
-      headers: { Accept: "application/json" },
+      headers: {
+        Accept: "application/vnd.github+json, application/json",
+        "User-Agent": "WeRelay-Version-Checker",
+      },
     });
     if (!res.ok) {
       return null;
     }
     return await res.json();
   } catch {
-    // 网络/超时/解析失败一律视为该源不可用,交由调用方回退。
+    // 网络、超时或解析失败都视为该 GitHub 入口不可用，交由下一入口回退。
     return null;
   } finally {
     clearTimeout(timer);
   }
 }
 
-async function fetchVersionFromNpm(deps: FetchDeps): Promise<string | null> {
-  const data = await fetchJsonWithTimeout(deps.npmRegistryUrl, deps);
+async function fetchVersionFromGithubRelease(
+  deps: FetchDeps,
+): Promise<string | null> {
+  const data = await fetchJsonWithTimeout(deps.githubReleaseUrl, deps);
   if (!data || typeof data !== "object") {
     return null;
   }
-  const version = (data as { version?: unknown }).version;
-  return typeof version === "string" ? parseVersion(version) : null;
+  return parseVersion((data as { tag_name?: unknown }).tag_name);
 }
 
-async function fetchVersionFromGithub(deps: FetchDeps): Promise<string | null> {
+async function fetchVersionFromGithubTags(
+  deps: FetchDeps,
+): Promise<string | null> {
   const data = await fetchJsonWithTimeout(deps.githubTagsUrl, deps);
   if (!Array.isArray(data)) {
     return null;
   }
   const versions = data
     .map((tag) => parseVersion((tag as { name?: unknown }).name))
-    .filter((v): v is string => v !== null)
+    .filter((version): version is string => version !== null)
     .sort((a, b) => compareVersions(b, a));
   return versions[0] ?? null;
 }
 
+async function fetchVersionFromGithubPackage(
+  deps: FetchDeps,
+): Promise<string | null> {
+  const data = await fetchJsonWithTimeout(deps.githubPackageUrl, deps);
+  if (!data || typeof data !== "object") {
+    return null;
+  }
+  return parseVersion((data as { version?: unknown }).version);
+}
+
 /**
- * 从 npm registry 获取最新版本号(回退到 GitHub tags)。
- * 通过 HTTPS 请求而非本地 git 命令,因此对全局安装的命令(werelay-check-update)同样可用。
+ * 从 GitHub 获取最新公开版本号。
+ * 通过 HTTPS 请求而非本地 git 命令，因此对全局安装的 werelay-check-update 同样可用。
  */
 export async function fetchLatestVersion(
   options: FetchLatestVersionOptions = {},
 ): Promise<string | null> {
   const deps = resolveFetchDeps(options);
-  return (await fetchVersionFromNpm(deps)) ?? (await fetchVersionFromGithub(deps));
+  return (
+    (await fetchVersionFromGithubRelease(deps)) ??
+    (await fetchVersionFromGithubTags(deps)) ??
+    (await fetchVersionFromGithubPackage(deps))
+  );
 }
 
 /**
@@ -243,12 +268,10 @@ export function formatUpdateMessage(versionInfo: VersionInfo): string {
 [Update Available] Version ${latest} is available (current: ${current})
 
 Update instructions:
-   cd WeRelay
-   git pull
-   bun install
-   npm install -g .
+   Pull the latest GitHub source, run npm ci,
+   then install the local tarball produced by npm pack.
 
 For more information:
-   https://github.com/imsinolam/WeRelay/releases
+   https://github.com/imsinolam/WeRelay
 `;
 }

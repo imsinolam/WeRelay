@@ -4,7 +4,6 @@
 
 <p align="center">
   <a href="https://github.com/imsinolam/WeRelay"><img alt="GitHub stars" src="https://img.shields.io/github/stars/imsinolam/WeRelay?label=Stars&amp;style=for-the-badge&amp;logo=github&amp;color=0891b2&amp;labelColor=1c1917"></a>
-  <a href="https://www.npmjs.com/package/werelay"><img alt="npm version" src="https://img.shields.io/npm/v/werelay?label=npm&amp;style=for-the-badge&amp;logo=npm&amp;color=cb3837&amp;labelColor=1c1917"></a>
   <img alt="License" src="https://img.shields.io/badge/License-AGPL--3.0-7c3aed?style=for-the-badge&labelColor=1c1917">
 </p>
 
@@ -32,15 +31,21 @@ WeRelay 把电脑上的 AI 编程任务延伸到微信 ClawBot、局域网网页
 
 ## 快速开始
 
-需要 Node.js `>= 24`，并已安装、登录至少一个支持的 Agent。
+需要 Node.js `>= 24`、Git，并已安装、登录至少一个支持的 Agent。WeRelay 当前只通过 GitHub 公开源码，没有发布到 npm Registry。仓库使用 npm 完成本地构建和 tarball 安装，但 npm 不是公开下载渠道。
 
 ```bash
-npm install -g werelay
+git clone https://github.com/imsinolam/WeRelay.git
+cd WeRelay
+npm ci
+PACKAGE_FILE="$(npm pack --silent)"
+npm install -g "./$PACKAGE_FILE"
 werelay-setup
 cd /path/to/your/project
 werelay --adapter codex
 # 常驻后台、不自动恢复终端或打开桌面应用：werelay --idle-start --no-open
 ```
+
+Windows PowerShell、更新和服务器安装步骤见 [从 GitHub 安装与更新 WeRelay](docs/使用指南/GitHub源码安装与更新.md)。
 
 完成微信扫码后，向 ClawBot 发送“任务”即可选择电脑上的真实任务。即使没有公网服务器，daemon 也会自动启动局域网移动网页；第一次使用请先进入一个任务，再发送“状态”，从 ClawBot 返回的授权链接进入并设置移动访问密码。终端打印的基础地址不用于首次设置密码。
 
@@ -86,7 +91,7 @@ WeRelay 的目标是让所有正式 Agent 最终都满足“继续原任务、�
 
 ## 从 DeskRelay 迁移到 WeRelay
 
-WeRelay 是一次完整品牌迁移：npm 包改为 `werelay`，公开命令改为 `werelay-*`，活动数据目录改为 `~/.werelay`，环境变量改为 `WERELAY_*`。
+WeRelay 是一次完整品牌迁移：本地安装包标识改为 `werelay`，公开命令改为 `werelay-*`，活动数据目录改为 `~/.werelay`，环境变量改为 `WERELAY_*`。
 
 旧的 `deskrelay-*` 命令和 `DESKRELAY_*` 环境变量不再作为公开兼容入口。首次启动时，WeRelay 会优先从 `~/.deskrelay` 复制缺失的登录、任务和附件状态，再从更早的 `~/.cli-bridge` 补齐；旧目录不会被删除或继续写入。完整迁移说明见 [运行配置](docs/使用指南/运行配置.md#from-deskrelay-to-werelay)。
 

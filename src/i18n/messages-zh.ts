@@ -49,7 +49,7 @@ export const messages: Record<string, string> = {
   // === Hook 健康检查 ===
   "hook.healthCheck.warning": "Claude 消息转发可能异常：15 秒内未收到事件。",
   "hook.healthCheck.logHint": "\n请在电脑上检查桥接日志。",
-  "hook.healthCheck.fixes": "\n请确认 Node.js 版本满足要求，并重新安装最新版。",
+  "hook.healthCheck.fixes": "\n请确认 Node.js 版本满足要求，并按 GitHub README 重新构建和安装本地 tarball。",
 
   // === PTY 回退 ===
   "pty.fallback.warning": "终端兼容模式已启用，消息、审批和会话功能不受影响。",
@@ -57,16 +57,16 @@ export const messages: Record<string, string> = {
   // === 启动诊断 ===
   "spawn.diagnostic.title": "无法启动 CLI 进程: {target}\n错误: {error}",
   "spawn.diagnostic.fixesHeader": "\n可能的修复方法:",
-  "spawn.diagnostic.nodePty": "- node-pty 原生模块与当前 Node.js 版本不兼容。\n- 运行: npm rebuild node-pty\n- 或重新安装: npm install -g werelay@latest",
+  "spawn.diagnostic.nodePty": "- node-pty 原生模块与当前 Node.js 版本不兼容。\n- 运行: npm rebuild -g werelay\n- 若仍失败，按 GitHub README 重新构建并安装本地 tarball",
   "spawn.diagnostic.xcode": "- 确保已安装 Xcode 命令行工具: xcode-select --install",
-  "spawn.diagnostic.linuxBuildTools": "- Linux 需要编译工具来构建 node-pty: sudo apt install build-essential python3\n- 然后重新安装: npm install -g werelay@latest",
+  "spawn.diagnostic.linuxBuildTools": "- Linux 需要编译工具来构建 node-pty: sudo apt install build-essential python3\n- 然后运行: npm rebuild -g werelay",
   "spawn.diagnostic.notFound": "- 命令 \"{target}\" 未在 PATH 中找到。\n- 请确认已安装并可从终端访问。",
-  "spawn.diagnostic.generic": "- 重新安装: npm install -g werelay@latest",
+  "spawn.diagnostic.generic": "- 按 GitHub README 重新构建并安装本地 tarball",
   "spawn.diagnostic.nodeVersion": "- 确保 Node.js >= 24.0.0: node --version",
   "spawn.diagnostic.winFull": "- 确保 Windows 10 build 18309+（运行 winver 查看）\n- 安装 Visual C++ Redistributable: https://aka.ms/vs/17/release/vc_redist.x64.exe\n- 运行: npm rebuild node-pty\n- 尝试以管理员身份运行",
 
   // === 版本检查 ===
-  "update.available": "[有新版本] 版本 {latest} 可用（当前: {current}）。\n运行: npm install -g werelay@latest",
+  "update.available": "[有新版本] 版本 {latest} 可用（当前: {current}）。\n请从 GitHub 获取最新版，并按 README 重新安装本地 tarball。",
   // === Doctor ===
   "doctor.title": "WeRelay 诊断",
   "doctor.section.environment": "环境",

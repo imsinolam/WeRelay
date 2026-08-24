@@ -4,7 +4,7 @@
 Before modifying this repository, read `docs/开发协作/多Agent协作规范.md`. It defines mandatory worktree isolation, commit handoff, dirty-worktree classification, release ownership, and post-release cleanup. Also read `docs/开发协作/任务职责与分工.md` when the task may overlap another long-running Agent.
 
 ## Project Mental Model
-WeRelay extends real local coding-agent sessions to WeChat, LAN web, and an optional public application relay without creating a forked conversation. The only public npm package is `werelay`; do not reintroduce legacy package names or command aliases.
+WeRelay extends real local coding-agent sessions to WeChat, LAN web, and an optional public application relay without creating a forked conversation. GitHub is the only public distribution source; `werelay` remains the local package identifier used for tarball installation. Do not publish it to npm Registry or reintroduce legacy package names and command aliases.
 
 There are two runtime shapes:
 - `werelay` (alias `werelay-daemon`): the preferred long-lived mode. It owns one WeChat connection for one startup working directory, keeps supported Agent slots alive, and switches from WeChat with commands such as `/codex`, `/claude`, `/grok`, `/codebuddy`, `/reasonix`, and `/opencode`. Switching reuses an already connected visible CLI, or opens a new visible CLI when needed.
@@ -21,7 +21,7 @@ Runtime data lives under `~/.werelay` by default. WeRelay copy-migrates missing 
 - `src/runtime`: bridge-owned runtime host creation, including the Codex runtime host and legacy adapter runtime wrapper.
 - `src/media`: shared media/attachment metadata types.
 - `src/commands` and `src/utils`: global command helpers and update checking.
-- `bin/*.mjs`: published CLI wrappers. These are tracked source files, not generated output.
+- `bin/*.mjs`: packaged CLI wrappers. These are tracked source files, not generated output.
 - `scripts`: release, safety, snapshot, and packaging helpers, especially `check-public-safety.mjs`, `create-public-snapshot.mjs`, and `smoke-global-install.mjs`.
 - `test/<area>` mirrors the runtime areas: `bridge`, `companion`, `daemon`, and `wechat`.
 - `docs/README.md`: human-friendly documentation entrypoint. User, architecture, collaboration, release, and website documents live in Chinese-named subdirectories.
@@ -119,23 +119,22 @@ Inbound WeChat images and files are downloaded to `~/.werelay/inbound-attachment
 
 Network failures to `https://ilinkai.weixin.qq.com` may be proxy-related even when bridge state is healthy. Node `fetch()` needs appropriate `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and often `NODE_OPTIONS=--use-env-proxy`; keep `NO_PROXY=127.0.0.1,localhost,::1` so local daemon/companion traffic stays direct.
 
-## npm Package Publishing
-The root `package.json` must keep the single public package name `werelay`. Do not publish compatibility mirrors and do not add legacy command aliases back to `bin`.
+## GitHub Distribution And Local Packages
+GitHub is the only public release and version source. The root `package.json` must keep `private: true`; do not run `npm publish`, add Registry publishing configuration, publish compatibility mirrors, or add legacy command aliases back to `bin`.
 
-Before a real npm release:
+The package name `werelay` is retained only as the local tarball and installed CLI identifier. npm remains a build tool:
 1. Inspect the real diff and identify user-visible and breaking changes.
-2. Update `package.json`, `package-lock.json`, `bun.lock`, README, and the current release note.
+2. Update `package.json`, `package-lock.json`, `bun.lock`, README, and the current release note when the product version changes.
 3. Run `npm run quality`.
 4. Run `npm pack --dry-run --json` and inspect the tarball contents and size.
 5. Run `npm run smoke:global -- --purge-global --clean-cache`; use `--full` for the full release path.
-6. Run `npm publish --dry-run --access public`.
-7. Publish only after explicit user authorization.
-8. Verify the live registry with `npm view werelay version dist-tags --registry=https://registry.npmjs.org/ --json`.
+6. Install and deploy the reviewed `npm pack` tarball; never substitute a Registry download.
+7. Verify the GitHub remote SHA and the installed package version.
 
-Do not claim publication until the live registry confirms it. `EOTP`, `E401`, or `E404` remains an auth/registry blocker until verified.
+Do not describe npm Registry as an installation, update, or release channel for WeRelay. Third-party Agent installation commands that legitimately use npm are unaffected.
 
 ## Multi-Agent Git And Release Ownership
-WeRelay may be edited by multiple Agents at the same time. Every ordinary development Agent must work in its own branch and worktree, preserve existing dirty state, stage only explicitly owned files, and finish with one or more local commits. Development Agents must not push, merge to `main`, create tags, bump the public version, publish npm, deploy production, or perform any GitHub write operation.
+WeRelay may be edited by multiple Agents at the same time. Every ordinary development Agent must work in its own branch and worktree, preserve existing dirty state, stage only explicitly owned files, and finish with one or more local commits. Development Agents must not push, merge to `main`, create tags, bump the public version, run `npm publish`, deploy production, or perform any GitHub write operation.
 
 A release Agent is the only role allowed to integrate completed commits, create release metadata commits, bump versions, prepare release notes, and run the formal release. The current Agent must not assume that role unless the user explicitly assigns it as the release Agent. Only one release Agent may own a version at a time.
 
@@ -181,7 +180,7 @@ Prefer surgical fixes backed by focused tests. Avoid broad rewrites of adapter f
 - **具备多客户端后端的 CLI Agent 应直接共享一个长期 owner，不能让远程端和电脑 TUI 各自启动独立 ACP。** Grok 已验证可用工作区级 `agent leader` 同时承载 ACP 客户端和可见 TUI；共享 socket、稳定 sessionId 和关闭时清理 owner，才能让手机消息实时出现在电脑终端并避免会话分叉。
 - **对外说明“支持某个 Agent”时必须分别标明原任务继续、电脑端可见和已打开界面实时同步，不能把能读取历史、启动命令或加载 ACP 会话统称为完整支持。** 这些能力对应不同的数据 owner 和同步强度；混写会让用户误以为手机消息一定进入当前桌面窗口，掩盖真实 owner 边界，并重新制造对话分叉风险。
 - **恢复用户明确选择的持久任务失败时必须直接报告不可用，不能自动新建任务或切换到“最近任务”。** 相同界面里静默换成另一个 session 会让用户以为仍在原上下文中继续，实际却已产生不可见分叉；Claude、OpenCode、Grok 和 CodeBuddy 等适配器都要保留原任务身份并让用户决定如何恢复。
-- **对外品牌迁移必须同时统一 npm 包、公开命令、活动数据目录和环境变量，不能只改界面文案后继续保留旧产品入口。** 半迁移会让 README、安装体验、日志、部署脚本和用户认知长期割裂；破坏性更名应通过主版本升级和一次性旧数据迁移完成，而不是永久保留两套公开名称。
+- **对外品牌迁移必须同时统一本地安装包标识、公开命令、活动数据目录和环境变量，不能只改界面文案后继续保留旧产品入口。** 半迁移会让 README、安装体验、日志、部署脚本和用户认知长期割裂；破坏性更名应通过主版本升级和一次性旧数据迁移完成，而不是永久保留两套公开名称。
 - **开源前不能只检查当前源码，还必须排除所有未经审查的位图、官网草稿和真实聊天截图，并从已审计快照创建干净的公开 Git 历史。** 未跟踪的营销目录同样可能带账号名、任务内容和局域网地址，而旧提交仍会保留已经删除的二进制图片；让当前快照扫描所有位图、让历史扫描检查敏感文件名，并用无历史快照首次发布，才能阻止这些内容永久公开。
 - **无分隔符的“任务关键词”必须先确认能匹配真实任务，再当作控制命令。** 这样既支持“任务canvas”快速筛选，又不会把“任务做完后告诉我”这类正常对话误判为任务切换；有空格或冒号时则视为用户明确发出的搜索命令。
 - **可变条数翻页必须从当前已展示范围的末尾继续，而不能用新条数重新计算页码起点。** 例如首屏 10 条后发送“下一页20”应展示第 11–30 条；保存起点、条数和历史位置才能避免跳过任务，并让“上一页”准确返回原范围。
@@ -230,7 +229,7 @@ Prefer surgical fixes backed by focused tests. Avoid broad rewrites of adapter f
 - **微信审批推送失败时必须区分“没有检测到审批”和“iLink context token 已失效”，并在下一条微信消息刷新 token 后先补发仍有效的审批，再处理新消息。** 长任务经常超过微信主动回复窗口；如果先执行用户的新输入或静默丢弃，审批可能继续卡住，用户也会误以为 WeRelay 没监控到任务。
 - **微信收到只含正整数的消息时绝不能把它作为普通提示词发送给模型。** 纯数字高度可能是在回复最近的审批选项或任务序号；应先让真实待审批请求获得优先权，再按当前稳定任务列表解析，仍无法确定时明确询问并说明没有转发给模型，否则模型会把“4”之类控制回复误当成新需求，既污染原会话又错过用户真正想操作的任务。
 - **Codex Desktop 摘要订阅中的审批请求即使缺少 `turnId`，也必须重建成可操作的网页与 ClawBot 审批。** 摘要状态会保留 `requests` 和 `waitingOnApproval`，却可能省略 turn 历史且请求参数本身没有 turn 标识；若把 `turnId` 当成创建审批卡片的前置条件，就会出现侧边栏显示“审批”但正文没有卡片。审批回复真正依赖的是 thread 与 requestId，因此未知 turn 只能省略展示锚点，不能丢弃请求。
-- **给运行中的 LaunchAgent 部署本地 npm 包时必须安装 `npm pack` 产出的 tarball，不能直接 `npm install -g <仓库目录>`。** 直接安装目录会把全局包变成指向工作区的软链接，后续 `npm run build` 删除并重建 `dist/` 时就可能让正在运行的服务短暂失去入口；先卸载服务、打包并安装 tarball、再恢复服务和验活，才能让开发目录与线上运行副本保持隔离。
+- **给运行中的 LaunchAgent 部署本地 npm 格式安装包时必须安装 `npm pack` 产出的 tarball，不能直接 `npm install -g <仓库目录>`。** 直接安装目录会把全局包变成指向工作区的软链接，后续 `npm run build` 删除并重建 `dist/` 时就可能让正在运行的服务短暂失去入口；先卸载服务、打包并安装 tarball、再恢复服务和验活，才能让开发目录与线上运行副本保持隔离。
 - **网页审批结果必须按 Agent、任务和 turn 持久化并重新合并进消息流，不能在清空待审批卡片后只保留短暂 Toast。** 审批卡片消失并不代表用户不再需要确认自己的选择；记录允许、拒绝、任务级允许或免审结果，并在刷新后恢复到对应轮次附近，才能避免用户误以为操作未生效，也能防止结果串到其他任务。
 - **WeRelay 的敏感运行时写入必须统一经过私有目录与原子私有文件 helper，并在启动时递归修复旧数据权限。** 只在个别调用点传 `mode` 会遗漏已存在文件、原子临时文件和迁移复制内容；POSIX 上统一目录 `0700`、普通敏感文件 `0600`，并跳过符号链接，才能避免凭据、上下文令牌、日志和附件因 umask 或历史版本遗留而被同机其他用户读取。
 - **Codex 完成通知必须把待发送正文、分段进度和成功去重键持久化，发送前只能标记 in-flight，不能提前标记 delivered 或清理 final reply。** 微信 context token 可能在长任务结束时失效，且多段消息可能只成功一部分；只有全部文本送达后再清缓存，并从未送达分段继续补发，才能同时避免通知永久丢失和重复发送，daemon 重启后也能恢复。若恢复连接时有三条或更多完全未发送的完成通知，必须合并成一条按北京时间倒序排列的摘要，写清完成时间、任务名和网页版链接，摘要成功后再批量确认 delivered；否则一次用户输入会触发大量历史回答逐条轰炸。
@@ -253,7 +252,7 @@ Prefer surgical fixes backed by focused tests. Avoid broad rewrites of adapter f
 
 - **跨平台实现与测试必须按目标操作系统显式选择路径 API、命令启动器、IPC 类型和权限模型，不能让当前宿主平台的默认行为参与模拟。** Windows 的长路径与 8.3 短路径应先规范化或用 `realpath` 比较，`.cmd`/`.bat` 应通过 `cmd.exe` 启动，Unix Socket 与 Named Pipe 要分开覆盖，敏感文件在 Windows 依赖 ACL 而不是 POSIX mode；否则同一功能会在真实 Windows Runner 上被字符串、入口或权限语义误判，造成整条 CI 持续标红。
 - **终端切换菜单只显示需要用户处理的状态，正常的“已打开 / 已连接 / 未打开”不应持续占据每一行。** “已打开”只是检测到进程存在，“已连接”才表示 WeRelay 已接入真实任务 owner；这一区别适合内部诊断，但普通用户只需要看到“当前、切换中、处理中、待审批、待输入、启动中、异常”，否则重复状态会增加噪声并挤压终端名称。
-- **所有会进入公开仓库或 npm 包的职责文档都必须使用基础设施角色名，不能写真实公网 IP 或本地任务 ID。** 即使源码本身没有密钥，服务器地址和内部任务标识仍会暴露个人基础设施与使用轨迹；公开文档应写“专用发布服务器 / 正式公网 Relay”等角色名，真实值只留在本地私有配置中。
+- **所有会进入公开仓库或本地发布 tarball 的职责文档都必须使用基础设施角色名，不能写真实公网 IP 或本地任务 ID。** 即使源码本身没有密钥，服务器地址和内部任务标识仍会暴露个人基础设施与使用轨迹；公开文档应写“专用发布服务器 / 正式公网 Relay”等角色名，真实值只留在本地私有配置中。
 - **Codex 新任务从私有 app-server 交接给桌面端时，必须先 `thread/unsubscribe` 释放 active writer，再让 Desktop `thread/resume`；顺序不能反过来。** `thread/start` 会让创建任务的 app-server 持有唯一 writer，若先打开桌面任务，Desktop 会持续报“已在另一个应用中打开”，而原实现又因打开失败跳过 unsubscribe，形成永久占用；桌面不可用时再显式恢复 bootstrap writer，才能兼顾唯一 owner 与锁屏继续任务。
 - **官网首屏必须使用真实产品界面或以真实截图为高保真参考，不能凭空虚构 Codex、DeepSeek Harness 等桌面 Agent 的信息架构；视觉关系仍应明确表达“多个电脑 Agent → WeRelay → 手机 ClawBot / 网页控制台接力”。** 错画成终端或自造导航会误导产品形态；电脑窗口应紧密重叠，手机与网页入口要成为清晰接力终点，局域网与外网则是同一网页控制台的两种可选连接方式，这对准确建立用户预期很重要。
 - **用户要求“收集研究网上的设计”时，必须围绕行业案例与通用评价方法展开，不能擅自转成对当前项目资产的诊断。** 研究对象一旦被替换，即使分析很详细也没有回答用户的问题；应先覆盖外部案例、专业评审标准和可复用的判断框架，再在用户明确要求时应用到现有方案。

@@ -7,6 +7,7 @@ const requiredDocs = [
   "docs/README.md",
   "docs/使用指南/项目介绍.md",
   "docs/使用指南/Agent安装与配置.md",
+  "docs/使用指南/GitHub源码安装与更新.md",
   "docs/使用指南/局域网移动网页快速开始.md",
   "docs/使用指南/公网Relay配置与验收.md",
   "docs/使用指南/运行配置.md",
@@ -104,6 +105,8 @@ describe("documentation structure", () => {
     expect(publishing).toContain("`main` 推送会再次触发同一组 CI");
     expect(publishing).toContain("不允许 force push，不允许删除 `main`");
     expect(publishing).toContain("npm run privacy:check:history");
+    expect(publishing).toContain("GitHub 是 WeRelay 唯一的公开发布和版本来源");
+    expect(publishing).not.toContain("npm publish --dry-run");
     expect(collaboration).toContain("`main` 推送触发的最新一轮四项 CI");
     expect(agents).toContain("one-time candidate branch");
   });

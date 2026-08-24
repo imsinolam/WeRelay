@@ -251,7 +251,7 @@ npm run privacy:check:history
 
 ## Release Notes and Publishing
 
-发布由唯一的发布 Agent 处理。普通开发 Agent 和 PR 可以修改源码、测试和文档，但不能改正式版本号、创建 tag、执行 `npm publish`、部署正式环境或推送维护者仓库。
+发布由唯一的发布 Agent 处理。普通开发 Agent 和 PR 可以修改源码、测试和文档，但不能改正式版本号、创建 tag、部署正式环境或推送维护者仓库。WeRelay 只通过 GitHub 公开，仓库设置为不可发布的私有包元数据，任何 Agent 都不得执行 `npm publish`。
 
 发布 Agent 必须从实际 Git diff、候选 commit 和验证结果整理说明。中文版本记录是面向用户的主说明，应使用普通、清晰的中文描述用户能感知的变化，不写类名、字段名、文件路径、提交 SHA 和测试命令。技术证据保留在 commit body 和发布验收报告中。模板见 [docs/发布/版本记录/中文版本说明模板.md](docs/发布/版本记录/中文版本说明模板.md)。
 

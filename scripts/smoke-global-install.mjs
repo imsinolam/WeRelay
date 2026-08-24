@@ -120,7 +120,7 @@ function printHelp() {
     [
       "Usage: npm run smoke:global -- [--clean-cache] [--full] [--keep-tarball] [--purge-global]",
       "",
-      "Creates a real npm package tarball from the local source tree, installs it into your real npm global prefix, and verifies the installed CLI commands from outside the repository.",
+      "Creates a local npm-format tarball from the source tree, installs it into your real npm global prefix, and verifies the CLI commands from outside the repository. It does not publish to npm Registry.",
       "Default behavior:",
       "  - package tarball is built from the current local code",
       "  - the tarball is installed with npm install -g",

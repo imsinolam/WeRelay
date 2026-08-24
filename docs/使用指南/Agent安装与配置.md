@@ -6,11 +6,10 @@ WeRelay 是 Agent 的远程入口，不包含模型、账号或 Agent 本体。�
 
 ### 1. Node.js 与 WeRelay
 
-WeRelay 需要 Node.js `>= 24.0.0`：
+WeRelay 需要 Node.js `>= 24.0.0`。当前只通过 GitHub 公开源码，没有 npm Registry 公共包；先按 [从 GitHub 安装与更新 WeRelay](GitHub源码安装与更新.md) 完成本地 tarball 安装。
 
 ```bash
 node --version
-npm install -g werelay@latest
 ```
 
 确认命令可用：

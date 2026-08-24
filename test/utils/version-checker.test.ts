@@ -6,27 +6,44 @@ import {
   parseVersion,
 } from "../../src/utils/version-checker.ts";
 
-// 可注入的 fetch mock:按 URL 子串匹配 npm / github 路由,记录调用顺序。
-function buildFetchMock(routes: {
-  npm?: unknown;
-  github?: unknown;
-  npmStatus?: number;
-  githubStatus?: number;
-}): { fetch: typeof fetch; calls: string[] } {
+type RouteConfig = {
+  release?: unknown;
+  tags?: unknown;
+  packageJson?: unknown;
+  releaseStatus?: number;
+  tagsStatus?: number;
+  packageStatus?: number;
+};
+
+// 可注入的 fetch mock：按 GitHub 路由返回结果，并记录调用顺序。
+function buildFetchMock(routes: RouteConfig): {
+  fetch: typeof fetch;
+  calls: string[];
+} {
   const calls: string[] = [];
   const fetch = (async (url: string): Promise<Response> => {
     calls.push(url);
-    if (url.includes("registry.npmjs.org")) {
-      const status = routes.npmStatus ?? 200;
-      const body = routes.npm === undefined ? "" : JSON.stringify(routes.npm);
+    if (url.includes("/releases/latest")) {
+      const status = routes.releaseStatus ?? 200;
+      const body = routes.release === undefined ? "" : JSON.stringify(routes.release);
       return new Response(body, {
         status,
         headers: { "content-type": "application/json" },
       });
     }
-    if (url.includes("api.github.com")) {
-      const status = routes.githubStatus ?? 200;
-      const body = routes.github === undefined ? "" : JSON.stringify(routes.github);
+    if (url.includes("/tags?")) {
+      const status = routes.tagsStatus ?? 200;
+      const body = routes.tags === undefined ? "" : JSON.stringify(routes.tags);
+      return new Response(body, {
+        status,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (url.includes("raw.githubusercontent.com")) {
+      const status = routes.packageStatus ?? 200;
+      const body = routes.packageJson === undefined
+        ? ""
+        : JSON.stringify(routes.packageJson);
       return new Response(body, {
         status,
         headers: { "content-type": "application/json" },
@@ -85,43 +102,56 @@ describe("compareVersions", () => {
 });
 
 describe("fetchLatestVersion", () => {
-  test("npm 命中时直接返回 npm 版本,且不回退 GitHub", async () => {
-    const { fetch, calls } = buildFetchMock({ npm: { version: "1.2.3" } });
-    const latest = await fetchLatestVersion({ fetchImpl: fetch });
-    expect(latest).toBe("1.2.3");
-    expect(calls.some((u) => u.includes("registry.npmjs.org"))).toBe(true);
-    expect(calls.some((u) => u.includes("api.github.com"))).toBe(false);
-  });
-
-  test("npm 失败时回退 GitHub tags 并取最高版本", async () => {
-    const { fetch } = buildFetchMock({
-      npmStatus: 500,
-      github: [{ name: "1.1.0" }, { name: "1.1.1" }, { name: "1.0.0" }],
+  test("优先读取 GitHub 最新 Release", async () => {
+    const { fetch, calls } = buildFetchMock({
+      release: { tag_name: "v0.4.0" },
     });
     const latest = await fetchLatestVersion({ fetchImpl: fetch });
-    expect(latest).toBe("1.1.1");
+    expect(latest).toBe("0.4.0");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain("api.github.com");
+    expect(calls[0]).toContain("/releases/latest");
+    expect(calls.some((url) => url.includes("registry.npmjs.org"))).toBe(false);
   });
 
-  test("GitHub tags 含 v 前缀也能正确解析", async () => {
-    const { fetch } = buildFetchMock({
-      npmStatus: 404,
-      github: [{ name: "v1.5.0" }, { name: "v1.4.0" }],
+  test("没有 Release 时从 GitHub tags 取最高版本", async () => {
+    const { fetch, calls } = buildFetchMock({
+      releaseStatus: 404,
+      tags: [{ name: "0.3.3" }, { name: "v0.3.4" }, { name: "0.2.9" }],
     });
     const latest = await fetchLatestVersion({ fetchImpl: fetch });
-    expect(latest).toBe("1.5.0");
+    expect(latest).toBe("0.3.4");
+    expect(calls).toHaveLength(2);
+    expect(calls[1]).toContain("/tags?");
   });
 
-  test("npm 返回的 version 字段无效时回退 GitHub", async () => {
-    const { fetch } = buildFetchMock({
-      npm: { version: "not-a-version" },
-      github: [{ name: "1.1.1" }],
+  test("没有 Release 和 tag 时读取 GitHub main 的 package.json", async () => {
+    const { fetch, calls } = buildFetchMock({
+      releaseStatus: 404,
+      tags: [],
+      packageJson: { version: "0.3.4" },
     });
     const latest = await fetchLatestVersion({ fetchImpl: fetch });
-    expect(latest).toBe("1.1.1");
+    expect(latest).toBe("0.3.4");
+    expect(calls).toHaveLength(3);
+    expect(calls[2]).toContain("raw.githubusercontent.com");
   });
 
-  test("两个源都失败时返回 null", async () => {
-    const { fetch } = buildFetchMock({ npmStatus: 500, githubStatus: 503 });
+  test("无效 Release 会继续尝试 tags", async () => {
+    const { fetch } = buildFetchMock({
+      release: { tag_name: "not-a-version" },
+      tags: [{ name: "v0.3.5" }],
+    });
+    const latest = await fetchLatestVersion({ fetchImpl: fetch });
+    expect(latest).toBe("0.3.5");
+  });
+
+  test("GitHub 三个公开版本入口都失败时返回 null", async () => {
+    const { fetch } = buildFetchMock({
+      releaseStatus: 500,
+      tagsStatus: 503,
+      packageStatus: 404,
+    });
     const latest = await fetchLatestVersion({ fetchImpl: fetch });
     expect(latest).toBeNull();
   });
@@ -137,7 +167,7 @@ describe("fetchLatestVersion", () => {
         });
       });
     }) as typeof fetch;
-    const latest = await fetchLatestVersion({ fetchImpl: fetch, timeoutMs: 50 });
+    const latest = await fetchLatestVersion({ fetchImpl: fetch, timeoutMs: 20 });
     expect(latest).toBeNull();
   });
 });
