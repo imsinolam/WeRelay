@@ -148,6 +148,8 @@ Chinese release notes are the user-facing source of truth. Write them in plain, 
 - Add one release note for the current public baseline instead of rewriting historical release notes to pretend they used the new name.
 - For the public repository, export a privacy-checked snapshot and create a clean Git history; do not push this private development history directly.
 - GitHub fetch, commit, push, tag, and remote verification for the maintained public repository must run on the configured publishing server. The developer Mac may validate and upload a privacy-reviewed snapshot to that server over SSH, but must never fall back to a direct GitHub push.
+- The publishing server must push the public commit to a one-time candidate branch first, wait for Secret scan plus Linux, macOS, and Windows quality checks, then fast-forward the same SHA to protected `main`. The release Agent must also verify the latest CI run triggered by the `main` push.
+- Protected `main` must keep strict required checks for `Secret scan` and all three quality jobs, with force pushes and deletion disabled. Do not weaken this rule to bypass a failed release.
 - The publishing server must use an isolated WeRelay directory, reject non-fast-forward updates, verify the final remote SHA, and avoid touching unrelated server projects.
 - Only update `log.md` and `git-log.md` when the user explicitly requests the double log.
 

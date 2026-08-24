@@ -82,6 +82,32 @@ describe("documentation structure", () => {
     expect(docsIndex).toContain("开发协作/多Agent协作规范.md");
   });
 
+  test("documents the protected candidate release baseline", () => {
+    const publishing = fs.readFileSync(
+      path.join(root, "docs/发布/对外发布操作手册.md"),
+      "utf8",
+    );
+    const collaboration = fs.readFileSync(
+      path.join(root, "docs/开发协作/多Agent协作规范.md"),
+      "utf8",
+    );
+    const agents = fs.readFileSync(path.join(root, "AGENTS.md"), "utf8");
+
+    for (const check of [
+      "Secret scan",
+      "Quality (ubuntu-latest)",
+      "Quality (macos-latest)",
+      "Quality (windows-latest)",
+    ]) {
+      expect(publishing).toContain(check);
+    }
+    expect(publishing).toContain("`main` 推送会再次触发同一组 CI");
+    expect(publishing).toContain("不允许 force push，不允许删除 `main`");
+    expect(publishing).toContain("npm run privacy:check:history");
+    expect(collaboration).toContain("`main` 推送触发的最新一轮四项 CI");
+    expect(agents).toContain("one-time candidate branch");
+  });
+
   test("keeps local Markdown links valid after document moves", () => {
     const markdownFiles = [
       ...["README.md", "CONTRIBUTING.md", "SECURITY.md", "AGENTS.md"]

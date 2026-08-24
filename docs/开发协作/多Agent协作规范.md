@@ -63,7 +63,7 @@ git branch --all --verbose --no-abbrev
 - 处理冲突、补充集成测试和必要的发布元数据；
 - 更新版本号和中英文版本说明；
 - 完成隐私、质量、构建、打包、安装和线上验活；
-- 通过专用发布服务器完成 GitHub fetch、commit、fast-forward push 和远端 SHA 验真；
+- 通过专用发布服务器完成 GitHub fetch、候选分支检查、fast-forward push 和远端 SHA 验真；
 - 报告纳入、排除、重复和仍待处理的改动。
 
 发布 Agent 不得：
@@ -237,6 +237,9 @@ npm pack --dry-run --json
 
 - Mac 只生成经过隐私检查、不含 `.git` 的公开快照；
 - GitHub fetch、公开 commit、push、tag 和 `git ls-remote` 验真只能在专用发布服务器完成；
+- 公开 commit 必须先进入一次性候选分支，等待 Secret scan 与 Linux、macOS、Windows 全部通过，再把同一 SHA fast-forward 到 `main`；
+- `main` 必须保持四项检查的严格分支保护，禁止 force push 和删除；不得为了通过发布临时关闭保护；
+- `main` 推送触发的最新一轮四项 CI 也要完成验真，不能只引用候选分支结果；
 - 推送必须 fast-forward，拒绝强推和 non-fast-forward；
 - 正式 Relay 使用 npm pack 产物部署，保留回滚目录，不影响服务器其他项目；
 - 详细操作见[对外发布操作手册](../发布/对外发布操作手册.md)。
@@ -246,7 +249,8 @@ npm pack --dry-run --json
 至少核对：
 
 - GitHub 远端 SHA；
-- 三平台 CI，特别是 Windows；
+- 候选分支与 `main` 最新运行的 Secret scan 和三平台 CI，特别是 Windows；
+- `main` 分支保护、候选分支清理和未处理 Secret alerts；
 - 本机安装版本和健康状态；
 - 公网网页、认证 API、Relay 设备在线；
 - 任务读取、消息发送和回读；
@@ -313,11 +317,13 @@ npm pack --dry-run --json
 - [ ] 候选提交表已冻结；
 - [ ] release worktree 干净；
 - [ ] 完整质量门禁通过；
-- [ ] 隐私快照不含 `.git` 和本地状态。
+- [ ] 隐私快照不含 `.git` 和本地状态；
+- [ ] 当前快照隐私检查与完整 Git 历史密钥扫描的范围已经区分；
+- [ ] `main` 分支保护仍要求 Secret scan 和三平台质量检查。
 
 ### 发布 Agent 完成后
 
-- [ ] GitHub SHA、CI、服务器版本和线上行为已验真；
+- [ ] GitHub SHA、候选 CI、`main` 最新 CI、分支保护和候选分支清理已验真；
 - [ ] 纳入与排除项已报告；
 - [ ] 共享工作树中的重复、独有和风险改动已分别说明；
 - [ ] 没有误删其他 Agent 的工作；
