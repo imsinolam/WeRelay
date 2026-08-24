@@ -77,6 +77,26 @@ function createFakeClient(queue: AsyncEnvelopeQueue) {
   const selections: Array<{ sessionId: string; selection: DeepSeekHarnessModelSelection }> = [];
   const sessions = [session()];
   const historyEntries: DeepSeekHarnessHistoryEntry[] = [];
+  const modelState = {
+    current: {
+      provider: "deepseek-official",
+      model: "deepseek-v4-flash",
+      reasoningEffort: "high",
+    },
+    routable: true,
+    groups: [{
+      id: "deepseek-official",
+      name: "DeepSeek",
+      models: [
+        { id: "deepseek-v4-flash", name: "DeepSeek-V4-Flash" },
+        {
+          id: "deepseek-v4-flash-vision-exp",
+          name: "DeepSeek-V4-Flash-Vision-Exp",
+        },
+      ],
+    }],
+    failures: [],
+  };
   const client: DeepSeekHarnessClientLike = {
     async describeHost() {
       return {
@@ -100,23 +120,11 @@ function createFakeClient(queue: AsyncEnvelopeQueue) {
       return { events: [...historyEntries], hasMore: false };
     },
     async readModels() {
-      return {
-        current: {
-          provider: "deepseek-official",
-          model: "deepseek-v4-flash",
-          reasoningEffort: "high",
-        },
-        routable: true,
-        groups: [{
-          id: "deepseek-official",
-          name: "DeepSeek",
-          models: [{ id: "deepseek-v4-flash", name: "DeepSeek-V4-Flash" }],
-        }],
-        failures: [],
-      };
+      return modelState;
     },
     async selectModel(sessionId, selection) {
       selections.push({ sessionId, selection });
+      modelState.current = { ...selection };
       return { selected: selection };
     },
     async prompt(sessionId, content) {
@@ -142,6 +150,7 @@ function createFakeClient(queue: AsyncEnvelopeQueue) {
     selections,
     sessions,
     historyEntries,
+    modelState,
   };
 }
 
@@ -451,6 +460,106 @@ describe("DeepSeek Harness adapter", () => {
     await adapter.dispose();
   });
 
+  test("lists every Harness provider group and switches duplicate model ids precisely", async () => {
+    const queue = new AsyncEnvelopeQueue();
+    const { client, selections } = createFakeClient(queue);
+    client.readModels = async () => ({
+      current: {
+        provider: "tencent-intranet",
+        model: "shared-model",
+      },
+      routable: true,
+      groups: [
+        {
+          id: "deepseek-official",
+          name: "DeepSeek",
+          models: [
+            { id: "deepseek-v4-flash", name: "DeepSeek V4 Flash" },
+            { id: "shared-model", name: "共享模型" },
+          ],
+        },
+        {
+          id: "tencent-intranet",
+          name: "Tencent",
+          models: [
+            { id: "hunyuan-t1", name: "混元 T1" },
+            { id: "shared-model", name: "共享模型" },
+          ],
+        },
+        {
+          id: "openrouter",
+          name: "OpenRouter",
+          models: [{
+            id: "anthropic/claude-sonnet",
+            name: "Claude Sonnet",
+            description: "经 OpenRouter 路由",
+          }],
+        },
+      ],
+      failures: [],
+    });
+    const adapter = new DeepSeekHarnessAdapter({
+      kind: "deepseek",
+      command: "dsh",
+      cwd: "/tmp/project",
+    }, { createClient: () => client });
+
+    expect(await adapter.getSessionModelState("session-1")).toEqual({
+      currentModel: "tencent-intranet::shared-model",
+      options: [
+        { id: "deepseek-official::deepseek-v4-flash", label: "DeepSeek · DeepSeek V4 Flash" },
+        { id: "deepseek-official::shared-model", label: "DeepSeek · 共享模型" },
+        { id: "tencent-intranet::hunyuan-t1", label: "Tencent · 混元 T1" },
+        { id: "tencent-intranet::shared-model", label: "Tencent · 共享模型" },
+        {
+          id: "openrouter::anthropic/claude-sonnet",
+          label: "OpenRouter · Claude Sonnet",
+          description: "经 OpenRouter 路由",
+        },
+      ],
+      canChange: true,
+    });
+
+    await adapter.setSessionModel("session-1", "deepseek-official::shared-model");
+    expect(selections.at(-1)).toEqual({
+      sessionId: "session-1",
+      selection: { provider: "deepseek-official", model: "shared-model" },
+    });
+  });
+
+  test("keeps legacy bare Harness model ids compatible and prefers the current provider", async () => {
+    const queue = new AsyncEnvelopeQueue();
+    const { client, selections } = createFakeClient(queue);
+    client.readModels = async () => ({
+      current: { provider: "tencent-intranet", model: "shared-model" },
+      routable: true,
+      groups: [
+        {
+          id: "deepseek-official",
+          name: "DeepSeek",
+          models: [{ id: "shared-model", name: "共享模型" }],
+        },
+        {
+          id: "tencent-intranet",
+          name: "Tencent",
+          models: [{ id: "shared-model", name: "共享模型" }],
+        },
+      ],
+      failures: [],
+    });
+    const adapter = new DeepSeekHarnessAdapter({
+      kind: "deepseek",
+      command: "dsh",
+      cwd: "/tmp/project",
+    }, { createClient: () => client });
+
+    await adapter.setSessionModel("session-1", "shared-model");
+    expect(selections.at(-1)).toEqual({
+      sessionId: "session-1",
+      selection: { provider: "tencent-intranet", model: "shared-model" },
+    });
+  });
+
   test("creates a fresh V4 Flash high-reasoning session only when explicitly requested", async () => {
     const queue = new AsyncEnvelopeQueue();
     const { client, createdCwds, selections } = createFakeClient(queue);
@@ -622,6 +731,166 @@ describe("DeepSeek Harness adapter", () => {
     }
   });
 
+  test("switches a blank WeRelay-created image task to the available vision model", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "werelay-deepseek-vision-"));
+    const imagePath = path.join(directory, "sample.png");
+    fs.writeFileSync(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    try {
+      const queue = new AsyncEnvelopeQueue();
+      const { client, prompts, selections, sessions } = createFakeClient(queue);
+      sessions[0] = session({ blank: true });
+      const adapter = new DeepSeekHarnessAdapter({
+        kind: "deepseek",
+        command: "dsh",
+        cwd: "/tmp/project",
+      }, { createClient: () => client });
+      await adapter.start();
+
+      await adapter.sendInputItemsToSession("session-1", [
+        { type: "text", text: "看图" },
+        { type: "localImage", path: imagePath },
+      ]);
+
+      expect(selections).toContainEqual({
+        sessionId: "session-1",
+        selection: {
+          provider: "deepseek-official",
+          model: "deepseek-v4-flash-vision-exp",
+          reasoningEffort: "high",
+        },
+      });
+      expect(prompts).toHaveLength(1);
+      await adapter.dispose();
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("surfaces the nested Harness model failure instead of a generic error", async () => {
+    const queue = new AsyncEnvelopeQueue();
+    const { client, historyEntries } = createFakeClient(queue);
+    const adapter = new DeepSeekHarnessAdapter({
+      kind: "deepseek",
+      command: "dsh",
+      cwd: "/tmp/project",
+    }, { createClient: () => client });
+    const events: BridgeEvent[] = [];
+    adapter.setEventSink((event) => events.push(event));
+    await adapter.start();
+    await adapter.sendInputToSession("session-1", "继续任务");
+
+    historyEntries.push(
+      {
+        event: { type: "turn/start", seq: 1, time: 100, data: { turn: 3 } },
+      },
+      {
+        event: {
+          type: "user/message",
+          seq: 2,
+          time: 101,
+          data: {
+            source: { kind: "user", rpcId: "prompt-rpc-1" },
+            content: [{ type: "text", text: "继续任务" }],
+          },
+        },
+      },
+      {
+        event: {
+          type: "turn/end",
+          seq: 3,
+          time: 102,
+          data: {
+            turn: 3,
+            reason: {
+              kind: "error",
+              error: {
+                message: 'model "stealth/ox-alpha" returned a completed response with no content',
+                code: "EMPTY_RESPONSE",
+              },
+            },
+          },
+        },
+      },
+    );
+    queue.push({
+      rpcId: "turn-end",
+      payload: {
+        type: "session/event",
+        sessionId: "session-1",
+        event: {
+          type: "turn/end",
+          seq: 3,
+          time: 102,
+          data: {
+            turn: 3,
+            reason: {
+              kind: "error",
+              error: {
+                message: 'model "stealth/ox-alpha" returned a completed response with no content',
+                code: "EMPTY_RESPONSE",
+              },
+            },
+          },
+        },
+      },
+    });
+    await nextTurn();
+    await nextTurn();
+    await nextTurn();
+
+    expect(events).toContainEqual({
+      type: "task_failed",
+      message: "OpenRouter 的 ox-alpha 模型返回了空响应，请切换到其他模型后重试。",
+      timestamp: new Date(102).toISOString(),
+      threadId: "session-1",
+      turnId: "3",
+      origin: "wechat",
+    });
+    await adapter.dispose();
+  });
+
+  test("includes the nested Harness error in the session run summary", async () => {
+    const queue = new AsyncEnvelopeQueue();
+    const { client, historyEntries, sessions } = createFakeClient(queue);
+    sessions[0] = session({ updatedAt: 200 });
+    historyEntries.push(
+      {
+        event: { type: "turn/start", seq: 1, time: 100, data: { turn: 2 } },
+      },
+      {
+        event: {
+          type: "turn/end",
+          seq: 2,
+          time: 200,
+          data: {
+            turn: 2,
+            reason: {
+              kind: "error",
+              error: {
+                message: 'model "stealth/ox-alpha" returned a completed response with no content',
+                code: "EMPTY_RESPONSE",
+              },
+            },
+          },
+        },
+      },
+    );
+    const adapter = new DeepSeekHarnessAdapter({
+      kind: "deepseek",
+      command: "dsh",
+      cwd: "/tmp/project",
+    }, { createClient: () => client });
+
+    expect(await adapter.getSessionRunSummary("session-1")).toEqual({
+      turnId: "2",
+      status: "failed",
+      startedAtMs: 100,
+      completedAtMs: 200,
+      durationMs: 100,
+      errorMessage: "OpenRouter 的 ox-alpha 模型返回了空响应，请切换到其他模型后重试。",
+    });
+  });
+
   test("reports a cancelled Harness turn as interrupted when no turn-end was persisted", async () => {
     const queue = new AsyncEnvelopeQueue();
     const { client, historyEntries, sessions } = createFakeClient(queue);
@@ -771,5 +1040,71 @@ describe("DeepSeek Harness adapter", () => {
       },
     ]);
     await adapter.dispose();
+  });
+});
+
+describe("DeepSeek Harness disconnect notice dedup", () => {
+  test("sends one warning per outage episode and an info notice on recovery", async () => {
+    const queue = new AsyncEnvelopeQueue();
+    const { client: baseClient } = createFakeClient(queue);
+    let muxFailing = true;
+    let failedAttempts = 0;
+    const client: DeepSeekHarnessClientLike = {
+      ...baseClient,
+      openMux(): AsyncIterable<DeepSeekHarnessEnvelope> {
+        if (!muxFailing) return queue;
+        failedAttempts += 1;
+        return {
+          [Symbol.asyncIterator]() {
+            return {
+              async next(): Promise<IteratorResult<DeepSeekHarnessEnvelope>> {
+                throw new Error("DeepSeek Harness WebSocket 连接失败。");
+              },
+            };
+          },
+        };
+      },
+    };
+    const adapter = new DeepSeekHarnessAdapter({
+      kind: "deepseek",
+      command: "dsh",
+      cwd: "/tmp/project",
+    }, { createClient: () => client });
+    const events: BridgeEvent[] = [];
+    adapter.setEventSink((event) => events.push(event));
+    await adapter.start();
+
+    const notices = () =>
+      events.flatMap((event) => event.type === "notice" ? [event] : []);
+    const disconnectNotices = () =>
+      notices().filter((event) => event.text.includes("事件连接已断开"));
+
+    async function waitFor(predicate: () => boolean): Promise<void> {
+      const deadline = Date.now() + 5000;
+      while (!predicate()) {
+        if (Date.now() >= deadline) throw new Error("timed out waiting for mux loop state");
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    }
+
+    try {
+      await waitFor(() => disconnectNotices().length === 1);
+      await waitFor(() => failedAttempts >= 2);
+      expect(disconnectNotices()).toHaveLength(1);
+
+      muxFailing = false;
+      queue.push({
+        rpcId: "mux-recovered",
+        payload: { type: "session/subscribed", sessionId: "session-1", lastSeq: 1 },
+      });
+      await waitFor(() =>
+        notices().some((event) =>
+          event.level === "info" && event.text.includes("事件连接已恢复")
+        )
+      );
+      expect(disconnectNotices()).toHaveLength(1);
+    } finally {
+      await adapter.dispose();
+    }
   });
 });

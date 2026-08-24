@@ -90,11 +90,13 @@ describe("mobile cache freshness", () => {
     );
   });
 
-  test("returns unchanged from the lightweight endpoint when the cached revision matches", async () => {
+  test("returns unchanged from the O(1) revision endpoint without reading Agent history", async () => {
     const authStore = createAuthStore("cache freshness password");
     const sessionCookie = `codex_mobile_session=${authStore.createSessionToken()}`;
     let answer = "缓存内容";
+    let revision = "boot-1";
     const reads: Array<{ limit?: number; lightweight?: boolean }> = [];
+    const revisionReads: Array<{ threadId: string; adapter?: string }> = [];
     const server = await startCodexMobileServer({
       host: "127.0.0.1",
       port: 0,
@@ -102,6 +104,10 @@ describe("mobile cache freshness", () => {
       accessToken: "mobile-secret",
       authStore,
       listTasks: async () => [],
+      readContentRevision: (threadId, adapter) => {
+        revisionReads.push({ threadId, ...(adapter ? { adapter } : {}) });
+        return revision;
+      },
       readMessages: async (threadId, options) => {
         reads.push({ limit: options?.limit, lightweight: options?.lightweight });
         return {
@@ -129,9 +135,14 @@ describe("mobile cache freshness", () => {
         revision: full.revision,
         changed: false,
       });
-      expect(reads.at(-1)).toEqual({ limit: 1, lightweight: true });
+      expect(reads).toHaveLength(1);
+      expect(revisionReads).toEqual([
+        { threadId: "thread-1" },
+        { threadId: "thread-1" },
+      ]);
 
       answer = "电脑端已有新内容";
+      revision = "boot-2";
       const changedResponse = await fetch(
         `${root}/api/tasks/thread-1/sync-state?known=${full.revision}`,
         { headers },
@@ -141,7 +152,13 @@ describe("mobile cache freshness", () => {
         changed: boolean;
       };
       expect(changed.changed).toBe(true);
-      expect(changed.revision).not.toBe(full.revision);
+      expect(changed.revision).toBe("boot-2");
+      expect(reads).toHaveLength(1);
+      expect(revisionReads).toEqual([
+        { threadId: "thread-1" },
+        { threadId: "thread-1" },
+        { threadId: "thread-1" },
+      ]);
     } finally {
       await server.close();
     }
@@ -444,7 +461,7 @@ describe("mobile terminal switcher status", () => {
   });
 
   test("keeps both menu columns on one line in a wider mobile menu", () => {
-    expect(CODEX_MOBILE_CSS).toContain("width: min(300px, calc(100vw - 24px))");
+    expect(CODEX_MOBILE_CSS).toContain("width: min(300px, calc(100vw - 16px))");
     expect(CODEX_MOBILE_CSS).toContain(".adapter-menu-item > span:first-child");
     expect(CODEX_MOBILE_CSS).toContain(".adapter-menu-state { flex: 0 0 auto; white-space: nowrap;");
     expect(CODEX_MOBILE_JS).toContain("status.hidden = !status.textContent;");
@@ -560,6 +577,90 @@ describe("mobile fetch resilience", () => {
     expect(CODEX_MOBILE_JS).toContain("if (error.network && !initial && state.tasks.length)");
     expect(CODEX_MOBILE_JS).toContain("if (!error.network) showToast");
     expect(CODEX_MOBILE_JS).toContain('var uncertain = Boolean(error && error.network) ||');
+  });
+});
+
+describe("mobile message refresh coordination", () => {
+  test("coalesces overlapping refreshes and preserves the strongest trailing request", () => {
+    const merge = loadMobileMessageRefreshMerger();
+    expect(merge(null, false, true, false)).toEqual({
+      forceBottom: false,
+      historyOnly: true,
+      forceFullPage: false,
+    });
+    expect(merge(
+      { forceBottom: false, historyOnly: true, forceFullPage: false },
+      true,
+      false,
+      true,
+    )).toEqual({
+      forceBottom: true,
+      historyOnly: false,
+      forceFullPage: true,
+    });
+  });
+
+  test("queues a trailing refresh instead of dropping a send-triggered refresh", () => {
+    const start = CODEX_MOBILE_JS.indexOf("  async function loadMessages");
+    const end = CODEX_MOBILE_JS.indexOf("\n  async function refreshMessagesIfChanged", start);
+    const block = CODEX_MOBILE_JS.slice(start, end);
+    expect(block).toContain("state.trailingMessageRefresh = mergeMessageRefreshRequest");
+    expect(block).toContain("void loadMessages(");
+    expect(block).not.toContain("if (state.loadingMessages) return null;");
+  });
+});
+
+describe("mobile per-message delivery state", () => {
+  test("serializes initial posts per task while allowing different tasks in parallel", async () => {
+    const { enqueuePendingPost } = loadMobilePendingPostQueue();
+    const order: string[] = [];
+    let releaseFirst: (() => void) | undefined;
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+
+    const first = enqueuePendingPost(
+      { adapter: "codex", threadId: "task-a" },
+      async () => {
+        order.push("a1-start");
+        await firstGate;
+        order.push("a1-end");
+        return "a1";
+      },
+    );
+    const second = enqueuePendingPost(
+      { adapter: "codex", threadId: "task-a" },
+      async () => {
+        order.push("a2-start");
+        return "a2";
+      },
+    );
+    const otherTask = enqueuePendingPost(
+      { adapter: "codex", threadId: "task-b" },
+      async () => {
+        order.push("b1-start");
+        return "b1";
+      },
+    );
+
+    await Bun.sleep(0);
+    expect(order).toEqual(["a1-start", "b1-start"]);
+    releaseFirst?.();
+    expect(await Promise.all([first, second, otherTask])).toEqual(["a1", "a2", "b1"]);
+    expect(order).toEqual(["a1-start", "b1-start", "a1-end", "a2-start"]);
+  });
+
+  test("does not lock the composer while another message waits for Agent confirmation", () => {
+    const submitStart = CODEX_MOBILE_JS.indexOf("  async function submitPendingMessage");
+    const submitEnd = CODEX_MOBILE_JS.indexOf("\n  function beginOptimisticRunIfNeeded", submitStart);
+    const submitBlock = CODEX_MOBILE_JS.slice(submitStart, submitEnd);
+    const composerStart = CODEX_MOBILE_JS.indexOf('composerForm.addEventListener("submit"');
+    const composerEnd = CODEX_MOBILE_JS.indexOf("\n\n  authForm.addEventListener", composerStart);
+    const composerBlock = CODEX_MOBILE_JS.slice(composerStart, composerEnd);
+
+    expect(submitBlock).toContain("pending.inFlight = true");
+    expect(submitBlock).toContain("await enqueuePendingPost(pending");
+    expect(submitBlock).not.toContain("state.sending");
+    expect(composerBlock).not.toContain("state.sending");
+    expect(CODEX_MOBILE_JS).not.toContain("sending: false");
   });
 });
 
@@ -899,6 +1000,41 @@ function loadMobileMarkdownRenderer(): (markdown: string, foldPrefix?: string) =
   return new Function(`${source}\nreturn renderMarkdown;`)() as (markdown: string) => string;
 }
 
+function loadMobilePendingPostQueue(): {
+  enqueuePendingPost: (
+    pending: { adapter?: string; threadId: string },
+    post: () => Promise<unknown>,
+  ) => Promise<unknown>;
+} {
+  const start = CODEX_MOBILE_JS.indexOf("  function enqueuePendingPost");
+  const end = CODEX_MOBILE_JS.indexOf("\n  async function submitPendingMessage", start);
+  if (start < 0 || end < 0) throw new Error("Mobile pending-post queue not found");
+  const source = CODEX_MOBILE_JS.slice(start, end);
+  const state = { messagePostChains: Object.create(null) };
+  const conversationStateKey = (adapter: string, threadId: string) =>
+    `${adapter}\0${threadId}`;
+  return new Function("state", "conversationStateKey", `
+${source}
+return { enqueuePendingPost };
+`)(state, conversationStateKey) as ReturnType<typeof loadMobilePendingPostQueue>;
+}
+
+function loadMobileMessageRefreshMerger(): (
+  current: { forceBottom: boolean; historyOnly: boolean; forceFullPage: boolean } | null,
+  forceBottom: boolean,
+  historyOnly: boolean,
+  forceFullPage: boolean,
+) => { forceBottom: boolean; historyOnly: boolean; forceFullPage: boolean } {
+  const start = CODEX_MOBILE_JS.indexOf("  function mergeMessageRefreshRequest");
+  const end = CODEX_MOBILE_JS.indexOf("\n  async function loadMessages", start);
+  if (start < 0 || end < 0) throw new Error("Mobile refresh merger not found");
+  const source = CODEX_MOBILE_JS.slice(start, end);
+  return new Function(`${source}
+return mergeMessageRefreshRequest;`)() as ReturnType<
+    typeof loadMobileMessageRefreshMerger
+  >;
+}
+
 function loadMobileDocumentTitleUpdater(params: {
   state: {
     currentThreadId: string;
@@ -978,11 +1114,26 @@ function loadMobileOptimisticProgressFilter(): (
   >;
 }
 
+function loadMobileEffectiveRunSummary(
+  localRunSummary: { turnId?: string; status: string } | null,
+  runSummary: { turnId?: string; status: string } | null,
+): { turnId?: string; status: string } | null {
+  const start = CODEX_MOBILE_JS.indexOf("  function effectiveRunSummary");
+  const end = CODEX_MOBILE_JS.indexOf("\n  function isTaskActivelyRunning", start);
+  if (start < 0 || end < 0) throw new Error("Mobile effective run summary not found");
+  const source = CODEX_MOBILE_JS.slice(start, end);
+  return new Function(
+    "state",
+    `${source}\nreturn effectiveRunSummary();`,
+  )({ localRunSummary, runSummary }) as ReturnType<typeof loadMobileEffectiveRunSummary>;
+}
+
 function loadMobileRunSummaryResolver(): (
-  messages: Array<{ role: string; turnId?: string }>,
-  task: { status: string; startedAtMs?: number } | null,
+  messages: Array<{ role: string; turnId?: string; pending?: boolean }>,
+  task: { status: string; startedAtMs?: number; activeTurnId?: string } | null,
   summary: { turnId?: string; status: string; startedAtMs?: number; durationMs?: number } | null,
   nowMs: number,
+  progressItems?: Array<{ turnId?: string; status?: string; createdAtMs?: number }>,
 ) => { turnId?: string; status: string; startedAtMs?: number; durationMs?: number } | null {
   const start = CODEX_MOBILE_JS.indexOf("  function isTaskActivelyRunning");
   const end = CODEX_MOBILE_JS.indexOf("\n  function runDurationMs", start);
@@ -990,6 +1141,26 @@ function loadMobileRunSummaryResolver(): (
   const source = CODEX_MOBILE_JS.slice(start, end);
   return new Function(`${source}\nreturn resolveVisibleRunSummary;`)() as ReturnType<
     typeof loadMobileRunSummaryResolver
+  >;
+}
+
+function loadMobileRunHeaderLabel(): (
+  summary: {
+    status: string;
+    startedAtMs?: number;
+    completedAtMs?: number;
+    durationMs?: number;
+    receivedAtMs?: number;
+  },
+  stopping?: boolean,
+) => string {
+  const start = CODEX_MOBILE_JS.indexOf("  function formatRunDuration");
+  const end = CODEX_MOBILE_JS.indexOf("\n  function renderRunHeader", start);
+  if (start < 0 || end < 0) throw new Error("Mobile run-header label not found");
+  const source = CODEX_MOBILE_JS.slice(start, end);
+  const state = { pendingApproval: null };
+  return new Function("state", `${source}\nreturn runHeaderLabel;`)(state) as ReturnType<
+    typeof loadMobileRunHeaderLabel
   >;
 }
 
@@ -1211,6 +1382,7 @@ function loadMobilePendingMessageReconciler(): (
     imageCount: number;
     status: string;
     turnId?: string;
+    sourceMessageId?: string;
     baselineUserCount: number;
     baselineUserKeys?: string[];
   }>,
@@ -1345,6 +1517,9 @@ return { messageNodeKey, getMessageNode };
 function loadMobileVisibleMessageText(): (message: {
   role?: string;
   text?: string;
+  pending?: boolean;
+  imageCount?: number;
+  status?: string;
 }) => string {
   const start = CODEX_MOBILE_JS.indexOf("  function visibleMessageText");
   const end = CODEX_MOBILE_JS.indexOf("\n  function visibleMessageModel", start);
@@ -1379,6 +1554,133 @@ function loadMobileSwitchProgressFormatter(): (startedAtMs: number, nowMs: numbe
   return new Function(`${source}\nreturn switchProgressLabel;`)() as ReturnType<
     typeof loadMobileSwitchProgressFormatter
   >;
+}
+
+function loadMobileTaskContextMenuTrigger(options: {
+  selectedText?: string;
+  mobile?: boolean;
+  sidebarOpen?: boolean;
+  hitInside?: boolean;
+} = {}): boolean {
+  const start = CODEX_MOBILE_JS.indexOf("  function hasActiveTextSelection");
+  const end = CODEX_MOBILE_JS.indexOf("\n  function closeSidebar", start);
+  if (start < 0 || end < 0) throw new Error("Mobile task context-menu trigger not found");
+  const source = CODEX_MOBILE_JS.slice(start, end);
+  const button = { contains: (node: unknown) => node === button };
+  const selection = {
+    isCollapsed: !options.selectedText,
+    toString: () => options.selectedText ?? "",
+    removeAllRanges: () => {},
+  };
+  const window = {
+    getSelection: () => selection,
+    matchMedia: () => ({ matches: options.mobile === true }),
+  };
+  const app = {
+    classList: { contains: () => options.sidebarOpen === true },
+  };
+  const document = {
+    elementFromPoint: () => options.hitInside === false ? {} : button,
+  };
+  const trigger = new Function(
+    "window",
+    "app",
+    "document",
+    `${source}\nreturn isTaskContextMenuTriggerAllowed;`,
+  )(window, app, document) as (
+    button: { contains: (node: unknown) => boolean },
+    clientX: number,
+    clientY: number,
+  ) => boolean;
+  return trigger(button, 20, 30);
+}
+
+function loadMobileSteeredPendingMessageBuilder(): (
+  message: { id?: string; text?: string; imageCount?: number; createdAtMs?: number },
+  threadId: string,
+  transcriptMessages: Array<{ id?: string; turnId?: string; role: string; text: string }>,
+  nowMs: number,
+) => {
+  clientId: string;
+  sourceMessageId: string;
+  createdAtMs: number;
+  queuedAtMs?: number;
+  text: string;
+  imageCount: number;
+  status: string;
+  displayInTranscript: boolean;
+  baselineUserCount: number;
+  baselineUserKeys: string[];
+} {
+  const start = CODEX_MOBILE_JS.indexOf("  function makeSteeredPendingMessage");
+  const end = CODEX_MOBILE_JS.indexOf("\n  function mergeQueuedMessagesForDisplay", start);
+  if (start < 0 || end < 0) throw new Error("Mobile steered-message builder not found");
+  const source = CODEX_MOBILE_JS.slice(start, end);
+  return new Function(`${source}\nreturn makeSteeredPendingMessage;`)() as ReturnType<
+    typeof loadMobileSteeredPendingMessageBuilder
+  >;
+}
+
+function loadMobileSteerQueuedMessageAction(options: {
+  api?: () => Promise<unknown>;
+  onRenderMessages?: (pendingCount: number) => void;
+  onLoadMessages?: (pendingCount: number) => Promise<unknown>;
+  onToast?: (message: string) => void;
+} = {}): {
+  steerQueuedMessage: (messageId: string) => Promise<void>;
+  state: {
+    queuedMessages: Array<Record<string, unknown>>;
+    pendingMessages: Array<Record<string, unknown>>;
+  };
+} {
+  const builderStart = CODEX_MOBILE_JS.indexOf("  function makeSteeredPendingMessage");
+  const builderEnd = CODEX_MOBILE_JS.indexOf(
+    "\n  function mergeQueuedMessagesForDisplay",
+    builderStart,
+  );
+  const actionStart = CODEX_MOBILE_JS.indexOf("  async function steerQueuedMessage");
+  const actionEnd = CODEX_MOBILE_JS.indexOf("\n  async function deleteQueuedMessage", actionStart);
+  if (builderStart < 0 || builderEnd < 0 || actionStart < 0 || actionEnd < 0) {
+    throw new Error("Mobile steer action not found");
+  }
+  const source = CODEX_MOBILE_JS.slice(builderStart, builderEnd) +
+    CODEX_MOBILE_JS.slice(actionStart, actionEnd);
+  const state = {
+    currentThreadId: "thread-current",
+    queueActionMessageId: "",
+    queuedMessages: [{
+      id: "queued-guide",
+      text: "补充检查重复发送",
+      imageCount: 0,
+      createdAtMs: 1_800_000_000_000,
+    }],
+    pendingMessages: [] as Array<Record<string, unknown>>,
+    serverMessages: [{ id: "old-user", role: "user", text: "原始任务" }],
+    editingQueuedMessageId: "queued-guide",
+  };
+  const steerQueuedMessage = new Function(
+    "state",
+    "api",
+    "adapterApiPath",
+    "renderQueuedMessages",
+    "renderMessages",
+    "saveCurrentConversationSnapshot",
+    "loadMessages",
+    "showToast",
+    "beginOptimisticRunIfNeeded",
+    `${source}\nreturn steerQueuedMessage;`,
+  )(
+    state,
+    options.api ?? (async () => ({ ok: true })),
+    (path: string) => path,
+    () => {},
+    () => options.onRenderMessages?.(state.pendingMessages.length),
+    () => {},
+    () => options.onLoadMessages?.(state.pendingMessages.length),
+    (message: string) => options.onToast?.(message),
+    (pending: Record<string, unknown>) => { pending.optimisticRun = true; },
+  ) as (messageId: string) => Promise<void>;
+  return { steerQueuedMessage, state };
 }
 
 function loadMobileQueuedMessageMerger(): (
@@ -2122,6 +2424,108 @@ describe("Codex mobile web rendering", () => {
     }]);
   });
 
+  test("allows task long-press even when another page region has selected text", () => {
+    expect(loadMobileTaskContextMenuTrigger({
+      selectedText: "正文残留选区",
+      mobile: true,
+      sidebarOpen: true,
+      hitInside: true,
+    })).toBe(true);
+    expect(loadMobileTaskContextMenuTrigger({
+      mobile: true,
+      sidebarOpen: false,
+      hitInside: true,
+    })).toBe(false);
+    expect(loadMobileTaskContextMenuTrigger({
+      mobile: true,
+      sidebarOpen: true,
+      hitInside: false,
+    })).toBe(false);
+  });
+
+  test("promotes a steered queued message into the visible transcript", () => {
+    const makeSteeredPendingMessage = loadMobileSteeredPendingMessageBuilder();
+    expect(makeSteeredPendingMessage(
+      {
+        id: "queued-guide",
+        text: "补充检查重复发送",
+        imageCount: 1,
+        createdAtMs: 1_800_000_000_000,
+      },
+      "thread-current",
+      [{ id: "old-user", role: "user", text: "原始任务" }],
+      1_800_000_010_000,
+    )).toMatchObject({
+      clientId: "steered-queued-guide",
+      sourceMessageId: "queued-guide",
+      createdAtMs: 1_800_000_010_000,
+      queuedAtMs: 1_800_000_000_000,
+      threadId: "thread-current",
+      text: "补充检查重复发送",
+      imageCount: 1,
+      status: "steered",
+      displayInTranscript: true,
+      baselineUserCount: 1,
+      baselineUserKeys: ["id:old-user"],
+    });
+  });
+
+  test("renders the steered message before refreshing the desktop transcript", async () => {
+    const events: string[] = [];
+    const { steerQueuedMessage, state } = loadMobileSteerQueuedMessageAction({
+      onRenderMessages: (pendingCount) => events.push(`render:${pendingCount}`),
+      onLoadMessages: async (pendingCount) => events.push(`load:${pendingCount}`),
+    });
+
+    await steerQueuedMessage("queued-guide");
+
+    expect(events).toEqual(["render:1", "load:1"]);
+    expect(state.queuedMessages).toEqual([]);
+    expect(state.pendingMessages).toHaveLength(1);
+  });
+
+  test("keeps the queued message when steering fails", async () => {
+    const toasts: string[] = [];
+    const { steerQueuedMessage, state } = loadMobileSteerQueuedMessageAction({
+      api: async () => { throw new Error("桌面暂时不可用"); },
+      onToast: (message) => toasts.push(message),
+    });
+
+    await steerQueuedMessage("queued-guide");
+
+    expect(toasts).toEqual(["引导失败：桌面暂时不可用"]);
+    expect(state.queuedMessages).toHaveLength(1);
+    expect(state.pendingMessages).toEqual([]);
+  });
+
+  test("shows image-only steered messages in the transcript", () => {
+    const visibleMessageText = loadMobileVisibleMessageText();
+    expect(visibleMessageText({
+      role: "user",
+      text: "",
+      pending: true,
+      imageCount: 2,
+      status: "steered",
+    })).toBe("已引导图片 2 张");
+  });
+
+  test("reconciles a steered optimistic message by its original queued id", () => {
+    const reconcilePendingMessages = loadMobilePendingMessageReconciler();
+    const pending = [{
+      clientId: "steered-queued-guide",
+      sourceMessageId: "queued-guide",
+      text: "补充检查重复发送",
+      imageCount: 0,
+      status: "steered",
+      baselineUserCount: 1,
+      baselineUserKeys: ["id:old-user"],
+    }];
+
+    expect(reconcilePendingMessages(pending, [
+      { id: "queued-guide", role: "user", text: "桌面端规范化后的补充消息" },
+    ])).toEqual([]);
+  });
+
   test("does not show transcript or failed pending messages in the composer queue", () => {
     const mergeQueuedMessagesForDisplay = loadMobileQueuedMessageMerger();
     expect(mergeQueuedMessagesForDisplay([], [
@@ -2156,6 +2560,68 @@ describe("Codex mobile web rendering", () => {
     expect(reconcilePendingMessages(pending, [
       { id: "new-user", role: "user", text: "只发送一次" },
     ])).toEqual([]);
+  });
+
+  test("keeps the local running state while the desktop status is unknown", () => {
+    expect(loadMobileEffectiveRunSummary(
+      { turnId: "turn-current", status: "running" },
+      { turnId: "turn-current", status: "unknown" },
+    )).toEqual({ turnId: "turn-current", status: "running" });
+  });
+
+  test("never labels an unknown runtime state as completed", () => {
+    const runHeaderLabel = loadMobileRunHeaderLabel();
+    expect(runHeaderLabel({ status: "unknown", durationMs: 8_000 })).toBe(
+      "状态同步中 · 0m 8s",
+    );
+    expect(runHeaderLabel({ status: "completed", durationMs: 8_000 })).toBe(
+      "已完成 · 0m 8s",
+    );
+  });
+
+  test("hides an old completed summary after a newer user message without a turn id", () => {
+    const resolveVisibleRunSummary = loadMobileRunSummaryResolver();
+    const nowMs = 1_800_000_100_000;
+    expect(resolveVisibleRunSummary(
+      [
+        { role: "assistant", turnId: "turn-old" },
+        { role: "user", pending: true },
+      ],
+      { status: "idle" },
+      {
+        turnId: "turn-old",
+        status: "completed",
+        startedAtMs: nowMs - 20_000,
+        durationMs: 15_000,
+      },
+      nowMs,
+    )).toBeNull();
+  });
+
+  test("prefers current running progress over a stale terminal summary", () => {
+    const resolveVisibleRunSummary = loadMobileRunSummaryResolver();
+    const nowMs = 1_800_000_100_000;
+    expect(resolveVisibleRunSummary(
+      [{ role: "user", turnId: "turn-current" }],
+      { status: "idle", activeTurnId: "turn-current" },
+      {
+        turnId: "turn-old",
+        status: "completed",
+        startedAtMs: nowMs - 30_000,
+        durationMs: 20_000,
+      },
+      nowMs,
+      [{
+        turnId: "turn-current",
+        status: "running",
+        createdAtMs: nowMs - 4_000,
+      }],
+    )).toMatchObject({
+      turnId: "turn-current",
+      status: "running",
+      startedAtMs: nowMs - 4_000,
+      durationMs: 4_000,
+    });
   });
 
   test("shows a timed run header even when the runtime summary is temporarily missing", () => {
@@ -3334,6 +3800,10 @@ describe("Codex mobile server", () => {
       expect(workspaceSwitcherIndex).toBeGreaterThan(sidebarHeadStart);
       expect(workspaceSwitcherIndex).toBeLessThan(sidebarHeadEnd);
       expect(html.slice(topbarCopyStart, topbarCopyEnd)).not.toContain('id="workspace-switcher"');
+      const sidebarEnd = html.indexOf("</aside>", sidebarHeadStart);
+      const workspaceMenuIndex = html.indexOf('id="workspace-menu"');
+      expect(workspaceMenuIndex).toBeGreaterThan(sidebarEnd);
+      expect(workspaceMenuIndex).toBeLessThan(html.indexOf('<main class="main-panel">'));
 
       const aboutResponse = await fetch(`${root}/about`);
       const aboutHtml = await aboutResponse.text();
@@ -3344,9 +3814,20 @@ describe("Codex mobile server", () => {
       expect(aboutHtml).toContain('class="about-logo" href="/about">WeRelay</a>');
       expect(aboutHtml).toContain('class="about-open-app" href="/">打开任务</a>');
 
-      const cssResponse = await fetch(`${root}/app.css`);
+      const cssResponse = await fetch(`${root}/app.css`, {
+        headers: { "accept-encoding": "br, gzip" },
+      });
       const css = await cssResponse.text();
       expect(cssResponse.status).toBe(200);
+      expect(cssResponse.headers.get("cache-control"))
+        .toBe("public, max-age=31536000, immutable");
+      expect(cssResponse.headers.get("etag")).toBeTruthy();
+      expect(cssResponse.headers.get("vary")).toBe("Accept-Encoding");
+      expect(["br", "gzip"]).toContain(cssResponse.headers.get("content-encoding"));
+      const cssNotModified = await fetch(`${root}/app.css`, {
+        headers: { "if-none-match": cssResponse.headers.get("etag") ?? "" },
+      });
+      expect(cssNotModified.status).toBe(304);
       expect(css).toContain("--thread-max: 48rem;");
       expect(css).toContain("border-radius: 28px;");
       expect(css).toContain(".composer {\n  display: grid;");
@@ -3378,6 +3859,7 @@ describe("Codex mobile server", () => {
       expect(css).toContain(".task-context-menu {");
       expect(css).toContain(".task-rename-overlay {");
       expect(css).toContain("-webkit-touch-callout: none;");
+      expect(css).toContain(".task-item * {");
       expect(css).toContain(".task-status-badge.approval { display: inline-flex; }");
       expect(css).toContain(".task-dot.running { visibility: visible; background: var(--green); animation: task-dot-breathe");
       expect(css).toContain("@keyframes task-dot-breathe");
@@ -3412,6 +3894,9 @@ describe("Codex mobile server", () => {
       expect(css).toContain("@keyframes response-pending-dot");
       expect(css).toContain(".run-progress-item {");
       expect(css).toContain(".workspace-switch-progress");
+      expect(css).toContain(".workspace-menu { position: fixed;");
+      expect(css).toContain("max-height: min(70vh, 520px);");
+      expect(css).toContain("overflow-y: auto;");
       expect(css).toContain(".queued-followup-status");
       expect(css).toContain(".composer-queue { width: calc(100% - 40px); max-width: calc(var(--thread-max) - 40px); display: grid; gap: 0;");
       expect(css).toContain("overflow: hidden auto;");
@@ -3596,11 +4081,15 @@ describe("Codex mobile server", () => {
       expect(js).toContain("hasActiveTextSelection()");
       expect(js).toContain('app.classList.contains("sidebar-open")');
       expect(js).toContain('document.addEventListener("selectionchange"');
+      expect(js).toContain('taskList.addEventListener("selectstart"');
       expect(js).toContain('messagesEl.addEventListener("selectstart"');
       expect(js).toContain('messagesEl.addEventListener("contextmenu"');
       expect(js).toContain("isTaskContextMenuTriggerAllowed");
       expect(js).toContain("checkForAppUpdate");
       expect(js).toContain('window.addEventListener("pageshow"');
+      expect(js).toContain("function positionWorkspaceMenu()");
+      expect(js).toContain("workspaceSwitcher.getBoundingClientRect()");
+      expect(js).toContain("window.addEventListener(\"orientationchange\"");
       expect(() => new Function(js)).not.toThrow();
 
       const taskUrl = new URL(server.buildTaskUrl(
@@ -4202,7 +4691,9 @@ describe("Codex mobile generated image messages", () => {
     expect(CODEX_MOBILE_JS).not.toContain(
       "var pendingImages = message.pending && Array.isArray(message.images)",
     );
-    expect(CODEX_MOBILE_JS).toContain("if (state.loadingMessages) return null;");
+    expect(CODEX_MOBILE_JS).toContain(
+      "state.trailingMessageRefresh = mergeMessageRefreshRequest",
+    );
   });
 
   test("reuses unchanged message rows when polling only changes progress or approval state", () => {
@@ -4241,15 +4732,22 @@ describe("Codex mobile generated image messages", () => {
 });
 
 describe("mobile settings API", () => {
-  test("renders settings as a full right drawer with concise terminal and task tabs", () => {
-    expect(CODEX_MOBILE_HTML).toContain('class="settings-drawer"');
-    expect(CODEX_MOBILE_HTML).not.toContain('class="settings-dialog"');
-    expect(CODEX_MOBILE_CSS).toContain("justify-content: flex-end");
-    expect(CODEX_MOBILE_CSS).toContain("height: 100dvh");
+  test("renders settings inside the main panel with a persistent sidebar entry", () => {
+    expect(CODEX_MOBILE_HTML).toContain('class="settings-view"');
+    expect(CODEX_MOBILE_HTML).toContain('class="sidebar-footer"');
+    expect(CODEX_MOBILE_HTML).toContain('class="sidebar-settings-button" id="settings-open"');
+    expect(CODEX_MOBILE_HTML).not.toContain('class="settings-overlay"');
+    expect(CODEX_MOBILE_HTML).not.toContain('class="settings-drawer"');
+    expect(CODEX_MOBILE_HTML).not.toContain('class="workspace-menu-item" id="settings-open"');
+    expect(CODEX_MOBILE_CSS).toContain(".app-shell.settings-open .settings-view");
+    expect(CODEX_MOBILE_CSS).toContain(".sidebar-settings-button.is-active");
+    expect(CODEX_MOBILE_JS).toContain("function setSettingsOpen(open, updateUrl)");
+    expect(CODEX_MOBILE_JS).toContain('url.searchParams.set("view", "settings")');
+    expect(CODEX_MOBILE_JS).toContain('settingsMenuButton.addEventListener("click"');
+    expect(CODEX_MOBILE_JS).not.toContain("settingsOverlay");
+    expect(CODEX_MOBILE_JS).not.toContain("closeSettingsPanel");
     expect(CODEX_MOBILE_HTML).toContain('aria-selected="true">任务</button>');
     expect(CODEX_MOBILE_HTML).toContain('aria-selected="false">最近</button>');
-    expect(CODEX_MOBILE_HTML).not.toContain('aria-selected="true">任务看板</button>');
-    expect(CODEX_MOBILE_HTML).not.toContain('aria-selected="false">最近完成</button>');
     expect(CODEX_MOBILE_JS).not.toContain("adapter-menu-caps");
     expect(CODEX_MOBILE_CSS).not.toContain(".adapter-menu-caps");
     expect(CODEX_MOBILE_JS).not.toContain("桌面原生 owner");

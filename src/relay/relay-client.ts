@@ -78,6 +78,7 @@ function isRelayCommand(value: unknown): value is WeRelayRelayCommand {
   return (
     request.method === "GET" ||
     request.method === "POST" ||
+    request.method === "PUT" ||
     request.method === "PATCH" ||
     request.method === "DELETE"
   ) &&

@@ -1537,7 +1537,8 @@ describe("formatCodexDesktopTaskSelection", () => {
     expect(output).not.toContain("校验页面模板并列出修复建议");
     expect(output).not.toContain("项目：design-system");
     expect(output).not.toContain("aaaaaaaa");
-    expect(output).toContain("直接发送消息即可继续");
+    expect(output).toContain("接下来直接回复，会发送给当前任务");
+    expect(output).toContain("任务4：继续处理");
     expect(output).toContain("发送“任务”可切换其他任务");
   });
 

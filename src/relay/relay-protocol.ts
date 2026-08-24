@@ -17,7 +17,7 @@ export type WeRelayRelayCommand = {
   createdAtMs: number;
   expiresAtMs: number;
   request: {
-    method: "GET" | "POST" | "PATCH" | "DELETE";
+    method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
     path: string;
     headers: Record<string, string>;
     bodyBase64?: string;
@@ -41,6 +41,7 @@ export function isWeRelayRelayApiRequest(
   return (
     method === "GET" ||
     method === "POST" ||
+    method === "PUT" ||
     method === "PATCH" ||
     method === "DELETE"
   ) && path.startsWith("/api/");

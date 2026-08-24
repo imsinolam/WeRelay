@@ -5,6 +5,10 @@ import http, {
   type ServerResponse,
 } from "node:http";
 import { isIP } from "node:net";
+import {
+  createImmutableTextAsset,
+  sendImmutableTextAsset,
+} from "../utils/http-static-asset.ts";
 
 import {
   CODEX_MOBILE_ASSET_VERSION,
@@ -49,6 +53,12 @@ const MOBILE_JS = CODEX_MOBILE_JS.replaceAll(
   ASSET_VERSION_PLACEHOLDER,
   CODEX_MOBILE_ASSET_VERSION,
 );
+const MOBILE_CSS_ASSET = createImmutableTextAsset(CODEX_MOBILE_CSS);
+const MOBILE_JS_ASSET = createImmutableTextAsset(MOBILE_JS);
+const MOBILE_ASSET_SECURITY_HEADERS = {
+  "content-security-policy":
+    "default-src 'self'; connect-src 'self'; img-src 'self' data: http: https:; style-src 'self'; script-src 'self'; base-uri 'none'; frame-ancestors 'none'",
+};
 
 const DEFAULT_POLL_TIMEOUT_MS = 25_000;
 const DEFAULT_COMMAND_TIMEOUT_MS = 90_000;
@@ -843,11 +853,23 @@ export async function startWeRelayRelayServer(
         return;
       }
       if (method === "GET" && url.pathname === "/app.css") {
-        sendText(response, 200, "text/css; charset=utf-8", CODEX_MOBILE_CSS);
+        sendImmutableTextAsset(
+          request,
+          response,
+          "text/css; charset=utf-8",
+          MOBILE_CSS_ASSET,
+          MOBILE_ASSET_SECURITY_HEADERS,
+        );
         return;
       }
       if (method === "GET" && url.pathname === "/app.js") {
-        sendText(response, 200, "text/javascript; charset=utf-8", MOBILE_JS);
+        sendImmutableTextAsset(
+          request,
+          response,
+          "text/javascript; charset=utf-8",
+          MOBILE_JS_ASSET,
+          MOBILE_ASSET_SECURITY_HEADERS,
+        );
         return;
       }
       if (method === "GET" && url.pathname === "/app-version") {

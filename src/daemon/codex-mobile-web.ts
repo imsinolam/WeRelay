@@ -49,13 +49,6 @@ export const CODEX_MOBILE_HTML = `<!doctype html>
             <span class="workspace-switch-progress" id="workspace-switch-progress" aria-hidden="true" hidden></span>
             <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 6.25 8 9.75l3.5-3.5"/></svg>
           </button>
-          <div class="workspace-menu" id="workspace-menu" role="menu" hidden>
-            <div class="adapter-menu" id="adapter-menu"></div>
-            <div class="workspace-menu-divider" role="separator"></div>
-            <button class="workspace-menu-item" id="settings-open" type="button" role="menuitem">设置</button>
-            <a class="workspace-menu-item" href="/about" role="menuitem">项目说明</a>
-            <button class="workspace-menu-item" id="auth-logout" type="button" role="menuitem">退出</button>
-          </div>
         </div>
         <button class="icon-button sidebar-close" id="sidebar-close" type="button" aria-label="关闭任务列表">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
@@ -77,7 +70,20 @@ export const CODEX_MOBILE_HTML = `<!doctype html>
         <input id="task-search" type="search" placeholder="搜索任务" autocomplete="off">
       </label>
       <div class="task-list" id="task-list"></div>
+      <div class="sidebar-footer">
+        <button class="sidebar-settings-button" id="settings-open" type="button" aria-pressed="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M20 7h-2M10 17h10M4 17h2"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg>
+          <span>设置</span>
+        </button>
+      </div>
     </aside>
+
+    <div class="workspace-menu" id="workspace-menu" role="menu" hidden>
+      <div class="adapter-menu" id="adapter-menu"></div>
+      <div class="workspace-menu-divider" role="separator"></div>
+      <a class="workspace-menu-item" href="/about" role="menuitem">项目说明</a>
+      <button class="workspace-menu-item" id="auth-logout" type="button" role="menuitem">退出</button>
+    </div>
 
     <main class="main-panel">
       <header class="topbar">
@@ -126,6 +132,21 @@ export const CODEX_MOBILE_HTML = `<!doctype html>
           </div>
         </header>
         <div class="task-board-body" id="task-board-body" aria-live="polite"></div>
+      </section>
+
+      <section class="settings-view" id="settings-view" aria-labelledby="settings-title" hidden>
+        <header class="settings-view-header">
+          <button class="icon-button settings-menu-button" id="settings-menu-button" type="button" aria-label="打开任务列表">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 8h14M5 16h14"/></svg>
+          </button>
+          <div>
+            <h1 id="settings-title">设置</h1>
+            <p>管理审批方式与电脑上的终端</p>
+          </div>
+        </header>
+        <div class="settings-body" id="settings-body">
+          <div class="settings-loading" id="settings-loading">正在读取设置…</div>
+        </div>
       </section>
 
       <section class="messages" id="messages" aria-live="polite">
@@ -190,23 +211,6 @@ export const CODEX_MOBILE_HTML = `<!doctype html>
         <button class="task-rename-save" id="task-rename-save" type="submit">保存</button>
       </div>
     </form>
-  </div>
-
-  <div class="settings-overlay" id="settings-overlay" hidden>
-    <aside class="settings-drawer" role="dialog" aria-modal="true" aria-labelledby="settings-title">
-      <div class="settings-header">
-        <div>
-          <div class="settings-title" id="settings-title">设置</div>
-          <div class="settings-subtitle">管理审批方式与电脑上的终端</div>
-        </div>
-        <button class="settings-close" id="settings-close" type="button" aria-label="关闭设置">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
-        </button>
-      </div>
-      <div class="settings-body" id="settings-body">
-        <div class="settings-loading" id="settings-loading">正在读取设置…</div>
-      </div>
-    </aside>
   </div>
 
   <div class="toast" id="toast" role="status"></div>
@@ -504,6 +508,30 @@ svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.75; stro
 .sidebar-primary-button.is-active { background: var(--surface-selected); color: var(--text); }
 .sidebar-primary-button svg { width: 18px; height: 18px; stroke-width: 1.7; }
 .sidebar-primary-count { min-width: 22px; padding: 2px 7px; border-radius: 999px; background: var(--page); color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; text-align: center; }
+.sidebar-footer { flex: 0 0 auto; margin: 7px 2px 0; padding-top: 7px; border-top: 1px solid var(--border); }
+.sidebar-settings-button {
+  width: 100%;
+  min-height: 38px;
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--muted-strong);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 520;
+  text-align: left;
+  cursor: pointer;
+  transition: background .16s cubic-bezier(.2,.8,.2,1), color .16s cubic-bezier(.2,.8,.2,1);
+}
+.sidebar-settings-button:hover { background: var(--surface-hover); color: var(--text); }
+.sidebar-settings-button:focus-visible { outline: 2px solid rgba(16,163,127,.42); outline-offset: 2px; }
+.sidebar-settings-button.is-active { background: var(--surface-selected); color: var(--text); }
+.sidebar-settings-button svg { width: 18px; height: 18px; stroke-width: 1.65; }
 .task-view-switch {
   flex: 0 0 auto;
   display: grid;
@@ -616,6 +644,12 @@ svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.75; stro
 }
 .task-group-more:hover, .task-list-more:hover { color: var(--muted-strong); background: var(--surface-hover); }
 .task-list-more { margin: 3px 0 10px; }
+.task-item,
+.task-item * {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
 .task-item {
   width: 100%;
   min-height: 36px;
@@ -631,9 +665,6 @@ svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.75; stro
   text-align: left;
   cursor: pointer;
   touch-action: pan-y;
-  -webkit-touch-callout: none;
-  -webkit-user-select: none;
-  user-select: none;
 }
 .task-item:hover { background: var(--surface-hover); }
 .task-item.is-active { background: var(--surface-selected); }
@@ -680,7 +711,7 @@ svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.75; stro
 .workspace-switcher[aria-expanded="true"] svg { transform: rotate(180deg); }
 .workspace-switcher.is-switching > svg { display: none; }
 @keyframes switch-spin { to { transform: rotate(360deg); } }
-.workspace-menu { position: absolute; top: calc(100% + 7px); left: 0; width: min(300px, calc(100vw - 24px)); min-width: min(300px, calc(100vw - 24px)); padding: 4px; border: 1px solid var(--border); border-radius: 12px; background: var(--page); box-shadow: var(--shadow); z-index: 24; }
+.workspace-menu { position: fixed; top: 0; left: 0; width: min(300px, calc(100vw - 16px)); max-height: min(70vh, 520px); overflow-y: auto; padding: 4px; border: 1px solid var(--border); border-radius: 12px; background: var(--page); box-shadow: var(--shadow); z-index: 40; }
 .adapter-menu { display: block; }
 .adapter-menu-item { width: 100%; min-height: 36px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 10px; border: 0; border-radius: 8px; background: transparent; color: var(--text); font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
 .adapter-menu-item > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -715,6 +746,42 @@ svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.75; stro
 .app-shell.board-open .messages,
 .app-shell.board-open .message-navigation,
 .app-shell.board-open .composer-wrap { display: none; }
+.settings-view {
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  display: none;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--page);
+}
+.settings-view[hidden] { display: none; }
+.app-shell.settings-open .settings-view { display: flex; }
+.app-shell.settings-open .topbar,
+.app-shell.settings-open .task-board,
+.app-shell.settings-open .messages,
+.app-shell.settings-open .message-navigation,
+.app-shell.settings-open .composer-wrap { display: none; }
+.settings-view-header {
+  min-height: 84px;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: max(20px, env(safe-area-inset-top)) max(24px, calc((100% - 820px) / 2)) 18px;
+  border-bottom: 1px solid var(--border);
+  background: var(--page);
+}
+.settings-menu-button { display: none; }
+.settings-view-header h1 { margin: 0; color: var(--text); font-size: 24px; font-weight: 650; letter-spacing: -.035em; line-height: 1.2; }
+.settings-view-header p { margin: 5px 0 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
+.settings-body {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 26px max(24px, calc((100% - 820px) / 2)) max(36px, env(safe-area-inset-bottom));
+}
 .task-board-header {
   flex: 0 0 auto;
   padding: 22px 24px 16px;
@@ -858,6 +925,7 @@ svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.75; stro
 .run-header-dot { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: var(--green); }
 .run-header.running .run-header-dot { animation: run-pulse 1.4s ease-in-out infinite; }
 .run-header.approval .run-header-dot { background: var(--orange); }
+.run-header.unknown .run-header-dot { background: var(--muted); }
 .run-header.failed .run-header-dot, .run-header.interrupted .run-header-dot { background: var(--red); }
 .run-failure { width: min(100%, var(--thread-max)); margin: -2px auto 18px; padding: 12px 14px; border: 1px solid rgba(196, 55, 55, .18); border-radius: 12px; background: rgba(196, 55, 55, .055); color: var(--text); font-size: 13px; line-height: 1.6; }
 .run-failure-title { margin-bottom: 3px; color: var(--red); font-weight: 620; }
@@ -1112,52 +1180,6 @@ body.image-viewer-open { overflow: hidden; }
 .task-rename-actions button { min-width: 72px; min-height: 40px; padding: 0 15px; border: 0; border-radius: 10px; font: inherit; font-size: 14px; font-weight: 580; cursor: pointer; }
 .task-rename-cancel { background: var(--surface); color: var(--text); }
 .task-rename-save { background: var(--accent); color: var(--page); }
-.settings-overlay {
-  position: fixed;
-  inset: 0;
-  display: flex;
-  align-items: stretch;
-  justify-content: flex-end;
-  background: rgba(0,0,0,.22);
-  z-index: 70;
-}
-.settings-drawer {
-  width: min(460px, 100vw);
-  height: 100dvh;
-  display: flex;
-  flex-direction: column;
-  padding: 0;
-  border-left: 1px solid var(--border);
-  background: var(--page);
-  box-shadow: -18px 0 48px rgba(0,0,0,.16);
-  overflow: hidden;
-  animation: settings-drawer-in .2s ease-out;
-}
-@keyframes settings-drawer-in { from { transform: translateX(22px); opacity: .72; } to { transform: translateX(0); opacity: 1; } }
-.settings-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  min-height: 72px;
-  padding: max(18px, env(safe-area-inset-top)) 22px 16px;
-  border-bottom: 1px solid var(--border);
-}
-.settings-title { font-size: 19px; font-weight: 650; letter-spacing: -.025em; }
-.settings-subtitle { margin-top: 3px; color: var(--muted); font-size: 12px; line-height: 1.45; }
-.settings-close {
-  width: 36px;
-  height: 36px;
-  display: grid;
-  place-items: center;
-  border: 0;
-  border-radius: 10px;
-  background: transparent;
-  color: var(--muted);
-  cursor: pointer;
-}
-.settings-close svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-width: 1.8; }
-.settings-close:hover { background: var(--surface-hover); color: var(--text); }
-.settings-body { flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: 20px 22px max(28px, env(safe-area-inset-bottom)); }
 .settings-loading { padding: 24px 0; text-align: center; color: var(--muted); font-size: 14px; }
 .settings-section { margin-top: 28px; }
 .settings-section:first-child { margin-top: 0; }
@@ -1241,7 +1263,6 @@ body.image-viewer-open { overflow: hidden; }
 .settings-dep-action:hover { background: var(--surface-hover); }
 .settings-dep-action.is-primary { border-color: var(--accent); background: var(--accent); color: var(--page); }
 .settings-dep-action:disabled { opacity: .48; cursor: default; }
-body.settings-open { overflow: hidden; }
 
 .task-rename-actions button:disabled { opacity: .46; cursor: default; }
 body.task-rename-open { overflow: hidden; }
@@ -1274,10 +1295,11 @@ body.task-rename-open { overflow: hidden; }
   .app-shell.sidebar-open .main-panel { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
   .sidebar-overlay { position: fixed; inset: 0; display: block; background: rgba(0,0,0,.28); opacity: 0; pointer-events: none; transition: opacity .2s ease; z-index: 15; }
   .app-shell.sidebar-open .sidebar-overlay { opacity: 1; pointer-events: auto; }
-  .settings-overlay { background: var(--page); }
-  .settings-drawer { width: 100vw; border-left: 0; box-shadow: none; }
-  .settings-header { padding-left: 18px; padding-right: 14px; }
-  .settings-body { padding-left: 18px; padding-right: 18px; }
+  .settings-view-header { min-height: 72px; padding: max(14px, env(safe-area-inset-top)) 16px 14px; }
+  .settings-menu-button { display: grid; margin-left: -4px; }
+  .settings-view-header h1 { font-size: 20px; }
+  .settings-view-header p { max-width: 68vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+  .settings-body { padding: 22px 18px max(32px, env(safe-area-inset-bottom)); }
   .sidebar-close, .menu-button { display: grid; }
   .topbar { position: absolute; top: 0; left: 0; right: 0; min-height: 52px; padding: max(8px, env(safe-area-inset-top)) 8px 8px; background: rgba(255,255,255,.86); z-index: 12; }
   .menu-button { border-radius: 8px; }
@@ -1441,10 +1463,10 @@ export const CODEX_MOBILE_JS = String.raw`
   var taskRenameInput = document.getElementById("task-rename-input");
   var taskRenameCancel = document.getElementById("task-rename-cancel");
   var taskRenameSave = document.getElementById("task-rename-save");
-  var settingsOverlay = document.getElementById("settings-overlay");
+  var settingsView = document.getElementById("settings-view");
   var settingsBody = document.getElementById("settings-body");
   var settingsOpen = document.getElementById("settings-open");
-  var settingsClose = document.getElementById("settings-close");
+  var settingsMenuButton = document.getElementById("settings-menu-button");
   var settingsRefreshTimer = null;
 
   var state = {
@@ -1469,6 +1491,7 @@ export const CODEX_MOBILE_JS = String.raw`
     recentVisibleLimit: 20,
     recentMoreNode: null,
     boardOpen: false,
+    settingsOpen: false,
     boardView: "active",
     boardTasks: [],
     boardRecentCompleted: [],
@@ -1510,11 +1533,12 @@ export const CODEX_MOBILE_JS = String.raw`
     resolvingApproval: false,
     stopRequestedThreadId: "",
     loadingMessages: false,
+    trailingMessageRefresh: null,
     taskRequestId: 0,
     nextTaskRefreshAtMs: 0,
     messageRequestId: 0,
     composerRevision: 0,
-    sending: false,
+    messagePostChains: Object.create(null),
     creatingTask: false,
     pendingImages: [],
     messageNodes: Object.create(null),
@@ -2158,6 +2182,7 @@ export const CODEX_MOBILE_JS = String.raw`
     authScreen.hidden = true;
     app.hidden = false;
     setTaskBoardOpen(pageUrl.searchParams.get("view") === "board", false);
+    setSettingsOpen(pageUrl.searchParams.get("view") === "settings", false);
     syncComposerInset();
     updateUserMessageNavigation();
     return true;
@@ -2809,6 +2834,14 @@ export const CODEX_MOBILE_JS = String.raw`
       : "WeRelay · " + currentAdapterName();
   }
 
+  function updateActiveDocumentTitle() {
+    if (state.settingsOpen) {
+      document.title = "WeRelay · 设置";
+      return;
+    }
+    updateDocumentTitle();
+  }
+
   function isAdapterCapabilityError() {
     return /已连接，但网页版暂不支持/.test(state.adapterError || "");
   }
@@ -2829,7 +2862,7 @@ export const CODEX_MOBILE_JS = String.raw`
     workspaceSwitcher.classList.remove("is-switching");
     workspaceSwitcher.setAttribute("aria-busy", state.switchingAdapter ? "true" : "false");
     workspaceSwitchProgress.hidden = true;
-    updateDocumentTitle();
+    updateActiveDocumentTitle();
     adapterMenu.innerHTML = "";
     state.adapters.forEach(function (adapter) {
       var button = document.createElement("button");
@@ -3053,6 +3086,7 @@ export const CODEX_MOBILE_JS = String.raw`
     state.historyRequestId += 1;
     state.composerRevision += 1;
     state.loadingMessages = false;
+    state.trailingMessageRefresh = null;
     state.tasks = [];
     state.currentThreadId = "";
     state.modelRequestId += 1;
@@ -3234,6 +3268,7 @@ export const CODEX_MOBILE_JS = String.raw`
     var requestedAdapter = pageUrl.searchParams.get("adapter") || "";
     var requestedTask = pageUrl.searchParams.get("task") || "";
     var requestedBoard = pageUrl.searchParams.get("view") === "board";
+    var requestedSettings = pageUrl.searchParams.get("view") === "settings";
     state.boardView = pageUrl.searchParams.get("board") === "completed"
       ? "completed"
       : "active";
@@ -3259,6 +3294,7 @@ export const CODEX_MOBILE_JS = String.raw`
     bootScreen.hidden = true;
     app.hidden = false;
     setTaskBoardOpen(requestedBoard, false);
+    setSettingsOpen(requestedSettings, false);
     syncComposerInset();
     updateUserMessageNavigation();
 
@@ -3388,7 +3424,8 @@ export const CODEX_MOBILE_JS = String.raw`
       messages,
       currentTask(),
       effectiveRunSummary(),
-      Date.now()
+      Date.now(),
+      state.progressItems
     );
   }
 
@@ -3428,7 +3465,7 @@ export const CODEX_MOBILE_JS = String.raw`
             ? "请在微信或电脑终端中继续使用"
             : "点击上方终端菜单重新连接"
           : "";
-    updateDocumentTitle();
+    updateActiveDocumentTitle();
     statusEl.className = "status-label" + (
       state.switchingAdapter
         ? " starting"
@@ -3463,7 +3500,7 @@ export const CODEX_MOBILE_JS = String.raw`
         : "发送"
     );
     sendButton.disabled = Boolean(
-      state.sending || Boolean(state.queueActionMessageId) || !task ||
+      Boolean(state.queueActionMessageId) || !task ||
       state.stopRequestedThreadId === state.currentThreadId ||
       (!stopMode && !hasComposerContent)
     );
@@ -3676,8 +3713,12 @@ export const CODEX_MOBILE_JS = String.raw`
     return Boolean(selection && !selection.isCollapsed && String(selection).trim());
   }
 
+  function clearActiveTextSelection() {
+    var selection = window.getSelection && window.getSelection();
+    if (selection && typeof selection.removeAllRanges === "function") selection.removeAllRanges();
+  }
+
   function isTaskContextMenuTriggerAllowed(button, clientX, clientY) {
-    if (hasActiveTextSelection()) return false;
     if (
       window.matchMedia("(max-width: 760px)").matches &&
       !app.classList.contains("sidebar-open")
@@ -3744,6 +3785,7 @@ export const CODEX_MOBILE_JS = String.raw`
     });
     button.addEventListener("pointerdown", function (event) {
       if (event.button !== 0 || event.pointerType === "mouse") return;
+      clearActiveTextSelection();
       cancelLongPress();
       longPressPointerId = event.pointerId;
       longPressStartX = event.clientX;
@@ -3759,8 +3801,7 @@ export const CODEX_MOBILE_JS = String.raw`
           !button.isConnected ||
           !hit ||
           !button.contains(hit) ||
-          sidebarHiddenOnMobile ||
-          hasActiveTextSelection()
+          sidebarHiddenOnMobile
         ) {
           cancelLongPress();
           return;
@@ -4382,6 +4423,7 @@ export const CODEX_MOBILE_JS = String.raw`
   }
 
   function setTaskBoardOpen(open, updateUrl) {
+    if (open && state.settingsOpen) setSettingsOpen(false, false);
     state.boardOpen = Boolean(open);
     app.classList.toggle("board-open", state.boardOpen);
     taskBoard.hidden = !state.boardOpen;
@@ -4402,6 +4444,7 @@ export const CODEX_MOBILE_JS = String.raw`
         void loadTaskBoard(false);
       }
     }
+    updateActiveDocumentTitle();
   }
 
   async function openTaskFromBoard(task) {
@@ -4447,36 +4490,77 @@ export const CODEX_MOBILE_JS = String.raw`
     }
   }
 
+  function positionWorkspaceMenu() {
+    if (workspaceMenu.hidden) return;
+    var anchor = workspaceSwitcher.getBoundingClientRect();
+    var viewportWidth = window.innerWidth || document.documentElement.clientWidth;
+    var viewportHeight = window.innerHeight || document.documentElement.clientHeight;
+    var edge = 8;
+    var gap = 7;
+    var menuWidth = Math.min(300, Math.max(0, viewportWidth - edge * 2));
+    workspaceMenu.style.width = menuWidth + "px";
+    var menuHeight = Math.min(
+      workspaceMenu.scrollHeight || workspaceMenu.getBoundingClientRect().height,
+      Math.min(viewportHeight * 0.7, 520),
+    );
+    var maxLeft = Math.max(edge, viewportWidth - menuWidth - edge);
+    var left = Math.min(Math.max(anchor.left, edge), maxLeft);
+    var belowTop = anchor.bottom + gap;
+    var aboveTop = anchor.top - menuHeight - gap;
+    var top = belowTop + menuHeight <= viewportHeight - edge || aboveTop < edge
+      ? belowTop
+      : aboveTop;
+    var maxTop = Math.max(edge, viewportHeight - menuHeight - edge);
+    workspaceMenu.style.left = Math.round(left) + "px";
+    workspaceMenu.style.top = Math.round(Math.min(Math.max(top, edge), maxTop)) + "px";
+  }
+
   function toggleWorkspaceMenu(forceOpen) {
     var nextOpen = typeof forceOpen === "boolean"
       ? forceOpen
       : workspaceMenu.hidden;
     workspaceMenu.hidden = !nextOpen;
     workspaceSwitcher.setAttribute("aria-expanded", nextOpen ? "true" : "false");
-    if (nextOpen) void loadAdapters().catch(function () {});
+    if (nextOpen) {
+      positionWorkspaceMenu();
+      void loadAdapters().then(positionWorkspaceMenu).catch(function () {});
+    }
   }
 
-  function openSettingsPanel() {
+  function setSettingsOpen(open, updateUrl) {
+    var nextOpen = Boolean(open);
+    if (nextOpen && state.boardOpen) setTaskBoardOpen(false, false);
+    state.settingsOpen = nextOpen;
+    app.classList.toggle("settings-open", state.settingsOpen);
+    settingsView.hidden = !state.settingsOpen;
+    settingsOpen.classList.toggle("is-active", state.settingsOpen);
+    settingsOpen.setAttribute("aria-pressed", state.settingsOpen ? "true" : "false");
     toggleWorkspaceMenu(false);
-    settingsOverlay.hidden = false;
-    document.body.classList.add("settings-open");
-    settingsBody.innerHTML = "";
-    var loading = document.createElement("div");
-    loading.className = "settings-loading";
-    loading.textContent = "正在读取设置…";
-    settingsBody.appendChild(loading);
-    requestAnimationFrame(function () { settingsClose.focus(); });
-    void loadSettings();
-  }
-
-  function closeSettingsPanel() {
-    settingsOverlay.hidden = true;
-    document.body.classList.remove("settings-open");
-    if (settingsRefreshTimer) {
+    closeTaskContextMenu();
+    closeModelMenu();
+    if (updateUrl) {
+      var url = new URL(window.location.href);
+      if (state.settingsOpen) {
+        url.searchParams.set("view", "settings");
+        url.searchParams.delete("board");
+      } else if (url.searchParams.get("view") === "settings") {
+        url.searchParams.delete("view");
+      }
+      history.replaceState(null, "", url.pathname + url.search + url.hash);
+    }
+    if (state.settingsOpen) {
+      closeSidebar();
+      settingsBody.innerHTML = "";
+      var loading = document.createElement("div");
+      loading.className = "settings-loading";
+      loading.textContent = "正在读取设置…";
+      settingsBody.appendChild(loading);
+      void loadSettings();
+    } else if (settingsRefreshTimer) {
       clearTimeout(settingsRefreshTimer);
       settingsRefreshTimer = null;
     }
-    settingsOpen.focus();
+    updateActiveDocumentTitle();
   }
 
   function settingsCapabilitySummary(capabilities) {
@@ -4506,7 +4590,7 @@ export const CODEX_MOBILE_JS = String.raw`
     if (settingsRefreshTimer) clearTimeout(settingsRefreshTimer);
     settingsRefreshTimer = setTimeout(function () {
       settingsRefreshTimer = null;
-      if (!settingsOverlay.hidden) void loadSettings();
+      if (state.settingsOpen) void loadSettings();
     }, 1600);
   }
 
@@ -4709,11 +4793,11 @@ export const CODEX_MOBILE_JS = String.raw`
   async function loadSettings() {
     try {
       var payload = await api("/api/settings");
-      if (settingsOverlay.hidden) return;
+      if (!state.settingsOpen) return;
       renderSettings(payload);
       if (settingsHasInstallingProvider(payload)) scheduleSettingsRefresh();
     } catch (error) {
-      if (settingsOverlay.hidden) return;
+      if (!state.settingsOpen) return;
       settingsBody.innerHTML = "";
       var failed = document.createElement("div");
       failed.className = "settings-loading";
@@ -4822,6 +4906,40 @@ export const CODEX_MOBILE_JS = String.raw`
     return imageCount ? "图片 " + imageCount + " 张" : "（空消息）";
   }
 
+  function makeSteeredPendingMessage(message, threadId, transcriptMessages, nowMs) {
+    var users = (Array.isArray(transcriptMessages) ? transcriptMessages : []).filter(
+      function (candidate) { return candidate && candidate.role === "user"; }
+    );
+    function baselineKey(candidate) {
+      if (candidate && candidate.id) return "id:" + candidate.id;
+      return "content:" + [
+        candidate && candidate.turnId || "",
+        candidate && candidate.role || "",
+        candidate && candidate.phase || "",
+        candidate && candidate.text || ""
+      ].join("\u0000");
+    }
+    var sourceMessageId = String(message && message.id || "");
+    var queuedAtMs = Number(message && message.createdAtMs);
+    return {
+      clientId: "steered-" + (sourceMessageId || String(nowMs) + "-" + Math.random().toString(36).slice(2, 8)),
+      sourceMessageId: sourceMessageId,
+      createdAtMs: nowMs,
+      queuedAtMs: Number.isFinite(queuedAtMs) ? queuedAtMs : undefined,
+      threadId: threadId,
+      text: String(message && message.text || ""),
+      images: [],
+      imageCount: Math.max(0, Number(message && message.imageCount) || 0),
+      status: "steered",
+      turnId: "",
+      queued: false,
+      optimisticRun: false,
+      displayInTranscript: true,
+      baselineUserCount: users.length,
+      baselineUserKeys: users.map(baselineKey)
+    };
+  }
+
   function mergeQueuedMessagesForDisplay(
     queuedMessages,
     pendingMessages,
@@ -4884,20 +5002,39 @@ export const CODEX_MOBILE_JS = String.raw`
 
   async function steerQueuedMessage(messageId) {
     if (!state.currentThreadId || state.queueActionMessageId) return;
+    var requestedThreadId = state.currentThreadId;
+    var queuedMessage = state.queuedMessages.find(function (message) {
+      return message.id === messageId;
+    });
     state.queueActionMessageId = messageId;
     renderQueuedMessages(state.queuedMessages);
     try {
       await api(adapterApiPath(
-        "/api/tasks/" + encodeURIComponent(state.currentThreadId) +
+        "/api/tasks/" + encodeURIComponent(requestedThreadId) +
         "/queue/" + encodeURIComponent(messageId) + "/steer"),
         { method: "POST" }
       );
+      if (requestedThreadId !== state.currentThreadId) return;
       state.queuedMessages = state.queuedMessages.filter(function (message) {
         return message.id !== messageId;
       });
+      if (queuedMessage && !state.pendingMessages.some(function (pending) {
+        return pending.sourceMessageId === messageId;
+      })) {
+        var pending = makeSteeredPendingMessage(
+          queuedMessage,
+          requestedThreadId,
+          state.serverMessages,
+          Date.now()
+        );
+        beginOptimisticRunIfNeeded(pending);
+        state.pendingMessages.push(pending);
+      }
       state.editingQueuedMessageId = "";
       showToast("已引导到当前任务");
       renderQueuedMessages(state.queuedMessages);
+      renderMessages(true);
+      saveCurrentConversationSnapshot();
       await loadMessages(false);
     } catch (error) {
       showToast("引导失败：" + (error.message || "请稍后重试"));
@@ -5211,7 +5348,12 @@ export const CODEX_MOBILE_JS = String.raw`
   function effectiveRunSummary() {
     var local = state.localRunSummary;
     var remote = state.runSummary;
-    if (local && (!remote || !remote.turnId || remote.turnId !== local.turnId)) return local;
+    if (local && (
+      !remote ||
+      remote.status === "unknown" ||
+      !remote.turnId ||
+      remote.turnId !== local.turnId
+    )) return local;
     return remote || local;
   }
 
@@ -5240,15 +5382,19 @@ export const CODEX_MOBILE_JS = String.raw`
     });
   }
 
-  function resolveVisibleRunSummary(messages, task, summary, nowMs) {
+  function resolveVisibleRunSummary(messages, task, summary, nowMs, progressItems) {
     var latestAssistant = null;
+    var latestAssistantIndex = -1;
     var latestUser = null;
+    var latestUserIndex = -1;
     for (var index = messages.length - 1; index >= 0; index -= 1) {
       if (!latestAssistant && messages[index].role === "assistant") {
         latestAssistant = messages[index];
+        latestAssistantIndex = index;
       }
       if (!latestUser && messages[index].role === "user") {
         latestUser = messages[index];
+        latestUserIndex = index;
       }
       if (latestAssistant && latestUser) break;
     }
@@ -5264,14 +5410,38 @@ export const CODEX_MOBILE_JS = String.raw`
         durationMs: Math.max(0, nowMs - startedAtMs)
       };
     }
-    if (
-      summary &&
-      summary.status !== "running" &&
-      summary.turnId &&
-      latestUser &&
-      latestUser.turnId &&
-      latestUser.turnId !== summary.turnId
-    ) return null;
+    var currentTurnId = task && task.activeTurnId || latestUser && latestUser.turnId || "";
+    var runningProgress = (Array.isArray(progressItems) ? progressItems : []).slice().reverse()
+      .find(function (item) {
+        return item && item.status === "running" &&
+          (!currentTurnId || !item.turnId || item.turnId === currentTurnId);
+      });
+    if (runningProgress) {
+      var progressTurnId = runningProgress.turnId || currentTurnId || undefined;
+      var summaryMatchesProgress = Boolean(
+        summary && (!progressTurnId || !summary.turnId || summary.turnId === progressTurnId)
+      );
+      var progressStartedAtMs = Number(task && task.startedAtMs) ||
+        Number(runningProgress.createdAtMs) ||
+        Number(summaryMatchesProgress && summary && summary.startedAtMs) || nowMs;
+      return {
+        turnId: progressTurnId,
+        status: "running",
+        startedAtMs: progressStartedAtMs,
+        durationMs: Math.max(0, nowMs - progressStartedAtMs)
+      };
+    }
+    if (summary && summary.status !== "running" && latestUser) {
+      if (
+        summary.turnId &&
+        latestUser.turnId &&
+        latestUser.turnId !== summary.turnId
+      ) return null;
+      if (
+        latestUserIndex > latestAssistantIndex &&
+        (!summary.turnId || !latestUser.turnId || latestUser.turnId !== summary.turnId)
+      ) return null;
+    }
     return summary || null;
   }
 
@@ -5298,7 +5468,8 @@ export const CODEX_MOBILE_JS = String.raw`
     }
     if (summary.status === "failed") return "处理失败 · " + duration;
     if (summary.status === "interrupted") return "已中断 · " + duration;
-    return "已完成 · " + duration;
+    if (summary.status === "completed") return "已完成 · " + duration;
+    return "状态同步中 · " + duration;
   }
 
   function currentPendingDelivery() {
@@ -5659,7 +5830,8 @@ export const CODEX_MOBILE_JS = String.raw`
       messages,
       currentTask(),
       effectiveRunSummary(),
-      Date.now()
+      Date.now(),
+      state.progressItems
     );
     if (!header || !summary) return;
     var label = header.querySelector(".run-header-label");
@@ -5701,7 +5873,12 @@ export const CODEX_MOBILE_JS = String.raw`
         ? new Set(pending.baselineUserKeys)
         : null;
       var matchIndex = -1;
-      if (pending.turnId) {
+      if (pending.sourceMessageId) {
+        matchIndex = users.findIndex(function (message, index) {
+          return !used[index] && String(message && message.id || "") === pending.sourceMessageId;
+        });
+      }
+      if (matchIndex < 0 && pending.turnId) {
         matchIndex = users.findIndex(function (message, index) {
           return !used[index] && message.turnId === pending.turnId;
         });
@@ -5764,7 +5941,14 @@ export const CODEX_MOBILE_JS = String.raw`
       .replace(/^\s*\[local image:[^\]]+\]\s*$/gim, "")
       .replace(/\n{3,}/g, "\n\n")
       .trim();
-    return cleaned || (imageMarker ? "已发送图片" : "");
+    if (cleaned) return cleaned;
+    var imageCount = Math.max(0, Number(message && message.imageCount) || 0);
+    if (message && message.pending && imageCount > 0) {
+      return message.status === "steered"
+        ? "已引导图片 " + imageCount + " 张"
+        : "已发送图片 " + imageCount + " 张";
+    }
+    return imageMarker ? "已发送图片" : "";
   }
 
   function visibleMessageModel(message) {
@@ -5971,7 +6155,9 @@ export const CODEX_MOBILE_JS = String.raw`
             ? "发送状态未确认"
             : message.status === "queued"
               ? "已排队 · 等待当前任务完成"
-              : "已发送 · 正在处理";
+              : message.status === "steered"
+                ? "已引导 · 正在处理"
+                : "已发送 · 正在处理";
       var retry = message.status === "failed" || message.status === "waiting_task_retry" || message.status === "unconfirmed"
         ? '<button class="message-retry" type="button" data-retry="' + escapeHtml(message.clientId) + '">' +
           (message.status === "unconfirmed" ? "检查状态" : "重试") + "</button>"
@@ -6061,7 +6247,8 @@ export const CODEX_MOBILE_JS = String.raw`
       messages,
       currentTask(),
       effectiveRunSummary(),
-      Date.now()
+      Date.now(),
+      state.progressItems
     );
     var headerIndex = runHeaderInsertIndex(messages, summary);
     var pendingDelivery = currentPendingDelivery();
@@ -6217,7 +6404,7 @@ export const CODEX_MOBILE_JS = String.raw`
         } else {
           next = Object.assign({}, next, {
             status: "unknown",
-            completedAtMs: Date.now(),
+            completedAtMs: undefined,
             durationMs: runDurationMs(next)
           });
         }
@@ -6239,12 +6426,15 @@ export const CODEX_MOBILE_JS = String.raw`
       var localTurnConfirmed = Boolean(
         state.localRunSummary.turnId &&
         next &&
-        next.turnId === state.localRunSummary.turnId
+        next.turnId === state.localRunSummary.turnId &&
+        next.status !== "unknown"
       );
       var localAgeMs = Date.now() - Number(state.localRunSummary.startedAtMs || Date.now());
       if (localTurnConfirmed || taskRunning && next && next.status === "running") {
         state.localRunSummary = null;
-      } else if (!taskRunning && !state.sending && localAgeMs > 120000) {
+      } else if (!taskRunning && !state.pendingMessages.some(function (message) {
+        return message.inFlight;
+      }) && localAgeMs > 120000) {
         state.localRunSummary = null;
       }
     }
@@ -6442,6 +6632,21 @@ export const CODEX_MOBILE_JS = String.raw`
     }
   }
 
+  function mergeMessageRefreshRequest(current, forceBottom, historyOnly, forceFullPage) {
+    if (!current) {
+      return {
+        forceBottom: Boolean(forceBottom),
+        historyOnly: Boolean(historyOnly),
+        forceFullPage: Boolean(forceFullPage)
+      };
+    }
+    return {
+      forceBottom: Boolean(current.forceBottom || forceBottom),
+      historyOnly: Boolean(current.historyOnly && historyOnly),
+      forceFullPage: Boolean(current.forceFullPage || forceFullPage)
+    };
+  }
+
   async function loadMessages(forceBottom, historyOnly, forceFullPage) {
     if (!state.authenticated || !state.currentThreadId) return null;
     if (isTemporaryTask(currentTask())) {
@@ -6449,7 +6654,15 @@ export const CODEX_MOBILE_JS = String.raw`
       updateHeader();
       return null;
     }
-    if (state.loadingMessages) return null;
+    if (state.loadingMessages) {
+      state.trailingMessageRefresh = mergeMessageRefreshRequest(
+        state.trailingMessageRefresh,
+        forceBottom,
+        historyOnly,
+        forceFullPage
+      );
+      return null;
+    }
     var requestedThreadId = state.currentThreadId;
     var requestId = ++state.messageRequestId;
     state.loadingMessages = true;
@@ -6546,7 +6759,18 @@ export const CODEX_MOBILE_JS = String.raw`
       }
       return null;
     } finally {
-      if (requestId === state.messageRequestId) state.loadingMessages = false;
+      if (requestId === state.messageRequestId) {
+        state.loadingMessages = false;
+        var trailingRefresh = state.trailingMessageRefresh;
+        state.trailingMessageRefresh = null;
+        if (trailingRefresh && requestedThreadId === state.currentThreadId) {
+          void loadMessages(
+            trailingRefresh.forceBottom,
+            trailingRefresh.historyOnly,
+            trailingRefresh.forceFullPage
+          );
+        }
+      }
     }
   }
 
@@ -6767,6 +6991,7 @@ export const CODEX_MOBILE_JS = String.raw`
   async function selectTask(threadId, updateUrl) {
     closeTaskContextMenu();
     if (!threadId) return;
+    if (state.settingsOpen) setSettingsOpen(false, updateUrl);
     if (threadId === state.currentThreadId) {
       if (updateUrl) {
         var currentUrl = new URL(window.location.href);
@@ -6782,6 +7007,7 @@ export const CODEX_MOBILE_JS = String.raw`
     saveCurrentConversationSnapshot();
     state.messageRequestId += 1;
     state.loadingMessages = false;
+    state.trailingMessageRefresh = null;
     state.composerRevision += 1;
     state.currentThreadId = threadId;
     state.modelRequestId += 1;
@@ -7046,6 +7272,7 @@ export const CODEX_MOBILE_JS = String.raw`
       turnId: "",
       queued: false,
       optimisticRun: false,
+      inFlight: false,
       displayInTranscript: true,
       baselineUserCount: state.serverMessages.filter(function (message) { return message.role === "user"; }).length,
       baselineUserKeys: state.serverMessages.filter(function (message) {
@@ -7054,10 +7281,22 @@ export const CODEX_MOBILE_JS = String.raw`
     };
   }
 
+  function enqueuePendingPost(pending, post) {
+    var key = conversationStateKey(pending.adapter || "codex", pending.threadId);
+    var previous = state.messagePostChains[key] || Promise.resolve();
+    var current = previous.catch(function () {}).then(post);
+    var tail = current.then(function () {}, function () {}).then(function () {
+      if (state.messagePostChains[key] === tail) delete state.messagePostChains[key];
+    });
+    state.messagePostChains[key] = tail;
+    return current;
+  }
+
   async function submitPendingMessage(pending) {
+    if (pending.inFlight) return;
     var requestedThreadId = pending.threadId;
     var requestedAdapter = pending.adapter || state.currentAdapter;
-    state.sending = true;
+    pending.inFlight = true;
     pending.status = "contacting_computer";
     renderMessages(true);
     updateHeader();
@@ -7070,17 +7309,19 @@ export const CODEX_MOBILE_JS = String.raw`
           dataBase64: image.dataBase64
         };
       });
-      var result = await api(adapterApiPath(
-        "/api/tasks/" + encodeURIComponent(requestedThreadId) + "/messages",
-        requestedAdapter
-      ), {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          clientId: pending.clientId,
-          text: pending.text,
-          images: images
-        })
+      var result = await enqueuePendingPost(pending, function () {
+        return api(adapterApiPath(
+          "/api/tasks/" + encodeURIComponent(requestedThreadId) + "/messages",
+          requestedAdapter
+        ), {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            clientId: pending.clientId,
+            text: pending.text,
+            images: images
+          })
+        });
       });
       var deliveryChecks = 0;
       while (result && result.status === "forwarding") {
@@ -7192,7 +7433,7 @@ export const CODEX_MOBILE_JS = String.raw`
         }
       }
     } finally {
-      state.sending = false;
+      pending.inFlight = false;
       updateHeader();
     }
   }
@@ -7212,9 +7453,8 @@ export const CODEX_MOBILE_JS = String.raw`
   }
 
   function retryPendingMessage(clientId) {
-    if (state.sending) return;
     var pending = state.pendingMessages.find(function (message) { return message.clientId === clientId; });
-    if (!pending) return;
+    if (!pending || pending.inFlight) return;
     var task = taskById(pending.threadId);
     if (isTemporaryTask(task)) {
       pending.waitingForTaskCreation = true;
@@ -7256,7 +7496,7 @@ export const CODEX_MOBILE_JS = String.raw`
       stopCurrentTask();
       return;
     }
-    if (!hasContent || !state.currentThreadId || state.sending) return;
+    if (!hasContent || !state.currentThreadId) return;
     var pending = makePendingMessage(text, images);
     var waitingForTaskCreation = taskNeedsCreation(task);
     var likelyQueued = !waitingForTaskCreation && (isTaskActivelyRunning(task) ||
@@ -7368,7 +7608,7 @@ export const CODEX_MOBILE_JS = String.raw`
     toggleWorkspaceMenu(false);
     closeTaskContextMenu();
     closeTaskRenameDialog(true);
-    closeSettingsPanel();
+    setSettingsOpen(false, false);
     try { await fetchJson("/api/auth/logout", { method: "POST" }); } catch (_) {}
     state.taskRequestId += 1;
     state.messageRequestId += 1;
@@ -7395,7 +7635,7 @@ export const CODEX_MOBILE_JS = String.raw`
     state.switchingAdapter = false;
     state.switchingAdapterId = "";
     state.switchStartedAtMs = 0;
-    updateDocumentTitle();
+    updateActiveDocumentTitle();
     state.adapterError = "";
     state.pendingImages = [];
     state.conversationSnapshots = Object.create(null);
@@ -7457,6 +7697,10 @@ export const CODEX_MOBILE_JS = String.raw`
   window.addEventListener("resize", function () {
     syncComposerInset();
     closeTaskContextMenu();
+    positionWorkspaceMenu();
+  });
+  window.addEventListener("orientationchange", function () {
+    requestAnimationFrame(positionWorkspaceMenu);
   });
   taskList.addEventListener("scroll", closeTaskContextMenu, { passive: true });
   messagesEl.addEventListener("scroll", function () {
@@ -7495,11 +7739,19 @@ export const CODEX_MOBILE_JS = String.raw`
     }
     void createTask("", "");
   });
+  taskList.addEventListener("selectstart", function (event) {
+    event.preventDefault();
+  });
   messagesEl.addEventListener("selectstart", closeTaskContextMenu);
   messagesEl.addEventListener("contextmenu", closeTaskContextMenu);
   messagesEl.addEventListener("pointerdown", closeTaskContextMenu);
   document.addEventListener("selectionchange", function () {
-    if (hasActiveTextSelection()) closeTaskContextMenu();
+    if (!hasActiveTextSelection()) return;
+    if (!taskContextMenu.hidden && app.classList.contains("sidebar-open")) {
+      clearActiveTextSelection();
+      return;
+    }
+    closeTaskContextMenu();
   });
   document.addEventListener("click", function (event) {
     if (!workspaceMenu.hidden && !workspaceMenu.contains(event.target) && !workspaceSwitcher.contains(event.target)) {
@@ -7521,11 +7773,6 @@ export const CODEX_MOBILE_JS = String.raw`
         closeImageViewer();
         return;
       }
-      if (!settingsOverlay.hidden) {
-        event.preventDefault();
-        closeSettingsPanel();
-        return;
-      }
       if (!taskRenameOverlay.hidden) {
         event.preventDefault();
         closeTaskRenameDialog();
@@ -7539,18 +7786,19 @@ export const CODEX_MOBILE_JS = String.raw`
   document.getElementById("menu-button").addEventListener("click", function () { app.classList.add("sidebar-open"); });
   document.getElementById("sidebar-close").addEventListener("click", closeSidebar);
   document.getElementById("sidebar-overlay").addEventListener("click", closeSidebar);
-  settingsOpen.addEventListener("click", openSettingsPanel);
-  settingsClose.addEventListener("click", closeSettingsPanel);
-  settingsOverlay.addEventListener("click", function (event) {
-    if (event.target === settingsOverlay) closeSettingsPanel();
+  settingsOpen.addEventListener("click", function () {
+    setSettingsOpen(true, true);
   });
+  settingsMenuButton.addEventListener("click", function () { app.classList.add("sidebar-open"); });
 
   function scheduleLiveRefresh(delayMs) {
     if (!state.authenticated) return;
     if (state.liveRefreshTimer) clearTimeout(state.liveRefreshTimer);
     state.liveRefreshTimer = setTimeout(async function () {
       if (await checkForAppUpdate(false)) return;
-      var refreshes = state.boardOpen
+      var refreshes = state.settingsOpen
+        ? []
+        : state.boardOpen
         ? Date.now() - state.boardLastLoadedAtMs >= TASK_REFRESH_INTERVAL_MS
           ? [loadTaskBoard(false)]
           : []
@@ -7578,7 +7826,8 @@ export const CODEX_MOBILE_JS = String.raw`
       void (async function () {
         if (await checkForAppUpdate(true)) return;
         state.nextTaskRefreshAtMs = 0;
-        if (state.boardOpen) await loadTaskBoard(true);
+        if (state.settingsOpen) await Promise.all([loadTasks(false), loadSettings()]);
+        else if (state.boardOpen) await loadTaskBoard(true);
         else await Promise.all([
           loadTasks(false),
           refreshMessagesIfChanged(false, true),

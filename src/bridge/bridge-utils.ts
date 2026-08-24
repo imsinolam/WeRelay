@@ -1649,7 +1649,7 @@ export function formatResumeSessionList(params: {
   if (adapter === "codex") {
     const actions: string[] = [
       "回复序号进入任务",
-      "发送“数字：内容”（如：6：继续处理）可直接发给指定任务",
+      "发送“数字：内容”或“任务数字：内容”（如：任务6：继续处理）可直接发给指定任务",
       "发送“任务：关键词”搜索",
       "发送“任务”可重新选择",
       "发送“新建：内容”创建任务并直接开始",
@@ -1683,7 +1683,7 @@ export function formatResumeSessionList(params: {
   const title = adapter === "opencode" ? "OpenCode 最近任务" : "最近任务";
   const actions = [
     "回复序号进入任务",
-    "发送“数字：内容”（如：6：继续处理）可直接发给指定任务",
+    "发送“数字：内容”或“任务数字：内容”（如：任务6：继续处理）可直接发给指定任务",
     "发送“任务：关键词”搜索",
     "发送“任务”可重新选择",
     "发送“新建：内容”创建任务并直接开始",
@@ -1740,7 +1740,7 @@ export function formatCodexWechatHelp(): string {
     "Codex 微信使用",
     "查看任务：发送“任务”",
     "进入任务：发送“任务：2”",
-    "指定任务发送：发送“数字：内容”（如：6：继续处理）",
+    "指定任务发送：发送“数字：内容”或“任务数字：内容”（如：任务6：继续处理）",
     "搜索任务：发送“任务 canvas”、“任务canvas”或“任务：canvas”",
     "新建任务：发送“新建：内容”",
     "继续对话：直接发送消息",
@@ -1922,7 +1922,12 @@ export function formatCodexDesktopTaskSelection(
   if (statusLine) {
     lines.push(statusLine);
   }
-  lines.push("", "直接发送消息即可继续。", "发送“任务”可切换其他任务。");
+  lines.push(
+    "",
+    "接下来直接回复，会发送给当前任务。",
+    "如需发给任务列表中的其他任务，发送“任务4：继续处理”。",
+    "发送“任务”可切换其他任务。",
+  );
   return lines.join("\n");
 }
 

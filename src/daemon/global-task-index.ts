@@ -218,15 +218,23 @@ export function resolveCompactGlobalTaskSearchTarget(
     : null;
 }
 
+export function parseTaskTargetedMessageText(
+  text: string,
+): { taskNumber: string; text: string } | null {
+  const match = text.trim().match(/^(?:任务\s*)?([1-9]\d*)\s*[：:]\s*([\s\S]*\S)$/);
+  if (!match?.[1] || !match[2]) return null;
+  return { taskNumber: match[1], text: match[2].trim() };
+}
+
 export function resolveGlobalTaskTargetedMessage(params: {
   text: string;
   snapshot: GlobalTaskSnapshot | null;
 }): { candidate: GlobalTaskCandidate; text: string } | null {
   if (!params.snapshot) return null;
-  const match = params.text.trim().match(/^([1-9]\d*)\s*[：:]\s*([\s\S]*\S)$/);
-  if (!match?.[1] || !match[2]) return null;
-  const candidate = resolveGlobalTaskCandidate(params.snapshot, match[1]);
-  return candidate ? { candidate, text: match[2].trim() } : null;
+  const targeted = parseTaskTargetedMessageText(params.text);
+  if (!targeted) return null;
+  const candidate = resolveGlobalTaskCandidate(params.snapshot, targeted.taskNumber);
+  return candidate ? { candidate, text: targeted.text } : null;
 }
 
 export function shouldShowGlobalTaskAdapterLabels(
@@ -259,7 +267,7 @@ export function formatGlobalTaskList(params: {
   }
   const actions = [
     "回复序号进入任务",
-    "发送“数字：内容”（如：6：继续处理）可直接发给指定任务",
+    "发送“数字：内容”或“任务数字：内容”（如：任务6：继续处理）可直接发给指定任务",
     "发送“任务：关键词”搜索运行中的终端",
     "发送“任务”刷新运行终端列表",
   ];

@@ -1392,7 +1392,7 @@ export function extractCodexDesktopThreadRunSummary(
       ...(turnId ? { turnId } : {}),
       status,
       ...(startedAtMs !== undefined ? { startedAtMs } : {}),
-      ...(completedAtMs !== undefined ? { completedAtMs } : {}),
+      ...(completedAtMs !== undefined && status !== "unknown" ? { completedAtMs } : {}),
       durationMs,
       ...(turnId && persisted?.turnId === turnId && persisted.errorMessage
         ? { errorMessage: persisted.errorMessage }

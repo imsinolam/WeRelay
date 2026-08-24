@@ -239,16 +239,18 @@ describe("global task index", () => {
     expect(resolveCompactGlobalTaskSearchTarget("任务做完后告诉我", snapshot)).toBeNull();
   });
 
-  test("routes 数字：内容 by adapter plus session id from the global snapshot", () => {
+  test("routes 数字：内容 and 任务数字：内容 by adapter plus session id from the global snapshot", () => {
     const snapshot = buildGlobalTaskSnapshot([
       candidate("codex", "same-id", "Codex", "2026-08-08T10:00:00.000Z"),
       candidate("workbuddy", "same-id", "WorkBuddy", "2026-08-08T09:00:00.000Z"),
     ]);
 
-    expect(resolveGlobalTaskTargetedMessage({ text: "2 ： 继续处理", snapshot })).toEqual({
-      candidate: snapshot.candidates[1],
-      text: "继续处理",
-    });
+    for (const text of ["2 ： 继续处理", "任务2:继续处理", "任务 2 ： 继续处理"]) {
+      expect(resolveGlobalTaskTargetedMessage({ text, snapshot })).toEqual({
+        candidate: snapshot.candidates[1],
+        text: "继续处理",
+      });
+    }
   });
 
   test("restores the exact disconnected adapter task and never falls back", async () => {

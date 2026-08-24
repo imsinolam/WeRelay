@@ -96,6 +96,32 @@ async function waitUntilOnline(baseUrl: string): Promise<void> {
 }
 
 describe("WeRelay application relay", () => {
+  test("serves versioned assets with immutable caching, validators, and compression", async () => {
+    const relay = await startWeRelayRelayServer({
+      host: "127.0.0.1",
+      port: 0,
+      deviceId: "asset-device",
+      deviceToken: "asset-token",
+    });
+    closers.push(() => relay.close());
+
+    const response = await fetch(`${relay.baseUrl}/app.js`, {
+      headers: { "accept-encoding": "br, gzip" },
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control"))
+      .toBe("public, max-age=31536000, immutable");
+    expect(response.headers.get("etag")).toBeTruthy();
+    expect(response.headers.get("vary")).toBe("Accept-Encoding");
+    expect(["br", "gzip"]).toContain(response.headers.get("content-encoding"));
+    expect(await response.text()).toContain("WeRelay");
+
+    const notModified = await fetch(`${relay.baseUrl}/app.js`, {
+      headers: { "if-none-match": response.headers.get("etag") ?? "" },
+    });
+    expect(notModified.status).toBe(304);
+  });
+
   test("prewarms authenticated task data before the browser opens again", async () => {
     const sessionToken = `v1.${Date.now() + 60_000}.nonce.signature`;
     let version = 1;
@@ -467,6 +493,26 @@ describe("WeRelay application relay", () => {
       return entry.method === "POST" && entry.url === "/api/tasks/thread-1/messages";
     });
     expect(forwardedSend?.body).toContain("从手机继续当前任务");
+
+    const switchModel = await fetch(
+      `${relay.baseUrl}/api/tasks/thread-1/model?adapter=codex`,
+      {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "gpt-5.6" }),
+      },
+    );
+    expect(switchModel.status).toBe(200);
+    expect(await switchModel.json()).toMatchObject({
+      method: "PUT",
+      path: "/api/tasks/thread-1/model?adapter=codex",
+      body: { model: "gpt-5.6" },
+    });
+    expect(local.received).toContainEqual(expect.objectContaining({
+      method: "PUT",
+      url: "/api/tasks/thread-1/model?adapter=codex",
+      body: JSON.stringify({ model: "gpt-5.6" }),
+    }));
   });
 
   test("rejects unauthenticated device polls and reports an offline Mac in Chinese", async () => {

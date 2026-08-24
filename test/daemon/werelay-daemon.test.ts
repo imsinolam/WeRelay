@@ -710,7 +710,14 @@ describe("werelay-daemon helpers", () => {
       refresh: true,
     });
 
-    for (const text of ["2:继续处理", "2：继续处理", "2 : 继续处理", "2 ： 继续处理"]) {
+    for (const text of [
+      "2:继续处理",
+      "2：继续处理",
+      "2 : 继续处理",
+      "2 ： 继续处理",
+      "任务2:继续处理",
+      "任务 2 ： 继续处理",
+    ]) {
       expect(resolveDaemonTaskTargetedMessage({ text, snapshot })).toEqual({
         candidate: snapshot.candidates[1],
         text: "继续处理",
@@ -1001,6 +1008,25 @@ describe("werelay-daemon helpers", () => {
     })).toBe("running");
   });
 
+  test("lets a connected non-Codex runtime override a stale idle task snapshot", () => {
+    expect(resolveCodexMobileTaskStatusFromSignals({
+      runtimeStatus: { type: "idle" },
+      hasPendingApproval: false,
+      hasPendingUserInput: false,
+      hasActiveTask: true,
+      selectedStateStatus: "busy",
+      preferSelectedState: true,
+    })).toBe("running");
+    expect(resolveCodexMobileTaskStatusFromSignals({
+      runtimeStatus: { type: "idle" },
+      hasPendingApproval: true,
+      hasPendingUserInput: false,
+      hasActiveTask: true,
+      selectedStateStatus: "awaiting_approval",
+      preferSelectedState: true,
+    })).toBe("approval");
+  });
+
   test("restores a selected task approval from the desktop runtime after daemon restart", () => {
     const pending = resolveCodexMobilePendingApprovalFromSignals({
       threadId: "thread-a",
@@ -1260,7 +1286,7 @@ describe("werelay-daemon helpers", () => {
         url: "http://192.168.50.10:4396/?task=0000000a&key=secret",
       }),
     ).toBe(
-      "[完善移动版消息] 已完成，用时9m 7s\n本次任务：让完成通知明确显示本次处理的具体请求\n\n已完成移动端消息刷新。\n\nhttp://192.168.50.10:4396/?task=0000000a&key=secret\n发送“全文”查看完整回答；网页版可查看完整任务及列表。",
+      "[完善移动版消息] 已完成，用时9m 7s\n本次任务：让完成通知明确显示本次处理的具体请求\n\n已完成移动端消息刷新。\n\n发送“全文”查看完整回答；网页版可查看完整任务及列表。\n\nhttp://192.168.50.10:4396/?task=0000000a&key=secret",
     );
     expect(
       formatCodexTaskCompletionMessage({
@@ -1288,7 +1314,7 @@ describe("werelay-daemon helpers", () => {
         url: "http://192.168.50.10:4396/?task=thread&key=secret",
       }),
     ).toBe(
-      "[长回复任务] 已完成，用时8s\n\n一二三四五六七八…\n后面还有 2 字，共 10 字\n\nhttp://192.168.50.10:4396/?task=thread&key=secret\n发送“全文”查看完整回答；网页版可查看完整任务及列表。",
+      "[长回复任务] 已完成，用时8s\n\n一二三四五六七八…\n后面还有 2 字，共 10 字\n\n发送“全文”查看完整回答；网页版可查看完整任务及列表。\n\nhttp://192.168.50.10:4396/?task=thread&key=secret",
     );
 
     expect(
@@ -1316,6 +1342,7 @@ describe("werelay-daemon helpers", () => {
 
     expect(message).toContain("本次任务：检查网页消息重复");
     expect(message).not.toContain(variantUrl);
+    expect(message).toEndWith(canonicalUrl);
     expect(message.split("https://203.0.113.10/")).toHaveLength(2);
     expect(appendCodexMobileTaskLink(`已完成\n\n${variantUrl}`, canonicalUrl)).toBe(
       `已完成\n\n${variantUrl}`,

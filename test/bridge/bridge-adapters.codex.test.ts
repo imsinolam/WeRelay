@@ -365,6 +365,45 @@ describe("Codex desktop task run summary", () => {
     });
   });
 
+  test("keeps an idle desktop turn unknown until terminal evidence appears", () => {
+    expect(
+      extractCodexDesktopThreadRunSummary(
+        {
+          threadRuntimeStatus: { type: "idle" },
+          updatedAt: 9,
+          turnHistory: {
+            history: {
+              entitiesByKey: {
+                "tail:0:local:uncertain": {
+                  turnId: "turn_current",
+                  status: "inProgress",
+                  items: [{
+                    type: "agentMessage",
+                    phase: "commentary",
+                    text: "仍在检查任务状态。",
+                  }],
+                },
+              },
+            },
+          },
+        },
+        {
+          turnId: "turn_current",
+          status: "running",
+          startedAtMs: 4_000,
+          durationMs: 5_000,
+        },
+        12_000,
+        4_000,
+      ),
+    ).toEqual({
+      turnId: "turn_current",
+      status: "unknown",
+      startedAtMs: 4_000,
+      durationMs: 5_000,
+    });
+  });
+
   test("stops a stale running summary when the desktop owner is idle", () => {
     expect(
       extractCodexDesktopThreadRunSummary(

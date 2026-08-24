@@ -28,6 +28,7 @@ const DEEPSEEK_HARNESS_HTTP_TIMEOUT_MS = 10_000;
 const DEEPSEEK_HARNESS_RECONNECT_MS = 1_000;
 const DEEPSEEK_HARNESS_RECOVERY_INTERVAL_MS = 2_000;
 const DEEPSEEK_HARNESS_RECOVERY_MAX_MS = 30 * 60_000;
+const DEEPSEEK_HARNESS_DISCONNECT_RENOTIFY_MS = 10 * 60_000;
 const DEEPSEEK_HISTORY_LIMIT = 100;
 
 type UnknownRecord = Record<string, unknown>;
@@ -250,6 +251,27 @@ function describeRpcError(error: unknown): string {
   const message = readString(error.message);
   const code = readString(error.code);
   return [code, message].filter(Boolean).join(": ") || "unknown error";
+}
+
+function deepSeekHarnessFailureMessage(reason: UnknownRecord | null): string | undefined {
+  if (!reason) return undefined;
+  const nested = isRecord(reason.error)
+    ? reason.error
+    : isRecord(reason.failure)
+      ? reason.failure
+      : null;
+  const code = readString(nested?.code) ?? readString(reason.code);
+  const message = readString(nested?.message) ?? readString(reason.message);
+  if (code === "EMPTY_RESPONSE" || message?.includes("completed response with no content")) {
+    const model = message?.match(/model\s+["']([^"']+)["']/i)?.[1];
+    if (model === "stealth/ox-alpha") {
+      return "OpenRouter 的 ox-alpha 模型返回了空响应，请切换到其他模型后重试。";
+    }
+    return model
+      ? `模型 ${model} 返回了空响应，请切换到其他模型后重试。`
+      : "当前模型返回了空响应，请切换到其他模型后重试。";
+  }
+  return message;
 }
 
 function waitForAbortableDelay(ms: number, signal: AbortSignal): Promise<void> {
@@ -790,6 +812,8 @@ export class DeepSeekHarnessAdapter implements BridgeAdapter {
   private readonly deliveredTurns = new Set<string>();
   private readonly historyReconciliationBySession = new Map<string, Promise<void>>();
   private readonly recoveryTaskBySession = new Map<string, Promise<void>>();
+  private muxOutageNoticeActive = false;
+  private muxLastOutageNoticeAt = 0;
 
   constructor(
     options: AdapterOptions,
@@ -825,6 +849,8 @@ export class DeepSeekHarnessAdapter implements BridgeAdapter {
   async start(): Promise<void> {
     if (this.muxTask) return;
     this.disposing = false;
+    this.muxOutageNoticeActive = false;
+    this.muxLastOutageNoticeAt = 0;
     this.setStatus("starting", "正在连接 DeepSeek Harness。");
     try {
       await this.client.describeHost();
@@ -876,6 +902,27 @@ export class DeepSeekHarnessAdapter implements BridgeAdapter {
     items: BridgeTurnInputItem[],
   ): Promise<BridgeSessionSendResult> {
     if (sessionId !== this.state.sharedSessionId) await this.resumeSession(sessionId);
+    const sessionSummary = (await this.client.listSessions()).find(
+      (item) => item.sessionId === sessionId,
+    );
+    if (sessionSummary?.blank && items.some((item) => item.type === "localImage")) {
+      const models = await this.client.readModels(sessionId);
+      const visionModel = models.current.provider === "deepseek-official" &&
+          models.current.model === "deepseek-v4-flash"
+        ? models.groups.find((group) => group.id === models.current.provider)?.models.find(
+          (model) => model.id === "deepseek-v4-flash-vision-exp",
+        )
+        : undefined;
+      if (visionModel) {
+        await this.client.selectModel(sessionId, {
+          provider: models.current.provider,
+          model: visionModel.id,
+          ...(models.current.reasoningEffort
+            ? { reasoningEffort: models.current.reasoningEffort }
+            : {}),
+        });
+      }
+    }
     const content: DeepSeekHarnessPromptContent[] = [];
     for (const item of items) {
       if (item.type === "text") {
@@ -894,9 +941,7 @@ export class DeepSeekHarnessAdapter implements BridgeAdapter {
       });
     }
     if (content.length === 0) throw new Error("消息不能为空。");
-    const running = (await this.client.listSessions()).find(
-      (item) => item.sessionId === sessionId,
-    )?.running === true;
+    const running = sessionSummary?.running === true;
     const requestId = crypto.randomUUID();
     this.promptRpcIds.add(requestId);
     this.promptSessionByRpcId.set(requestId, sessionId);
@@ -1057,28 +1102,41 @@ export class DeepSeekHarnessAdapter implements BridgeAdapter {
         : kind === "error"
           ? "failed"
           : "unknown";
+    const errorMessage = status === "failed"
+      ? deepSeekHarnessFailureMessage(reason)
+      : undefined;
     return {
       ...(turn !== undefined ? { turnId: String(turn) } : {}),
       status,
       ...(latestStart ? { startedAtMs: latestStart.time } : {}),
       completedAtMs: latestEnd.time,
       ...(latestStart ? { durationMs: Math.max(0, latestEnd.time - latestStart.time) } : {}),
-      ...(status === "failed" && readString(reason?.message)
-        ? { errorMessage: readString(reason?.message) }
-        : {}),
+      ...(errorMessage ? { errorMessage } : {}),
+    };
+  }
+
+  private modelSelectionId(provider: string, model: string): string {
+    return `${provider}::${model}`;
+  }
+
+  private parseModelSelectionId(value: string): { provider: string; model: string } | null {
+    const separatorIndex = value.indexOf("::");
+    if (separatorIndex <= 0 || separatorIndex >= value.length - 2) return null;
+    return {
+      provider: value.slice(0, separatorIndex),
+      model: value.slice(separatorIndex + 2),
     };
   }
 
   async getSessionModelState(sessionId: string): Promise<BridgeSessionModelState> {
     const state = await this.client.readModels(sessionId);
-    const group = state.groups.find((item) => item.id === state.current.provider);
     return {
-      currentModel: state.current.model,
-      options: (group?.models ?? []).map((model) => ({
-        id: model.id,
-        label: model.name,
+      currentModel: this.modelSelectionId(state.current.provider, state.current.model),
+      options: state.groups.flatMap((group) => group.models.map((model) => ({
+        id: this.modelSelectionId(group.id, model.id),
+        label: `${group.name} · ${model.name}`,
         ...(model.description ? { description: model.description } : {}),
-      })),
+      }))),
       canChange: state.routable,
       ...(!state.routable
         ? { unavailableReason: "DeepSeek Harness 当前模型路由不可用。" }
@@ -1091,14 +1149,24 @@ export class DeepSeekHarnessAdapter implements BridgeAdapter {
     model: string,
   ): Promise<BridgeSessionModelState> {
     const current = await this.client.readModels(sessionId);
-    const group = current.groups.find((item) =>
-      item.models.some((candidate) => candidate.id === model)
-    );
+    const exact = this.parseModelSelectionId(model);
+    const group = exact
+      ? current.groups.find((item) =>
+          item.id === exact.provider &&
+          item.models.some((candidate) => candidate.id === exact.model)
+        )
+      : current.groups.find((item) =>
+          item.id === current.current.provider &&
+          item.models.some((candidate) => candidate.id === model)
+        ) ?? current.groups.find((item) =>
+          item.models.some((candidate) => candidate.id === model)
+        );
+    const selectedModel = exact?.model ?? model;
     if (!group) throw new Error(`DeepSeek Harness 没有提供模型 ${model}。`);
     await this.client.selectModel(sessionId, {
       provider: group.id,
-      model,
-      ...(model === "deepseek-v4-flash" ? { reasoningEffort: "high" } : {}),
+      model: selectedModel,
+      ...(selectedModel === "deepseek-v4-flash" ? { reasoningEffort: "high" } : {}),
     });
     return await this.getSessionModelState(sessionId);
   }
@@ -1256,19 +1324,39 @@ export class DeepSeekHarnessAdapter implements BridgeAdapter {
 
   private async runMuxLoop(signal: AbortSignal): Promise<void> {
     while (!this.disposing && !signal.aborted) {
+      let reconnected = false;
       try {
         for await (const envelope of this.client.openMux(signal)) {
+          if (!reconnected) {
+            reconnected = true;
+            if (this.muxOutageNoticeActive) {
+              this.muxOutageNoticeActive = false;
+              this.muxLastOutageNoticeAt = 0;
+              this.emit({
+                type: "notice",
+                level: "info",
+                text: "DeepSeek Harness 事件连接已恢复。",
+                timestamp: nowIso(),
+              });
+            }
+          }
           if (this.disposing || signal.aborted) return;
           this.handleMuxEnvelope(envelope);
         }
       } catch (error) {
         if (this.disposing || signal.aborted) return;
-        this.emit({
-          type: "notice",
-          level: "warning",
-          text: `DeepSeek Harness 事件连接已断开，正在重连：${truncatePreview(error instanceof Error ? error.message : String(error), 160)}`,
-          timestamp: nowIso(),
-        });
+        const now = Date.now();
+        if (!this.muxOutageNoticeActive || now - this.muxLastOutageNoticeAt >= DEEPSEEK_HARNESS_DISCONNECT_RENOTIFY_MS) {
+          const firstNotice = !this.muxOutageNoticeActive;
+          this.muxOutageNoticeActive = true;
+          this.muxLastOutageNoticeAt = now;
+          this.emit({
+            type: "notice",
+            level: "warning",
+            text: `DeepSeek Harness 事件连接已断开，${firstNotice ? "正在重连" : "仍未恢复，每10分钟提醒一次"}：${truncatePreview(error instanceof Error ? error.message : String(error), 160)}`,
+            timestamp: nowIso(),
+          });
+        }
       }
       await waitForAbortableDelay(DEEPSEEK_HARNESS_RECONNECT_MS, signal);
     }
@@ -1418,7 +1506,7 @@ export class DeepSeekHarnessAdapter implements BridgeAdapter {
       if (reasonKind === "error") {
         this.emit({
           type: "task_failed",
-          message: readString(reason?.message) ?? "DeepSeek Harness 任务执行失败。",
+          message: deepSeekHarnessFailureMessage(reason) ?? "DeepSeek Harness 任务执行失败。",
           timestamp: new Date(completedAtMs).toISOString(),
           threadId: sessionId,
           turnId: String(turn),

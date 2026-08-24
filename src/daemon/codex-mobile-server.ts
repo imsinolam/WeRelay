@@ -8,6 +8,10 @@ import http, {
 import { isIP } from "node:net";
 import os, { type NetworkInterfaceInfo } from "node:os";
 import { BoundedTtlMap } from "../utils/bounded-ttl-cache.ts";
+import {
+  createImmutableTextAsset,
+  sendImmutableTextAsset,
+} from "../utils/http-static-asset.ts";
 
 import type {
   BridgeSessionMessage,
@@ -96,6 +100,12 @@ const CODEX_MOBILE_JS_RESPONSE = CODEX_MOBILE_JS.replaceAll(
   WE_RELAY_ASSET_VERSION_PLACEHOLDER,
   CODEX_MOBILE_ASSET_VERSION,
 );
+const CODEX_MOBILE_CSS_ASSET = createImmutableTextAsset(CODEX_MOBILE_CSS);
+const CODEX_MOBILE_JS_ASSET = createImmutableTextAsset(CODEX_MOBILE_JS_RESPONSE);
+const MOBILE_ASSET_SECURITY_HEADERS = {
+  "content-security-policy":
+    "default-src 'self'; connect-src 'self'; img-src 'self' data: http: https:; style-src 'self'; script-src 'self'; base-uri 'none'; frame-ancestors 'none'",
+};
 
 export type CodexMobileTaskStatus =
   | "idle"
@@ -401,6 +411,10 @@ export type StartCodexMobileServerOptions = {
     model: string,
     adapter?: string,
   ) => Promise<BridgeSessionModelState>;
+  readContentRevision?: (
+    threadId: string,
+    adapter?: string,
+  ) => string;
   readMessages: (
     threadId: string,
     options?: {
@@ -1153,11 +1167,23 @@ function createRequestHandler(
         return;
       }
       if (method === "GET" && url.pathname === "/app.css") {
-        sendText(response, 200, "text/css; charset=utf-8", CODEX_MOBILE_CSS);
+        sendImmutableTextAsset(
+          request,
+          response,
+          "text/css; charset=utf-8",
+          CODEX_MOBILE_CSS_ASSET,
+          MOBILE_ASSET_SECURITY_HEADERS,
+        );
         return;
       }
       if (method === "GET" && url.pathname === "/app.js") {
-        sendText(response, 200, "text/javascript; charset=utf-8", CODEX_MOBILE_JS_RESPONSE);
+        sendImmutableTextAsset(
+          request,
+          response,
+          "text/javascript; charset=utf-8",
+          CODEX_MOBILE_JS_ASSET,
+          MOBILE_ASSET_SECURITY_HEADERS,
+        );
         return;
       }
       if (method === "GET" && url.pathname === "/app-version") {
@@ -1630,14 +1656,15 @@ function createRequestHandler(
               requestedThreadId,
             ).threadId
           : requestedThreadId;
-        const transcript = await options.readMessages(threadId, {
-          limit: 1,
-          lightweight: true,
-        }, requestedAdapter);
-        const revision = createCodexMobileTranscriptRevision(transcript);
+        const revision = options.readContentRevision
+          ? options.readContentRevision(threadId, requestedAdapter)
+          : "";
+        if (!revision) {
+          throw new HttpError(503, "当前连接暂不支持快速检查更新。请稍后重试。");
+        }
         const known = url.searchParams.get("known")?.trim() ?? "";
         sendJson(response, 200, {
-          threadId: transcript.threadId,
+          threadId,
           revision,
           changed: !known || known !== revision,
         });
@@ -1665,7 +1692,9 @@ function createRequestHandler(
             ...(historyOnly ? { historyOnly: true } : {}),
             lightweight: true,
           }, requestedAdapter);
-          const revision = createCodexMobileTranscriptRevision(transcript);
+          const revision = options.readContentRevision
+            ? options.readContentRevision(transcript.threadId, requestedAdapter)
+            : createCodexMobileTranscriptRevision(transcript);
           const fallbackPage = transcript.messagePage
             ? null
             : paginateCodexMobileMessages(transcript.messages, {

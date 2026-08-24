@@ -141,6 +141,7 @@ import {
   BoundedTtlMap,
   BoundedTtlSet,
 } from "../utils/bounded-ttl-cache.ts";
+import { MobileConversationRevisionStore } from "./mobile-conversation-revisions.ts";
 import { ensureWechatCredentials } from "../wechat/setup.ts";
 import { WechatImageDraftCollector } from "../wechat/wechat-image-draft.ts";
 import {
@@ -228,6 +229,7 @@ import {
   buildGlobalTaskSnapshot,
   formatGlobalTaskList,
   formatGlobalTaskSearchResults,
+  parseTaskTargetedMessageText,
   resolveCompactGlobalTaskSearchTarget,
   resolveGlobalTaskCandidate,
   resolveGlobalTaskTargetedMessage,
@@ -297,11 +299,11 @@ export function resolveDaemonTaskTargetedMessage(params: {
   if (!params.snapshot) {
     return null;
   }
-  const match = params.text.trim().match(/^([1-9]\d*)\s*[：:]\s*([\s\S]*\S)$/);
-  if (!match?.[1] || !match[2]) {
+  const targeted = parseTaskTargetedMessageText(params.text);
+  if (!targeted) {
     return null;
   }
-  const index = Number(match[1]);
+  const index = Number(targeted.taskNumber);
   if (!Number.isSafeInteger(index)) {
     return null;
   }
@@ -311,7 +313,7 @@ export function resolveDaemonTaskTargetedMessage(params: {
   }
   return {
     candidate,
-    text: match[2].trim(),
+    text: targeted.text,
   };
 }
 
@@ -1847,8 +1849,12 @@ export function resolveCodexMobileTaskStatusFromSignals(params: {
   hasPendingUserInput: boolean;
   hasActiveTask: boolean;
   selectedStateStatus?: BridgeWorkerStatus;
+  preferSelectedState?: boolean;
 }): CodexMobileTaskStatus {
-  if (params.runtimeStatus?.type === "idle" || params.runtimeStatus?.type === "systemError") {
+  if (params.runtimeStatus?.type === "systemError") {
+    return mapCodexMobileTaskStatus(params.runtimeStatus);
+  }
+  if (params.runtimeStatus?.type === "idle" && !params.preferSelectedState) {
     return mapCodexMobileTaskStatus(params.runtimeStatus);
   }
   const hasPendingApproval = params.runtimeTaskApprovals !== undefined
@@ -2288,7 +2294,7 @@ export function formatCodexTaskCompletionMessage(params: {
     params.previewLimit,
   );
   const fallback = params.url
-    ? `${params.url}\n发送“全文”查看完整回答；网页版可查看完整任务及列表。`
+    ? `发送“全文”查看完整回答；网页版可查看完整任务及列表。\n\n${params.url}`
     : "发送“全文”查看完整回答。";
   const headingWithRequest = [heading, requestLine].filter(Boolean).join("\n");
   return preview
@@ -2600,6 +2606,7 @@ class WeRelayDaemon {
     maxSize: MOBILE_CREATED_TASK_CACHE_MAX_SIZE,
     ttlMs: MOBILE_CREATED_TASK_CACHE_TTL_MS,
   });
+  private readonly mobileConversationRevisions = new MobileConversationRevisionStore();
   private readonly openAgentLogHistory = new OpenAgentLogHistoryProvider();
   private codexWechatReplyMode: CodexWechatReplyMode;
 
@@ -2784,6 +2791,8 @@ class WeRelayDaemon {
           this.readMobileTaskModel(threadId, adapter),
         setTaskModel: (threadId, model, adapter) =>
           this.setMobileTaskModel(threadId, model, adapter),
+        readContentRevision: (threadId, adapter) =>
+          this.mobileConversationRevisions.get(adapter, threadId),
         readMessages: (threadId, options, adapter) =>
           this.readMobileMessages(threadId, options, adapter),
         sendMessage: (threadId, input, adapter) =>
@@ -3499,6 +3508,17 @@ class WeRelayDaemon {
       !adapterState.pendingUserInput
     ) {
       slot.pendingUserInputs = [];
+    }
+
+    const changedThreadId = event.type === "session_switched"
+      ? event.sessionId
+      : event.type === "thread_switched"
+        ? event.threadId
+        : "threadId" in event && event.threadId
+          ? event.threadId
+          : this.getSlotThreadId(slot);
+    if (changedThreadId) {
+      this.mobileConversationRevisions.touch(slot.adapter, changedThreadId);
     }
 
     switch (event.type) {
@@ -4977,6 +4997,7 @@ class WeRelayDaemon {
       adapter: slot.adapter,
       threadId,
     });
+    this.mobileConversationRevisions.touch(slot.adapter, threadId);
     return result;
   }
 
@@ -5503,6 +5524,14 @@ class WeRelayDaemon {
         if (idleRecencyChanged) {
           observed.observation.completionNotified = true;
         }
+        if (
+          !previous ||
+          previous.lastUpdatedAt !== observed.observation.lastUpdatedAt ||
+          previous.status !== observed.observation.status ||
+          previous.runningSinceMs !== observed.observation.runningSinceMs
+        ) {
+          this.mobileConversationRevisions.touch(slot.adapter, candidate.sessionId);
+        }
         this.codexTaskObservations.set(candidate.sessionId, observed.observation);
         if (
           !runningNow &&
@@ -5728,6 +5757,7 @@ class WeRelayDaemon {
       selectedStateStatus: currentThreadId === threadId
         ? slot.runtime.getState().status
         : undefined,
+      preferSelectedState: slot.adapter !== "codex",
     });
   }
 
@@ -6294,6 +6324,7 @@ class WeRelayDaemon {
       throw new Error(`当前 ${formatDaemonAdapterLabel(slot.adapter)} 连接暂不支持编辑待发送消息。`);
     }
     const updated = await slot.runtime.updateQueuedTaskInput(threadId, messageId, text);
+    if (updated) this.mobileConversationRevisions.touch(slot.adapter, threadId);
     appendDaemonLog(
       `mobile_queue_update: adapter=${slot.adapter} thread=${threadId} message=${messageId} updated=${updated}`,
     );
@@ -6310,6 +6341,7 @@ class WeRelayDaemon {
       throw new Error(`当前 ${formatDaemonAdapterLabel(slot.adapter)} 连接暂不支持删除待发送消息。`);
     }
     const deleted = await slot.runtime.deleteQueuedTaskInput(threadId, messageId);
+    if (deleted) this.mobileConversationRevisions.touch(slot.adapter, threadId);
     appendDaemonLog(
       `mobile_queue_delete: adapter=${slot.adapter} thread=${threadId} message=${messageId} deleted=${deleted}`,
     );
@@ -6326,6 +6358,7 @@ class WeRelayDaemon {
       throw new Error(`当前 ${formatDaemonAdapterLabel(slot.adapter)} 连接暂不支持引导待发送消息。`);
     }
     const steered = await slot.runtime.steerQueuedTaskInput(threadId, messageId);
+    if (steered) this.mobileConversationRevisions.touch(slot.adapter, threadId);
     appendDaemonLog(
       `mobile_queue_steer: adapter=${slot.adapter} thread=${threadId} message=${messageId} steered=${steered}`,
     );
@@ -6346,6 +6379,7 @@ class WeRelayDaemon {
       : currentThreadId === threadId
         ? await slot.runtime.interrupt()
         : false;
+    if (interrupted) this.mobileConversationRevisions.touch(slot.adapter, threadId);
     appendDaemonLog(
       `mobile_stop: adapter=${slot.adapter} thread=${threadId} interrupted=${interrupted}`,
     );
@@ -6394,6 +6428,10 @@ class WeRelayDaemon {
         imagePaths,
       );
     } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      appendDaemonLog(
+        `mobile_input_send_error: adapter=${slot.adapter} thread=${threadId} images=${imagePaths.length} error=${truncatePreview(detail, 400)}`,
+      );
       if (imagePaths.length > 0) {
         appendDaemonLog(
           `mobile_images_retained_after_send_error: adapter=${slot.adapter} thread=${threadId} images=${imagePaths.length}`,
@@ -6401,6 +6439,7 @@ class WeRelayDaemon {
       }
       throw error;
     }
+    this.mobileConversationRevisions.touch(slot.adapter, threadId);
     this.mobileCreatedTaskKeys.delete(createdTaskKey);
     if (!result?.duplicate && imagePaths.length > 0) {
       this.mobileMessageImageStore.remember({

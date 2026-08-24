@@ -10,6 +10,7 @@ describe("WeRelay relay protocol", () => {
   test("only forwards WeRelay application APIs", () => {
     expect(isWeRelayRelayApiRequest("GET", "/api/tasks")).toBe(true);
     expect(isWeRelayRelayApiRequest("PATCH", "/api/tasks/thread")).toBe(true);
+    expect(isWeRelayRelayApiRequest("PUT", "/api/tasks/thread/model")).toBe(true);
     expect(isWeRelayRelayApiRequest("GET", "/health")).toBe(false);
     expect(isWeRelayRelayApiRequest("POST", "/__werelay/device/poll")).toBe(false);
     expect(isWeRelayRelayApiRequest("CONNECT", "/api/tasks")).toBe(false);
