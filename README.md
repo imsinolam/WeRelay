@@ -93,7 +93,7 @@ WeRelay 的目标是让所有正式 Agent 最终都满足“继续原任务、�
 
 WeRelay 是一次完整品牌迁移：本地安装包标识改为 `werelay`，公开命令改为 `werelay-*`，活动数据目录改为 `~/.werelay`，环境变量改为 `WERELAY_*`。
 
-旧的 `deskrelay-*` 命令和 `DESKRELAY_*` 环境变量不再作为公开兼容入口。首次启动时，WeRelay 会优先从 `~/.deskrelay` 复制缺失的登录、任务和附件状态，再从更早的 `~/.cli-bridge` 补齐；旧目录不会被删除或继续写入。完整迁移说明见 [运行配置](docs/使用指南/运行配置.md#from-deskrelay-to-werelay)。
+旧的 `deskrelay-*` 命令和 `DESKRELAY_*` 环境变量不再作为公开兼容入口。首次启动时，WeRelay 会优先从 `~/.deskrelay` 复制缺失的登录、任务和附件状态，再从更早的 `~/.cli-bridge` 补齐；旧目录不会被删除或继续写入。本机源码目录或旧 worktree 仍叫 `DeskRelay`，不代表产品名或版本线没有迁移。用户迁移步骤见 [运行配置](docs/使用指南/运行配置.md#from-deskrelay-to-werelay)，开发与发布 Agent 见 [名称与版本边界](docs/开发协作/更名与版本边界.md)。
 
 ## 文档
 

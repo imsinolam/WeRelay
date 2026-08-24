@@ -1,10 +1,10 @@
 # Repository Guidelines
 
 ## Required Reading For Every Agent
-Before modifying this repository, read `docs/开发协作/多Agent协作规范.md`. It defines mandatory worktree isolation, commit handoff, dirty-worktree classification, release ownership, and post-release cleanup. Also read `docs/开发协作/任务职责与分工.md` when the task may overlap another long-running Agent.
+Before modifying this repository, read `docs/开发协作/更名与版本边界.md` and `docs/开发协作/多Agent协作规范.md`. The first document defines the completed DeskRelay → WeRelay rename, the allowed legacy-name contexts, and the active `0.x.x` version line; the second defines mandatory worktree isolation, commit handoff, dirty-worktree classification, release ownership, and post-release cleanup. Also read `docs/开发协作/任务职责与分工.md` when the task may overlap another long-running Agent.
 
 ## Project Mental Model
-WeRelay extends real local coding-agent sessions to WeChat, LAN web, and an optional public application relay without creating a forked conversation. GitHub is the only public distribution source; `werelay` remains the local package identifier used for tarball installation. Do not publish it to npm Registry or reintroduce legacy package names and command aliases.
+WeRelay extends real local coding-agent sessions to WeChat, LAN web, and an optional public application relay without creating a forked conversation. DeskRelay is the retired product name; a local directory or historical worktree may still contain that name, but it never changes the current product identity or version line. GitHub is the only public distribution source; `werelay` remains the local package identifier used for tarball installation. Do not publish it to npm Registry, return to the historical `2.x` preview line, or reintroduce legacy package names and command aliases.
 
 There are two runtime shapes:
 - `werelay` (alias `werelay-daemon`): the preferred long-lived mode. It owns one WeChat connection for one startup working directory, keeps supported Agent slots alive, and switches from WeChat with commands such as `/codex`, `/claude`, `/grok`, `/codebuddy`, `/reasonix`, and `/opencode`. Switching reuses an already connected visible CLI, or opens a new visible CLI when needed.

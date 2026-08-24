@@ -5,7 +5,7 @@
 ## Before You Start
 
 - 所有 Agent 必须先阅读 [多 Agent 协作规范](docs/开发协作/多Agent协作规范.md)，再开始修改。
-- 文档入口见 [WeRelay 文档导航](docs/README.md)。
+- 文档入口见 [WeRelay 文档导航](docs/README.md)。开始修改前还应阅读 [DeskRelay 更名为 WeRelay：名称与版本边界](docs/开发协作/更名与版本边界.md)，不要根据本机旧目录名或历史 `2.x` 分支误判当前产品和版本。
 - 先阅读 [README.md](README.md)，确认当前推荐的使用方式。
 - Agent 前置安装见 [docs/使用指南/Agent安装与配置.md](docs/使用指南/Agent安装与配置.md)。
 - 运行配置见 [docs/使用指南/运行配置.md](docs/使用指南/运行配置.md)。

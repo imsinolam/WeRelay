@@ -15,6 +15,7 @@ const requiredDocs = [
   "docs/架构设计/架构与数据流.md",
   "docs/架构设计/局域网与公网访问.md",
   "docs/开发协作/开发与测试.md",
+  "docs/开发协作/更名与版本边界.md",
   "docs/开发协作/多Agent协作规范.md",
   "docs/开发协作/任务职责与分工.md",
   "docs/发布/对外发布操作手册.md",
@@ -79,6 +80,16 @@ describe("documentation structure", () => {
 
     const agents = fs.readFileSync(path.join(root, "AGENTS.md"), "utf8");
     const docsIndex = fs.readFileSync(path.join(root, "docs/README.md"), "utf8");
+    const renameBoundary = fs.readFileSync(
+      path.join(root, "docs/开发协作/更名与版本边界.md"),
+      "utf8",
+    );
+    expect(agents).toContain("docs/开发协作/更名与版本边界.md");
+    expect(agents).toContain("DeskRelay is the retired product name");
+    expect(docsIndex).toContain("开发协作/更名与版本边界.md");
+    expect(renameBoundary).toContain("DeskRelay 已完成对外更名");
+    expect(renameBoundary).toContain("正式版前的版本线 | `0.x.x`");
+    expect(renameBoundary).toContain("禁止无差别全仓替换");
     expect(agents).toContain("docs/开发协作/多Agent协作规范.md");
     expect(docsIndex).toContain("开发协作/多Agent协作规范.md");
   });
