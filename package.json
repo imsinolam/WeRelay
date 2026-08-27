@@ -1,6 +1,6 @@
 {
   "name": "werelay",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "private": true,
   "description": "Extend real desktop coding-agent sessions to WeChat, LAN web, and an optional public relay without forking context",
   "type": "module",

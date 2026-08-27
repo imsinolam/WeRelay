@@ -3126,6 +3126,88 @@ describe("Codex panel completion recovery", () => {
     expect(adapter.state.status).toBe("idle");
   });
 
+  test("bounds initial session-log replay to the recent tail", async () => {
+    const home = makeTempDirectory();
+    process.env.HOME = home;
+    process.env.USERPROFILE = home;
+
+    const cwd = path.join(home, "project");
+    const threadId = "00000002-0000-7000-8000-000000000012";
+    const turnId = "00000003-0000-7000-8000-000000000013";
+    const sessionFilePath = path.join(
+      home,
+      ".codex",
+      "sessions",
+      "2026",
+      "05",
+      "11",
+      `rollout-2026-05-11T11-11-56-${threadId}.jsonl`,
+    );
+    const historicalLine = `${JSON.stringify({
+      timestamp: "2026-05-11T03:00:00.000Z",
+      type: "event_msg",
+      payload: { type: "agent_message", message: "historical" },
+    })}\n`;
+    const history = historicalLine.repeat(
+      Math.ceil((3 * 1024 * 1024) / Buffer.byteLength(historicalLine)),
+    );
+    writeTextFile(
+      sessionFilePath,
+      `${history}${JSON.stringify({
+        timestamp: "2026-05-11T03:12:13.770Z",
+        type: "event_msg",
+        payload: {
+          type: "task_complete",
+          turn_id: turnId,
+          last_agent_message: "tail completion",
+        },
+      })}\n`,
+    );
+
+    const adapter = new CodexPtyAdapter({
+      kind: "codex",
+      command: "codex",
+      cwd,
+      renderMode: "headless",
+    }) as any;
+    const events: Array<{ type: string; text?: string }> = [];
+    adapter.setEventSink((event: { type: string; text?: string }) => events.push(event));
+    adapter.sharedThreadId = threadId;
+    adapter.state.sharedThreadId = threadId;
+    adapter.state.sharedSessionId = threadId;
+    adapter.state.startedAt = "2026-05-11T03:11:56.732Z";
+    adapter.state.status = "busy";
+    adapter.activeTurn = { threadId, turnId, origin: "wechat" };
+    adapter.state.activeTurnId = turnId;
+    adapter.state.activeTurnOrigin = "wechat";
+    adapter.appServer = null;
+    adapter.sessionFilePath = sessionFilePath;
+
+    const originalReadSync = fs.readSync;
+    let largestRead = 0;
+    const patchedReadSync = (
+      fileDescriptor: number,
+      buffer: NodeJS.ArrayBufferView,
+      offset: number,
+      length: number,
+      position: number | bigint | null,
+    ): number => {
+      largestRead = Math.max(largestRead, length);
+      return originalReadSync(fileDescriptor, buffer, offset, length, position);
+    };
+    Object.defineProperty(fs, "readSync", { value: patchedReadSync, configurable: true });
+    try {
+      await adapter.pollSessionLog();
+    } finally {
+      Object.defineProperty(fs, "readSync", { value: originalReadSync, configurable: true });
+    }
+
+    expect(largestRead).toBeLessThanOrEqual(1024 * 1024);
+    expect(events.find((event) => event.type === "final_reply")?.text).toBe(
+      "tail completion",
+    );
+  });
+
   test("does not replay historical local session entries on startup", async () => {
     const home = makeTempDirectory();
     process.env.HOME = home;

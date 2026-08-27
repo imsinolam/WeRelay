@@ -243,6 +243,7 @@ const CODEX_SESSION_MESSAGE_PAGE_DEFAULT_LIMIT = 40;
 const CODEX_SESSION_MESSAGE_PAGE_MAX_LIMIT = 100;
 const CODEX_SESSION_RUN_SUMMARY_SCAN_LIMIT_BYTES = 64 * 1024 * 1024;
 const CODEX_SESSION_PROGRESS_SCAN_LIMIT_BYTES = 8 * 1024 * 1024;
+const CODEX_SESSION_POLL_INITIAL_READ_MAX_BYTES = 1024 * 1024;
 const CODEX_DUPLICATE_INPUT_RECENT_WINDOW_MS = 2 * 60 * 1_000;
 const CODEX_ROLLOUT_TURN_CONTEXT_MARKER = Buffer.from('"turn_context"');
 const CODEX_ROLLOUT_MODEL_MARKER = Buffer.from('"model"');
@@ -5102,6 +5103,13 @@ export class CodexPtyAdapter extends AbstractPtyAdapter {
       const stat = fs.statSync(this.sessionFilePath);
       if (stat.size < this.sessionReadOffset) {
         this.sessionReadOffset = 0;
+        this.sessionPartialLine = "";
+      }
+      if (
+        this.sessionReadOffset === 0 &&
+        stat.size > CODEX_SESSION_POLL_INITIAL_READ_MAX_BYTES
+      ) {
+        this.sessionReadOffset = stat.size - CODEX_SESSION_POLL_INITIAL_READ_MAX_BYTES;
         this.sessionPartialLine = "";
       }
       if (stat.size === this.sessionReadOffset) {
