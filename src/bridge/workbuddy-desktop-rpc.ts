@@ -18,7 +18,7 @@ const DEFAULT_QUIT_TIMEOUT_MS = 10_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
 const WORKBUDDY_APP_EXECUTABLE = "/Applications/WorkBuddy.app/Contents/MacOS/Electron";
 const WORKBUDDY_APP_ASAR = "/Applications/WorkBuddy.app/Contents/Resources/app.asar";
-const WORKBUDDY_BUNDLE_ID = "com.workbuddy.workbuddy";
+export const WORKBUDDY_BUNDLE_ID = "com.tencent.workbuddy.mac";
 
 export type WorkBuddyDesktopRpcCallbacks = {
   onEvent(channel: string, data: unknown): void;

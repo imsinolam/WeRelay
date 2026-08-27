@@ -4,6 +4,7 @@ import {
   type DaemonAdapterKind,
 } from "../bridge/bridge-providers.ts";
 import type { BridgeResumeSessionCandidate } from "../bridge/bridge-types.ts";
+import { resolveTaskProjectName } from "../bridge/task-list-format.ts";
 
 export type GlobalTaskCandidate = BridgeResumeSessionCandidate & {
   adapter: DaemonAdapterKind;
@@ -237,21 +238,47 @@ export function resolveGlobalTaskTargetedMessage(params: {
   return candidate ? { candidate, text: targeted.text } : null;
 }
 
-export function shouldShowGlobalTaskAdapterLabels(
-  candidates: GlobalTaskCandidate[],
-): boolean {
-  if (candidates.length <= 1) return false;
-  return new Set(candidates.map((candidate) => candidate.adapter)).size > 1;
-}
-
 function runtimeMarker(candidate: GlobalTaskCandidate): string {
   const status = candidate.runtimeStatus;
   if (status?.type === "active") {
-    if (status.activeFlags.includes("waitingOnApproval")) return "　待审批";
-    if (status.activeFlags.includes("waitingOnUserInput")) return "　待输入";
-    return "　🟢";
+    if (status.activeFlags.includes("waitingOnApproval")) return " · 待审批";
+    if (status.activeFlags.includes("waitingOnUserInput")) return " · 待输入";
+    return " · 处理中";
   }
-  return status?.type === "systemError" ? "　异常" : "";
+  return status?.type === "systemError" ? " · 异常" : "";
+}
+
+function taskIdentityLabel(
+  candidate: GlobalTaskCandidate,
+  showAdapterLabel: boolean,
+): string {
+  const parts: string[] = [];
+  if (showAdapterLabel) {
+    parts.push(getBridgeProvider(candidate.adapter).label);
+  }
+  const projectName = resolveTaskProjectName(candidate);
+  if (projectName) parts.push(projectName);
+  return parts.length > 0 ? `[${parts.join(" · ")}] ` : "";
+}
+
+function globalTaskInstructionLines(page: GlobalTaskPage): string[] {
+  const navigation: string[] = ["搜索“任务：关键词”"];
+  if (page.hasMore) navigation.push("“下一页20”查看更多");
+  if (page.hasPrevious) navigation.push("“上一页”返回");
+  return [
+    "回复序号进入；发送“3：内容”可直接下发",
+    navigation.join("；"),
+    "序号保持到下次发送“任务”",
+  ];
+}
+
+function candidateProjectLabel(candidate: GlobalTaskCandidate): string {
+  const project = candidate.projectName?.trim();
+  if (!project) return "";
+  if (candidate.title.toLocaleLowerCase().includes(project.toLocaleLowerCase())) {
+    return "";
+  }
+  return ` · ${project}`;
 }
 
 export function formatGlobalTaskList(params: {
@@ -262,29 +289,17 @@ export function formatGlobalTaskList(params: {
   const page = paginateGlobalTaskSnapshot(params.snapshot, params);
   if (page.candidates.length === 0) {
     return page.hasPrevious
-      ? "没有更多任务。\n发送“上一页”返回。"
-      : "没有找到正在运行终端的可继续任务。";
+      ? "已经到底了。\n发送“上一页”返回。"
+      : "当前没有可继续的任务。\n终端开始运行任务后，会自动出现在这里。";
   }
-  const actions = [
-    "回复序号进入任务",
-    "发送“数字：内容”或“任务数字：内容”（如：任务6：继续处理）可直接发给指定任务",
-    "发送“任务：关键词”搜索运行中的终端",
-    "发送“任务”刷新运行终端列表",
-  ];
-  if (page.hasMore) actions.push("发送“下一页”查看更多，可用“下一页20”指定条数");
-  if (page.hasPrevious) actions.push("发送“上一页”返回");
-  const showAdapterLabels = shouldShowGlobalTaskAdapterLabels(page.candidates);
+  const showAdapterLabels = true;
   return [
-    "运行终端最近任务",
-    "全部按最近更新时间排序。",
-    ...page.candidates.map((candidate, index) => {
-      const adapterLabel = showAdapterLabels
-        ? `[${getBridgeProvider(candidate.adapter).label}] `
-        : "";
-      return `${page.startIndex + index + 1}. ${adapterLabel}${candidate.title}${runtimeMarker(candidate)}`;
-    }),
-    ...actions,
-    "序号在再次发送“任务”前保持不变。",
+    "最近任务",
+    "全部终端 · 按更新时间排序",
+    ...page.candidates.map((candidate, index) => (
+      `${page.startIndex + index + 1}. ${taskIdentityLabel(candidate, showAdapterLabels)}${candidate.title}${runtimeMarker(candidate)}`
+    )),
+    ...globalTaskInstructionLines(page),
   ].join("\n");
 }
 
@@ -293,19 +308,16 @@ export function formatGlobalTaskSearchResults(params: {
   matches: GlobalTaskCandidate[];
   target: string;
 }): string {
-  const showAdapterLabels = shouldShowGlobalTaskAdapterLabels(params.matches);
+  const showAdapterLabels = true;
   return [
-    `匹配任务：${params.target}`,
+    `搜索“${params.target}”`,
     ...params.matches.map((candidate) => {
       const number = params.snapshot.numberByIdentity.get(
         globalTaskIdentityKey(candidate.adapter, candidate.sessionId),
       );
-      const adapterLabel = showAdapterLabels
-        ? `[${getBridgeProvider(candidate.adapter).label}] `
-        : "";
-      return `${number ?? "?"}. ${adapterLabel}${candidate.title}${runtimeMarker(candidate)}`;
+      return `${number ?? "?"}. ${taskIdentityLabel(candidate, showAdapterLabels)}${candidate.title}${runtimeMarker(candidate)}`;
     }),
-    "回复序号进入任务，或补充关键词缩小范围。",
+    "回复序号进入；补充关键词可缩小范围",
   ].join("\n");
 }
 

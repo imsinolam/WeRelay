@@ -46,7 +46,7 @@ describe("bridge provider registry", () => {
     expect(DAEMON_PROVIDER_IDS).toContain("reasonix");
     expect(DAEMON_PROVIDER_IDS).toContain("deepseek");
     expect(getBridgeProvider("deepseek")).toMatchObject({
-      label: "DeepSeek Harness",
+      label: "DSH",
       command: "dsh",
       transport: "harness_host",
       sessionIntegration: {

@@ -247,27 +247,38 @@ export function formatCodexCompletionBacklogSummary(
   const groups = [...grouped.values()];
   const visible = groups.slice(0, Math.max(1, options.maxTasks ?? 12));
   const lines = [
-    `积压完成消息已合并：${deliveries.length} 条，涉及 ${groups.length} 个任务`,
+    `📥 积压完成通知汇总：${deliveries.length} 条 · ${groups.length} 个任务`,
+    "",
   ];
-  for (const group of visible) {
+  visible.forEach((group, index) => {
     const delivery = group.delivery;
     const outcome = inferCompletionOutcome(delivery);
-    const status = outcome === "failed"
+    const statusIcon = outcome === "failed"
+      ? "❌"
+      : outcome === "interrupted"
+        ? "⚠️"
+        : "✅";
+    const statusPrefix = outcome === "failed"
       ? "执行失败 · "
       : outcome === "interrupted"
         ? "已中断 · "
         : "";
-    const repeat = group.count > 1 ? `（${group.count} 条完成记录）` : "";
+    const repeat = group.count > 1 ? `（${group.count} 条）` : "";
     lines.push(
-      `${formatCompletionTimestamp(delivery.completedAt ?? delivery.createdAt)} · ${status}${inferCompletionTitle(delivery)}${repeat}`,
+      `${index + 1}. ${statusIcon} ${statusPrefix}${inferCompletionTitle(delivery)}${repeat}`,
     );
     const url = inferCompletionUrl(delivery);
-    if (url) lines.push(url);
-  }
+    if (url) {
+      lines.push(
+        `  ${formatCompletionTimestamp(delivery.completedAt ?? delivery.createdAt)} · ${url}`,
+      );
+    }
+    if (index < visible.length - 1) lines.push("");
+  });
   if (groups.length > visible.length) {
-    lines.push(`另有 ${groups.length - visible.length} 个较早任务，请在网页版“最近”中查看。`);
+    lines.push("", `另有 ${groups.length - visible.length} 个较早任务，请在网页版“最近”中查看。`);
   }
-  lines.push("打开对应链接可查看完整回复。");
+  lines.push("", "点开链接可查看对应任务的完整回复。");
   return lines.join("\n");
 }
 

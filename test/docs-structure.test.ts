@@ -18,6 +18,7 @@ const requiredDocs = [
   "docs/开发协作/更名与版本边界.md",
   "docs/开发协作/多Agent协作规范.md",
   "docs/开发协作/任务职责与分工.md",
+  "docs/发布/体验部署与正式发布.md",
   "docs/发布/对外发布操作手册.md",
   "docs/发布/版本记录/版本索引.md",
   "docs/发布/版本记录/中文版本说明模板.md",
@@ -92,6 +93,41 @@ describe("documentation structure", () => {
     expect(renameBoundary).toContain("禁止无差别全仓替换");
     expect(agents).toContain("docs/开发协作/多Agent协作规范.md");
     expect(docsIndex).toContain("开发协作/多Agent协作规范.md");
+  });
+
+  test("documents the two-stage experience and public release boundary", () => {
+    const flow = fs.readFileSync(
+      path.join(root, "docs/发布/体验部署与正式发布.md"),
+      "utf8",
+    );
+    const publishing = fs.readFileSync(
+      path.join(root, "docs/发布/对外发布操作手册.md"),
+      "utf8",
+    );
+    const collaboration = fs.readFileSync(
+      path.join(root, "docs/开发协作/多Agent协作规范.md"),
+      "utf8",
+    );
+    const agents = fs.readFileSync(path.join(root, "AGENTS.md"), "utf8");
+    const docsIndex = fs.readFileSync(path.join(root, "docs/README.md"), "utf8");
+
+    expect(flow).toContain("体验部署不是 GitHub 正式发布");
+    expect(flow).toContain("运行代码完成提交后默认进入体验部署");
+    expect(flow).toContain("不需要用户逐次下达部署指令");
+    expect(flow).toContain("不能并发覆盖服务器");
+    expect(flow).toContain("不是 Git commit 自动触发的后台服务");
+    expect(flow).toContain("已提交但尚未部署");
+    expect(flow).toContain("只有用户明确要求“发布 GitHub 新版本”");
+    expect(flow).toContain("正式发布只能基于已经完成体验验收的候选基线");
+    expect(flow).toContain("新提交不得未经体验直接加入正式版本");
+    expect(flow).toContain("维护者 Mac 禁止直接向 GitHub push");
+    expect(collaboration).toContain("体验整合 Agent");
+    expect(collaboration).toContain("正式发布 Agent");
+    expect(agents).toContain("experience integration Agent");
+    expect(agents).toContain("not an unattended Git hook or background queue");
+    expect(agents).toContain("public release Agent");
+    expect(publishing).toContain("本文只用于执行两阶段流程的第二阶段");
+    expect(docsIndex).toContain("发布/体验部署与正式发布.md");
   });
 
   test("documents the protected candidate release baseline", () => {

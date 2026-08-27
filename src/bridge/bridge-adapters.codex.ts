@@ -1459,6 +1459,23 @@ export function extractCodexDesktopThreadMessages(
 
 const CODEX_SESSION_PROGRESS_ACTIVITY_LIMIT = 10;
 
+function compactCodexProgressItems(
+  items: BridgeSessionProgressItem[],
+): BridgeSessionProgressItem[] {
+  const latestIndexBySemanticKey = new Map<string, number>();
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index]!;
+    const normalizedText = normalizeOutput(item.text).trim().replace(/\s+/g, " ");
+    const key = `${item.turnId ?? ""}\0${item.kind}\0${normalizedText}`;
+    latestIndexBySemanticKey.set(key, index);
+  }
+  return items.filter((item, index) => {
+    const normalizedText = normalizeOutput(item.text).trim().replace(/\s+/g, " ");
+    const key = `${item.turnId ?? ""}\0${item.kind}\0${normalizedText}`;
+    return latestIndexBySemanticKey.get(key) === index;
+  });
+}
+
 function normalizeCodexProgressStatus(
   value: unknown,
 ): BridgeSessionProgressItem["status"] {
@@ -1749,7 +1766,7 @@ function extractCodexProgressFromTurn(
   }
   return [
     ...(latestPlan ? [latestPlan] : []),
-    ...activity.slice(-CODEX_SESSION_PROGRESS_ACTIVITY_LIMIT),
+    ...compactCodexProgressItems(activity).slice(-CODEX_SESSION_PROGRESS_ACTIVITY_LIMIT),
   ];
 }
 
@@ -2001,7 +2018,7 @@ function codexRolloutProgressFromRecords(
   }
   return [
     ...(latestPlan ? [latestPlan] : []),
-    ...activity.slice(-CODEX_SESSION_PROGRESS_ACTIVITY_LIMIT),
+    ...compactCodexProgressItems(activity).slice(-CODEX_SESSION_PROGRESS_ACTIVITY_LIMIT),
   ];
 }
 
@@ -2029,7 +2046,7 @@ function mergeCodexSessionProgress(
         : {}),
     };
   }
-  return merged.sort((left, right) => {
+  const sorted = merged.sort((left, right) => {
     const leftTime = left.createdAtMs;
     const rightTime = right.createdAtMs;
     if (leftTime !== undefined && rightTime !== undefined && leftTime !== rightTime) {
@@ -2039,6 +2056,7 @@ function mergeCodexSessionProgress(
     if (rightTime !== undefined) return 1;
     return (indexById.get(left.id) ?? 0) - (indexById.get(right.id) ?? 0);
   });
+  return compactCodexProgressItems(sorted);
 }
 
 export function readCodexSessionProgressFromRolloutTail(

@@ -337,7 +337,7 @@ export const BRIDGE_PROVIDERS: Record<BridgeProviderId, BridgeProviderDefinition
   },
   deepseek: {
     id: "deepseek",
-    label: "DeepSeek Harness",
+    label: "DSH",
     command: "dsh",
     transport: "harness_host",
     daemon: true,

@@ -135,7 +135,7 @@ npm run opencode:start
 - 完成后提交本地 commit，并报告分支、SHA、改动文件和验证结果；
 - 不推送、不合并 `main`、不改正式版本号、不创建 tag、不发布 npm、不部署正式环境。
 
-只有被用户明确指定的发布 Agent 可以汇总这些 commit、准备版本号和版本说明，并执行正式发版。完整规范见 [docs/开发协作/多Agent协作规范.md](docs/开发协作/多Agent协作规范.md)。
+运行代码完成 commit 后默认交给唯一的体验整合 Agent，自动汇总、打包并部署本机和公网 Relay，不需要用户逐次通知；多个 Agent 不得并发拿各自分支覆盖服务器。这个阶段不推送 GitHub。只有用户之后明确要求发布 GitHub 新版本，唯一的正式发布 Agent 才可以基于已经体验通过的候选准备正式版本号、版本说明和公开发布。完整规范见 [docs/开发协作/多Agent协作规范.md](docs/开发协作/多Agent协作规范.md) 和 [docs/发布/体验部署与正式发布.md](docs/发布/体验部署与正式发布.md)。
 
 ## Commit Messages
 
@@ -251,8 +251,12 @@ npm run privacy:check:history
 
 ## Release Notes and Publishing
 
-发布由唯一的发布 Agent 处理。普通开发 Agent 和 PR 可以修改源码、测试和文档，但不能改正式版本号、创建 tag、部署正式环境或推送维护者仓库。WeRelay 只通过 GitHub 公开，仓库设置为不可发布的私有包元数据，任何 Agent 都不得执行 `npm publish`。
+WeRelay 把体验部署和 GitHub 正式发布分成两个阶段。普通开发 Agent 和 PR 可以修改源码、测试和文档，但不能改正式版本号、创建 tag、部署共享环境或推送维护者仓库。
 
-发布 Agent 必须从实际 Git diff、候选 commit 和验证结果整理说明。中文版本记录是面向用户的主说明，应使用普通、清晰的中文描述用户能感知的变化，不写类名、字段名、文件路径、提交 SHA 和测试命令。技术证据保留在 commit body 和发布验收报告中。模板见 [docs/发布/版本记录/中文版本说明模板.md](docs/发布/版本记录/中文版本说明模板.md)。
+运行代码完成 commit 后，体验整合 Agent 默认在独立 worktree 按提交号串行整合、运行完整检查、生成预发布 tarball，并把同一产物安装到本机和公网 Relay。用户无需逐次发送部署指令。体验部署不是 GitHub 正式发布，必须报告候选 SHA、tarball 校验值、验活结果和回滚产物。
 
-GitHub 的公开 commit、push、tag 和远端验真只能在专用发布服务器完成，不能从维护者 Mac 直接推送，也不能在服务器失败后自动回退为本机直推。完整流程见 [docs/开发协作/多Agent协作规范.md](docs/开发协作/多Agent协作规范.md) 和 [docs/发布/对外发布操作手册.md](docs/发布/对外发布操作手册.md)。
+只有用户之后明确要求“发布 GitHub 新版本”，正式发布 Agent 才能基于最后一个体验通过的候选更新正式版本号和版本说明。新提交不得未经体验直接夹带进入正式版本。WeRelay 只通过 GitHub 公开，仓库设置为不可发布的私有包元数据，任何 Agent 都不得执行 `npm publish`。
+
+中文版本记录是面向用户的主说明，应使用普通、清晰的中文描述用户能感知的变化，不写类名、字段名、文件路径、提交 SHA 和测试命令。技术证据保留在 commit body、候选记录和发布验收报告中。模板见 [docs/发布/版本记录/中文版本说明模板.md](docs/发布/版本记录/中文版本说明模板.md)。
+
+GitHub 的公开 commit、push、tag 和远端验真只能在专用发布服务器完成，不能从维护者 Mac 直接推送，也不能在服务器失败后自动回退为本机直推。完整流程见 [docs/发布/体验部署与正式发布.md](docs/发布/体验部署与正式发布.md)、[docs/开发协作/多Agent协作规范.md](docs/开发协作/多Agent协作规范.md) 和 [docs/发布/对外发布操作手册.md](docs/发布/对外发布操作手册.md)。

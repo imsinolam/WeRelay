@@ -684,6 +684,8 @@ svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.75; stro
   .task-dot.running { animation: none; opacity: 1; transform: none; box-shadow: none; }
 }
 .task-title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 430; line-height: 1.5; }
+.task-project { display: block; margin-top: 1px; overflow: hidden; color: var(--muted); font-size: 11px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.task-project[hidden] { display: none; }
 .sidebar-overlay { display: none; }
 
 .main-panel { position: relative; min-width: 0; display: flex; flex-direction: column; height: 100dvh; overflow: hidden; background: var(--page); }
@@ -1627,6 +1629,19 @@ export const CODEX_MOBILE_JS = String.raw`
       return String(task && task.adapter || "").trim();
     }).filter(Boolean));
     return adapters.size > 1;
+  }
+
+  function taskListProjectLabel(task, view) {
+    if (view !== "recent") return "";
+    return String(task && task.projectName || "").trim();
+  }
+
+  function taskBoardContextText(task, showAdapterLabel, suffix) {
+    var parts = [];
+    if (showAdapterLabel && task && task.adapterLabel) parts.push(task.adapterLabel);
+    if (task && task.projectName) parts.push(task.projectName);
+    if (suffix) parts.push(suffix);
+    return parts.join(" · ");
   }
 
   function taskBoardTaskHref(task) {
@@ -2807,7 +2822,7 @@ export const CODEX_MOBILE_JS = String.raw`
       codebuddy: "CodeBuddy",
       reasonix: "reasonix",
       workbuddy: "WorkBuddy",
-      deepseek: "DeepSeek Harness",
+      deepseek: "DSH",
       opencode: "OpenCode",
       shell: "Shell"
     };
@@ -3753,7 +3768,7 @@ export const CODEX_MOBILE_JS = String.raw`
     button.dataset.threadId = threadId;
     button.setAttribute("aria-haspopup", "menu");
     button.innerHTML =
-      '<span class="task-copy"><span class="task-title"></span></span>' +
+      '<span class="task-copy"><span class="task-title"></span><span class="task-project"></span></span>' +
       '<span class="task-indicator"><span class="task-dot"></span><span class="task-status-badge"></span></span>';
     button.addEventListener("click", function (event) {
       if (
@@ -3858,6 +3873,10 @@ export const CODEX_MOBILE_JS = String.raw`
     }
     var title = button.querySelector(".task-title");
     if (title && title.textContent !== task.title) title.textContent = task.title;
+    var project = button.querySelector(".task-project");
+    var projectText = taskListProjectLabel(task, state.taskView);
+    if (project && project.textContent !== projectText) project.textContent = projectText;
+    if (project) project.hidden = !projectText;
   }
 
   function getTaskButton(task) {
@@ -4208,21 +4227,15 @@ export const CODEX_MOBILE_JS = String.raw`
     status.lastChild.textContent = taskBoardStatusLabel(task);
     meta.appendChild(status);
 
-    var contextParts = [];
-    if (showAdapterLabel && task.adapterLabel) {
-      contextParts.push(task.adapterLabel);
-    }
-    if (task.projectName) {
-      contextParts.push(task.projectName);
-    }
+    var contextText = taskBoardContextText(task, showAdapterLabel);
     var time = document.createElement("span");
     time.className = "task-board-card-time";
     time.textContent = formatTaskBoardTime(task.lastUpdatedAt);
     meta.appendChild(time);
-    if (contextParts.length) {
+    if (contextText) {
       var context = document.createElement("span");
       context.className = "task-board-card-context";
-      context.textContent = contextParts.join(" · ");
+      context.textContent = contextText;
       context.title = context.textContent;
       meta.appendChild(context);
     }
@@ -4326,9 +4339,7 @@ export const CODEX_MOBILE_JS = String.raw`
       title.textContent = item.title;
       var meta = document.createElement("span");
       meta.className = "task-board-completed-meta";
-      meta.textContent = showAdapterLabels && item.adapterLabel
-        ? item.adapterLabel + " · 已完成"
-        : "已完成";
+      meta.textContent = taskBoardContextText(item, showAdapterLabels, "已完成");
       copy.appendChild(title);
       copy.appendChild(meta);
       var time = document.createElement("span");

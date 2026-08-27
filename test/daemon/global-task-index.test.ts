@@ -4,12 +4,12 @@ import {
   activateGlobalTaskCandidate,
   buildGlobalTaskSnapshot,
   formatGlobalTaskList,
+  formatGlobalTaskSearchResults,
   globalTaskIdentityKey,
   paginateGlobalTaskSnapshot,
   resolveCompactGlobalTaskSearchTarget,
   resolveGlobalTaskCandidate,
   resolveGlobalTaskTargetedMessage,
-  shouldShowGlobalTaskAdapterLabels,
   selectRunningGlobalTaskAdapters,
   updateGlobalTaskSnapshot,
   type GlobalTaskCandidate,
@@ -76,11 +76,13 @@ describe("global task index", () => {
   });
 
   test("sorts all adapters by lastUpdatedAt and shows terminal labels", () => {
-    const snapshot = buildGlobalTaskSnapshot([
-      candidate("claude", "claude-1", "Claude 较旧任务", "2026-08-08T08:00:00.000Z"),
-      candidate("codex", "codex-1", "Codex 最新任务", "2026-08-08T10:00:00.000Z"),
-      candidate("workbuddy", "wb-1", "WorkBuddy 中间任务", "2026-08-08T09:00:00.000Z"),
-    ]);
+    const claude = candidate("claude", "claude-1", "Claude 较旧任务", "2026-08-08T08:00:00.000Z");
+    claude.projectName = "assistant-tools";
+    const codex = candidate("codex", "codex-1", "Codex 最新任务", "2026-08-08T10:00:00.000Z");
+    codex.projectName = "DeskRelay";
+    const workbuddy = candidate("workbuddy", "wb-1", "WorkBuddy 中间任务", "2026-08-08T09:00:00.000Z");
+    workbuddy.projectName = "portfolio";
+    const snapshot = buildGlobalTaskSnapshot([claude, codex, workbuddy]);
 
     expect(snapshot.candidates.map((entry) => `${entry.adapter}:${entry.sessionId}`)).toEqual([
       "codex:codex-1",
@@ -88,17 +90,37 @@ describe("global task index", () => {
       "claude:claude-1",
     ]);
     const output = formatGlobalTaskList({ snapshot, startIndex: 0, pageSize: 10 });
-    expect(output).toContain("运行终端最近任务");
-    expect(output).toContain("全部按最近更新时间排序");
+    expect(output).toContain("最近任务");
+    expect(output).toContain("全部终端 · 按更新时间排序");
     expect(output).not.toContain("每个运行终端优先显示最近一条");
     expect(output).not.toContain("────────");
-    expect(output).toContain("1. [Codex] Codex 最新任务");
-    expect(output).toContain("2. [WorkBuddy] WorkBuddy 中间任务");
-    expect(output).toContain("3. [Claude Code] Claude 较旧任务");
+    expect(output).toContain("1. [Codex · DeskRelay] Codex 最新任务");
+    expect(output).toContain("2. [WorkBuddy · portfolio] WorkBuddy 中间任务");
+    expect(output).toContain("3. [Claude Code · assistant-tools] Claude 较旧任务");
   });
 
 
-  test("uses an emoji for a running task marker", () => {
+  test("keeps project names in global search results", () => {
+    const deepSeek = candidate(
+      "deepseek",
+      "dsh-search",
+      "US中转服务器",
+      "2026-08-08T10:00:00.000Z",
+    );
+    deepSeek.projectName = "trade_highlow_v3";
+    const snapshot = buildGlobalTaskSnapshot([deepSeek]);
+
+    const output = formatGlobalTaskSearchResults({
+      snapshot,
+      matches: snapshot.candidates,
+      target: "US",
+    });
+
+    expect(output).toContain("搜索“US”");
+    expect(output).toContain("1. [DSH · trade_highlow_v3] US中转服务器");
+  });
+
+  test("uses a consistent text marker for a running task", () => {
     const running = candidate(
       "codex",
       "running-1",
@@ -113,22 +135,48 @@ describe("global task index", () => {
       pageSize: 10,
     });
 
-    expect(output).toContain("1. 正在执行的任务　🟢");
-    expect(output).not.toContain("正在执行的任务　运行中");
+    expect(output).toContain("1. [Codex] 正在执行的任务 · 处理中");
+    expect(output).not.toContain("🟢");
   });
 
-  test("hides terminal labels on a single-adapter page", () => {
+
+  test("always shows a real project name even on a single-adapter page", () => {
+    const first = candidate("deepseek", "dsh-1", "US中转服务器", "2026-08-08T10:00:00.000Z");
+    first.projectName = "trade_highlow_v3";
+    const second = candidate("deepseek", "dsh-2", "回测策略", "2026-08-08T09:00:00.000Z");
+    second.projectName = "portfolio-lab";
+
+    const output = formatGlobalTaskList({
+      snapshot: buildGlobalTaskSnapshot([first, second]),
+      startIndex: 0,
+      pageSize: 10,
+    });
+
+    expect(output).toContain("1. [DSH · trade_highlow_v3] US中转服务器");
+    expect(output).toContain("2. [DSH · portfolio-lab] 回测策略");
+  });
+
+  test("does not render empty project brackets", () => {
+    const output = formatGlobalTaskList({
+      snapshot: buildGlobalTaskSnapshot([
+        candidate("deepseek", "dsh-1", "临时任务", "2026-08-08T10:00:00.000Z"),
+      ]),
+      startIndex: 0,
+      pageSize: 10,
+    });
+
+    expect(output).toContain("1. [DSH] 临时任务");
+    expect(output).not.toContain("[]");
+  });
+
+  test("shows terminal labels even when a global page currently contains one adapter", () => {
     const snapshot = buildGlobalTaskSnapshot([
       candidate("codex", "c1", "任务一", "2026-08-08T10:00:00.000Z"),
       candidate("codex", "c2", "任务二", "2026-08-08T09:00:00.000Z"),
     ]);
-    const page = paginateGlobalTaskSnapshot(snapshot, { startIndex: 0, pageSize: 10 });
-
-    expect(shouldShowGlobalTaskAdapterLabels(page.candidates)).toBe(false);
     const output = formatGlobalTaskList({ snapshot, startIndex: 0, pageSize: 10 });
-    expect(output).toContain("1. 任务一");
-    expect(output).toContain("2. 任务二");
-    expect(output).not.toContain("[Codex]");
+    expect(output).toContain("1. [Codex] 任务一");
+    expect(output).toContain("2. [Codex] 任务二");
   });
 
   test("shows terminal labels for every item on a mixed-adapter page", () => {
@@ -136,16 +184,13 @@ describe("global task index", () => {
       candidate("codex", "c1", "Codex 任务", "2026-08-08T10:00:00.000Z"),
       candidate("claude", "a1", "Claude 任务", "2026-08-08T09:00:00.000Z"),
     ]);
-    const page = paginateGlobalTaskSnapshot(snapshot, { startIndex: 0, pageSize: 10 });
-
-    expect(shouldShowGlobalTaskAdapterLabels(page.candidates)).toBe(true);
     const output = formatGlobalTaskList({ snapshot, startIndex: 0, pageSize: 10 });
     expect(output).toContain("1. [Codex] Codex 任务");
     expect(output).toContain("2. [Claude Code] Claude 任务");
     expect(output).not.toContain("────────");
   });
 
-  test("recomputes terminal-label visibility after crossing a page boundary", () => {
+  test("keeps terminal labels stable across global pages", () => {
     const snapshot = buildGlobalTaskSnapshot([
       candidate("codex", "c1", "第一页一", "2026-08-08T10:00:00.000Z"),
       candidate("codex", "c2", "第一页二", "2026-08-08T09:00:00.000Z"),
@@ -153,13 +198,9 @@ describe("global task index", () => {
       candidate("workbuddy", "w1", "第二页二", "2026-08-08T07:00:00.000Z"),
     ]);
 
-    expect(shouldShowGlobalTaskAdapterLabels(
-      paginateGlobalTaskSnapshot(snapshot, { startIndex: 0, pageSize: 2 }).candidates,
-    )).toBe(false);
-    expect(shouldShowGlobalTaskAdapterLabels(
-      paginateGlobalTaskSnapshot(snapshot, { startIndex: 2, pageSize: 2 }).candidates,
-    )).toBe(true);
-    expect(formatGlobalTaskList({ snapshot, startIndex: 0, pageSize: 2 })).not.toContain("[Codex]");
+    const firstPage = formatGlobalTaskList({ snapshot, startIndex: 0, pageSize: 2 });
+    expect(firstPage).toContain("1. [Codex] 第一页一");
+    expect(firstPage).toContain("2. [Codex] 第一页二");
     const secondPage = formatGlobalTaskList({ snapshot, startIndex: 2, pageSize: 2 });
     expect(secondPage).toContain("3. [Codex] 第二页一");
     expect(secondPage).toContain("4. [WorkBuddy] 第二页二");
@@ -290,5 +331,60 @@ describe("global task index", () => {
       },
     })).rejects.toThrow("无法连接 reasonix，未切换任务，也没有新建替代任务");
     expect(resumeCalls).toBe(0);
+  });
+});
+
+describe("global task list project labels", () => {
+  test("appends project names and skips titles that already contain them", () => {
+    const deepseekTask = candidate(
+      "deepseek",
+      "deepseek-1",
+      "定位最近 DeepSeek Harness 报错",
+      "2026-08-08T10:00:00.000Z",
+    );
+    deepseekTask.projectName = "WXGWork";
+    const codexTask = candidate(
+      "codex",
+      "codex-1",
+      "WXGWork 内的 Codex 任务",
+      "2026-08-08T09:00:00.000Z",
+    );
+    codexTask.projectName = "WXGWork";
+    const claudeTask = candidate(
+      "claude",
+      "claude-1",
+      "Claude 较旧任务",
+      "2026-08-08T08:00:00.000Z",
+    );
+
+    const output = formatGlobalTaskList({
+      snapshot: buildGlobalTaskSnapshot([deepseekTask, codexTask, claudeTask]),
+      startIndex: 0,
+      pageSize: 10,
+    });
+
+    expect(output).toContain("[DSH · WXGWork] 定位最近 DeepSeek Harness 报错");
+    expect(output).toContain("WXGWork 内的 Codex 任务\n");
+    expect(output).toContain("Claude 较旧任务\n");
+    expect(output).not.toContain("WXGWork 内的 Codex 任务 · WXGWork");
+  });
+
+  test("keeps search result lines aligned with list lines", () => {
+    const deepseekTask = candidate(
+      "deepseek",
+      "deepseek-1",
+      "定位最近 DeepSeek Harness 报错",
+      "2026-08-08T10:00:00.000Z",
+    );
+    deepseekTask.projectName = "WXGWork";
+
+    const snapshot = buildGlobalTaskSnapshot([deepseekTask]);
+    const output = formatGlobalTaskSearchResults({
+      snapshot,
+      matches: [deepseekTask],
+      target: "Harness",
+    });
+
+    expect(output).toContain("[DSH · WXGWork] 定位最近 DeepSeek Harness 报错");
   });
 });

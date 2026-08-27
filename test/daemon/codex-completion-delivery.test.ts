@@ -192,14 +192,46 @@ describe("Codex completion delivery queue", () => {
       },
     ]);
 
-    expect(summary).toContain("积压完成消息已合并：3 条，涉及 2 个任务");
-    expect(summary).toContain("08-08 18:30 · 修复微信任务列表");
-    expect(summary).toContain("08-08 17:00 · 整理发布文档（2 条完成记录）");
-    expect(summary).toContain("https://werelay.example/t/a");
-    expect(summary).toContain("https://werelay.example/t/b");
+    expect(summary).toContain("📥 积压完成通知汇总：3 条 · 2 个任务");
+    expect(summary).toContain("1. ✅ 修复微信任务列表");
+    expect(summary).toContain("  08-08 18:30 · https://werelay.example/t/b");
+    expect(summary).toContain("2. ✅ 整理发布文档（2 条）");
+    expect(summary).toContain("  08-08 17:00 · https://werelay.example/t/a");
+    expect(summary).toContain("点开链接可查看对应任务的完整回复。");
     expect(summary.indexOf("修复微信任务列表")).toBeLessThan(
       summary.indexOf("整理发布文档"),
     );
+  });
+
+  test("marks failed and interrupted backlog entries without the success icon", () => {
+    const summary = formatCodexCompletionBacklogSummary([
+      {
+        key: "f:1",
+        threadId: "f",
+        title: "失败任务",
+        completedAt: "2026-08-08T10:30:00.000Z",
+        url: "https://werelay.example/t/f",
+        texts: ["失败"],
+        nextTextIndex: 0,
+        createdAt: "2026-08-08T10:30:00.000Z",
+        outcome: "failed",
+      },
+      {
+        key: "i:1",
+        threadId: "i",
+        title: "中断任务",
+        completedAt: "2026-08-08T09:00:00.000Z",
+        url: "https://werelay.example/t/i",
+        texts: ["中断"],
+        nextTextIndex: 0,
+        createdAt: "2026-08-08T09:00:00.000Z",
+        outcome: "interrupted",
+      },
+    ]);
+
+    expect(summary).toContain("1. ❌ 执行失败 · 失败任务");
+    expect(summary).toContain("2. ⚠️ 已中断 · 中断任务");
+    expect(summary).not.toContain("✅");
   });
 
   test("acknowledges a delivered backlog summary without sending each original message", () => {

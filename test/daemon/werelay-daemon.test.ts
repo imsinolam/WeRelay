@@ -27,6 +27,7 @@ import {
   formatCompactTaskDuration,
   formatDaemonRestartNotice,
   formatDaemonSwitchResultDetail,
+  formatSwitchedAdapterTaskListFailure,
   formatDaemonStatus,
   formatMobileTaskListUnavailableMessage,
   isCodexTaskCandidateCacheFresh,
@@ -1130,6 +1131,21 @@ describe("werelay-daemon helpers", () => {
     expect(listBlock).not.toContain("this.stateStore.getAdapterSessionId(adapter)");
   });
 
+  test("keeps task-search misses concise instead of appending the entire task list", () => {
+    const source = readRepoFile("src/daemon/werelay-daemon.ts");
+    const globalStart = source.indexOf("  private async handleGlobalTaskCommand(");
+    const globalEnd = source.indexOf("\n  private async handleSystemCommand(", globalStart);
+    const globalBlock = source.slice(globalStart, globalEnd);
+    const adapterStart = source.indexOf("        const searchMatches = numericTarget === null");
+    const adapterEnd = source.indexOf("\n        activeSlot.awaitingBareTaskSelection = false;", adapterStart);
+    const adapterBlock = source.slice(adapterStart, adapterEnd);
+
+    expect(globalBlock).toContain("可换个关键词，或发送“任务”查看最近任务。");
+    expect(globalBlock).not.toContain("formatGlobalTaskList({ snapshot, startIndex: 0, pageSize })");
+    expect(adapterBlock).toContain("可换个关键词，或发送“任务”查看最近任务。");
+    expect(adapterBlock).not.toContain("formatResumeSessionList({");
+  });
+
   test("uses the global task index for bare task commands and preserves the current list scope for navigation", () => {
     expect(isExplicitGlobalTaskListRequest("任务")).toBe(true);
     expect(isExplicitGlobalTaskListRequest("任务列表")).toBe(true);
@@ -1582,7 +1598,9 @@ describe("werelay-daemon helpers", () => {
 
   test("keeps the terminal prefix at entry and uses only task labels afterwards", () => {
     expect(prefixDaemonAdapterMessage("codex", "已进入 Codex。"))
-      .toBe("[codex]\n已进入 Codex。");
+      .toBe("[Codex]\n已进入 Codex。");
+    expect(prefixDaemonAdapterMessage("deepseek", "已切换。"))
+      .toBe("[DSH]\n已切换。");
     expect(prefixDaemonTaskMessage("codex", "需要审批", 3, "thread_a"))
       .toBe("[Codex 任务]\n需要审批");
     expect(prefixDaemonTaskMessage("claude", "任务已继续"))
@@ -1986,10 +2004,13 @@ describe("werelay-daemon helpers", () => {
 
     expect(switchStart).toBeGreaterThan(-1);
     expect(switchEnd).toBeGreaterThan(switchStart);
-    expect(switchBlock).toContain("if (result.activated)");
+    expect(switchBlock).toContain("activate: false");
+    expect(switchBlock).toContain("if (!result.activated)");
     expect(switchBlock).toContain("await retrySwitchedAdapterTaskList(");
-    expect(switchBlock).toContain("() => this.handleSystemCommand(message, switchedSlot, {");
+    expect(switchBlock).toContain("this.activeAdapter = switchAdapter;");
+    expect(switchBlock).toContain("await this.handleSystemCommand(message, switchedSlot, {");
     expect(switchBlock).toContain('type: "resume"');
+    expect(switchBlock).toContain("preserveTaskSnapshot: true");
   });
 
   test("retries exact global task restore while the companion is still starting", () => {
@@ -2182,26 +2203,43 @@ describe("werelay-daemon helpers", () => {
 
   test("recreates a failed desktop-owner slot only for an explicit user launch", () => {
     expect(shouldRecreateDesktopOwnerSlotForUserLaunch({
+      adapter: "workbuddy",
       isDesktopOwner: true,
       userInitiated: true,
       status: "error",
     })).toBe(true);
     expect(shouldRecreateDesktopOwnerSlotForUserLaunch({
+      adapter: "workbuddy",
       isDesktopOwner: true,
       userInitiated: true,
       status: "stopped",
     })).toBe(true);
     expect(shouldRecreateDesktopOwnerSlotForUserLaunch({
+      adapter: "workbuddy",
       isDesktopOwner: true,
       userInitiated: false,
       status: "error",
     })).toBe(false);
     expect(shouldRecreateDesktopOwnerSlotForUserLaunch({
+      adapter: "workbuddy",
       isDesktopOwner: true,
       userInitiated: true,
       status: "idle",
     })).toBe(false);
     expect(shouldRecreateDesktopOwnerSlotForUserLaunch({
+      adapter: "deepseek",
+      isDesktopOwner: true,
+      userInitiated: true,
+      status: "idle",
+    })).toBe(true);
+    expect(shouldRecreateDesktopOwnerSlotForUserLaunch({
+      adapter: "deepseek",
+      isDesktopOwner: true,
+      userInitiated: true,
+      status: "busy",
+    })).toBe(false);
+    expect(shouldRecreateDesktopOwnerSlotForUserLaunch({
+      adapter: "workbuddy",
       isDesktopOwner: false,
       userInitiated: true,
       status: "error",
@@ -2409,7 +2447,7 @@ describe("werelay-daemon helpers", () => {
     });
 
     expect(output).toBe(
-      "当前：Codex\nCodex：空闲\nClaude Code：待审批\nTClaude：未启动\nGrok CLI：未启动\nCodeBuddy：未启动\nreasonix：未启动\nWorkBuddy：未启动\nDeepSeek Harness：未启动\nOpenCode：未启动",
+      "当前：Codex\nCodex：空闲\nClaude Code：待审批\nTClaude：未启动\nGrok CLI：未启动\nCodeBuddy：未启动\nreasonix：未启动\nWorkBuddy：未启动\nDSH：未启动\nOpenCode：未启动",
     );
     expect(output).not.toMatch(/cwd|started_at|pid|D:\/work/);
   });
@@ -2440,6 +2478,48 @@ describe("werelay-daemon helpers", () => {
         previousActiveAdapter: "claude",
       }),
     ).toBe("桌面端尚未连接，仍使用 Claude Code。");
+  });
+
+  test("explains a hung DeepSeek Desktop host and keeps the previous terminal", () => {
+    expect(formatSwitchedAdapterTaskListFailure({
+      adapter: "deepseek",
+      previousAdapter: "codex",
+      error: new TypeError("fetch failed"),
+    })).toBe(
+      "DSH Desktop 已打开，但本地接口没有响应，未完成切换。\n" +
+      "仍使用 Codex。\n" +
+      "请在电脑上重启 DSH Desktop 后，再发送 /dsh。",
+    );
+
+    expect(formatSwitchedAdapterTaskListFailure({
+      adapter: "workbuddy",
+      previousAdapter: "codex",
+      error: new Error("unexpected decoder failure"),
+    })).toBe(
+      "WorkBuddy 暂时无法读取任务，未完成切换。\n" +
+      "仍使用 Codex。\n" +
+      "请稍后重试；如果持续失败，请在电脑上检查 WorkBuddy。",
+    );
+  });
+
+  test("validates the switched terminal before making it active or announcing success", () => {
+    const source = readRepoFile("src/daemon/werelay-daemon.ts");
+    const switchStart = source.indexOf("    const switchAdapter = parseDaemonSwitchCommand(message.text);");
+    const switchEnd = source.indexOf("\n    if (message.text.trim().toLowerCase() === \"/daemon-stop\")", switchStart);
+    const switchBlock = source.slice(switchStart, switchEnd);
+    const retryIndex = switchBlock.indexOf("await retrySwitchedAdapterTaskList(");
+    const activationIndex = switchBlock.indexOf("this.activeAdapter = switchAdapter;", retryIndex);
+    const successIndex = switchBlock.indexOf(
+      "const detail = formatDaemonSwitchResultDetail(result);",
+      activationIndex,
+    );
+
+    expect(switchBlock).toContain("activate: false");
+    expect(retryIndex).toBeGreaterThan(-1);
+    expect(activationIndex).toBeGreaterThan(retryIndex);
+    expect(successIndex).toBeGreaterThan(activationIndex);
+    expect(switchBlock).toContain("formatSwitchedAdapterTaskListFailure({");
+    expect(switchBlock).toContain("preserveTaskSnapshot: true");
   });
 
   test("waitForVisibleClientConnection resolves when the visible companion appears", async () => {

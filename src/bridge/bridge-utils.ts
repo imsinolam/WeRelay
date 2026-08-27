@@ -24,6 +24,7 @@ import {
   getBridgeProvider,
   isClaudeProviderKind,
 } from "./bridge-providers.ts";
+import { formatTaskProjectLabel } from "./task-list-format.ts";
 
 const ANSI_ESCAPE_RE =
   // eslint-disable-next-line no-control-regex
@@ -1547,13 +1548,11 @@ function formatResumeSessionRuntimeMarkers(
   currentWorkerStatus?: BridgeAdapterState["status"],
 ): string {
   const markers: string[] = [];
-  if (isCurrent) {
-    markers.push("当前");
-  }
+  if (isCurrent) markers.push("当前");
 
   const currentWorkerMarker = isCurrent
     ? currentWorkerStatus === "busy"
-      ? "🟢"
+      ? "处理中"
       : currentWorkerStatus === "awaiting_approval"
         ? "待审批"
         : currentWorkerStatus === "awaiting_input"
@@ -1568,7 +1567,7 @@ function formatResumeSessionRuntimeMarkers(
     : null;
   if (currentWorkerMarker) {
     markers.push(currentWorkerMarker);
-    return `\u3000${markers.join(" · ")}`;
+    return ` · ${markers.join(" · ")}`;
   }
 
   const status = candidate.runtimeStatus;
@@ -1578,39 +1577,30 @@ function formatResumeSessionRuntimeMarkers(
     } else if (status.activeFlags.includes("waitingOnUserInput")) {
       markers.push("待输入");
     } else {
-      markers.push("🟢");
+      markers.push("处理中");
     }
   } else if (status?.type === "systemError") {
     markers.push("异常");
   }
 
-  return markers.length > 0 ? `\u3000${markers.join(" · ")}` : "";
+  return markers.length > 0 ? ` · ${markers.join(" · ")}` : "";
 }
 
-function isCodexGeneratedTaskWorkspace(cwd: string | undefined): boolean {
-  if (!cwd) {
-    return false;
-  }
-
-  const segments = cwd.split(/[\\/]+/).filter(Boolean);
-  return segments.some(
-    (segment, index) =>
-      segment.toLowerCase() === "codex" &&
-      /^\d{4}-\d{2}-\d{2}$/.test(segments[index + 1] ?? "") &&
-      Boolean(segments[index + 2]),
-  );
-}
-
-function formatCodexTaskProjectLabel(
-  candidate: BridgeResumeSessionCandidate,
-): string {
-  if (isCodexGeneratedTaskWorkspace(candidate.cwd)) {
-    return "";
-  }
-
-  const project =
-    candidate.projectName ?? (candidate.cwd ? path.basename(candidate.cwd) : "");
-  return project ? `[${project}] ` : "";
+function formatResumeSessionInstructions(params: {
+  hasMore: boolean;
+  hasPrevious: boolean;
+}): string[] {
+  const navigation = [
+    "搜索“任务：关键词”",
+    "发送“新建：内容”新建任务",
+  ];
+  if (params.hasMore) navigation.push("“下一页20”查看更多");
+  if (params.hasPrevious) navigation.push("“上一页”返回");
+  return [
+    "回复序号进入；发送“3：内容”可直接下发",
+    navigation.join("；"),
+    "序号保持到下次发送“任务”",
+  ];
 }
 
 export function formatResumeSessionList(params: {
@@ -1635,74 +1625,30 @@ export function formatResumeSessionList(params: {
   } = params;
   const resolvedStartIndex = startIndex ?? (page - 1) * CODEX_TASK_LIST_PAGE_SIZE;
   const resolvedHasPrevious = hasPrevious ?? resolvedStartIndex > 0;
+  const providerLabel = getBridgeProvider(adapter).label;
   if (candidates.length === 0) {
-    if (adapter === "codex" && resolvedHasPrevious) {
-      return "没有更多任务。\n发送“上一页”返回。";
-    }
-    return adapter === "codex"
-      ? "没有找到 Codex 桌面端的最近任务。"
-      : adapter === "opencode"
-        ? "没有找到 OpenCode 最近会话。"
-        : "没有找到最近会话。";
+    return resolvedHasPrevious
+      ? "已经到底了。\n发送“上一页”返回。"
+      : `${providerLabel} 当前没有可继续的任务。\n可发送“新建：内容”开始新任务。`;
   }
 
-  if (adapter === "codex") {
-    const actions: string[] = [
-      "回复序号进入任务",
-      "发送“数字：内容”或“任务数字：内容”（如：任务6：继续处理）可直接发给指定任务",
-      "发送“任务：关键词”搜索",
-      "发送“任务”可重新选择",
-      "发送“新建：内容”创建任务并直接开始",
-    ];
-    if (hasMore) {
-      actions.push("发送“下一页”查看更多，可用“下一页20”指定条数");
-    }
-    if (resolvedHasPrevious) {
-      actions.push("发送“上一页”返回");
-    }
-    return [
-      "最近任务",
-      ...candidates.map((candidate, index) => {
-        const isCurrent = Boolean(
-          currentSessionId && candidate.sessionId === currentSessionId,
-        );
-        const markers = formatResumeSessionRuntimeMarkers(
-          candidate,
-          isCurrent,
-          currentWorkerStatus,
-        );
-        const projectLabel = formatCodexTaskProjectLabel(candidate);
-        return `${resolvedStartIndex + index + 1}. ${projectLabel}${candidate.title}${markers}`;
-      }),
-      ...actions,
-      "切换任务不会中断后台运行。",
-      "序号在再次发送“任务”前保持不变。",
-    ].join("\n");
-  }
-
-  const title = adapter === "opencode" ? "OpenCode 最近任务" : "最近任务";
-  const actions = [
-    "回复序号进入任务",
-    "发送“数字：内容”或“任务数字：内容”（如：任务6：继续处理）可直接发给指定任务",
-    "发送“任务：关键词”搜索",
-    "发送“任务”可重新选择",
-    "发送“新建：内容”创建任务并直接开始",
-  ];
-  if (hasMore) {
-    actions.push("发送“下一页”查看更多，可用“下一页20”指定条数");
-  }
-  if (resolvedHasPrevious) {
-    actions.push("发送“上一页”返回");
-  }
   return [
-    title,
+    `${providerLabel} 最近任务`,
     ...candidates.map((candidate, index) => {
-      const marker =
-        currentSessionId && candidate.sessionId === currentSessionId ? " [当前]" : "";
-      return `${resolvedStartIndex + index + 1}. ${candidate.title}${marker}`;
+      const isCurrent = Boolean(
+        currentSessionId && candidate.sessionId === currentSessionId,
+      );
+      const markers = formatResumeSessionRuntimeMarkers(
+        candidate,
+        isCurrent,
+        currentWorkerStatus,
+      );
+      return `${resolvedStartIndex + index + 1}. ${formatTaskProjectLabel(candidate)}${candidate.title}${markers}`;
     }),
-    ...actions,
-    "序号在再次发送“任务”前保持不变。",
+    ...formatResumeSessionInstructions({
+      hasMore,
+      hasPrevious: resolvedHasPrevious,
+    }),
   ].join("\n");
 }
 
@@ -1717,7 +1663,7 @@ export function formatResumeSessionSearchResults(params: {
   const visibleMatches = params.matches.slice(0, limit);
   const remaining = Math.max(0, params.matches.length - visibleMatches.length);
   return [
-    `匹配任务：${params.target}`,
+    `搜索“${params.target}”`,
     ...visibleMatches.map((match) => {
       const isCurrent = Boolean(
         params.currentSessionId && match.candidate.sessionId === params.currentSessionId,
@@ -1727,10 +1673,9 @@ export function formatResumeSessionSearchResults(params: {
         isCurrent,
         params.currentWorkerStatus,
       );
-      const projectLabel = formatCodexTaskProjectLabel(match.candidate);
-      return `${match.index + 1}. ${projectLabel}${match.candidate.title}${markers}`;
+      return `${match.index + 1}. ${formatTaskProjectLabel(match.candidate)}${match.candidate.title}${markers}`;
     }),
-    "回复序号或发送“任务2”进入",
+    "回复序号进入；补充关键词可缩小范围",
     ...(remaining > 0 ? [`还有 ${remaining} 条，请补充关键词缩小范围。`] : []),
   ].join("\n");
 }

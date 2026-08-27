@@ -1005,7 +1005,7 @@ export function prefixDaemonAdapterMessage(
   text: string,
 ): string {
   const trimmed = text.trim();
-  const prefix = `[${adapter}]`;
+  const prefix = `[${formatDaemonAdapterLabel(adapter)}]`;
   return trimmed ? `${prefix}\n${trimmed}` : prefix;
 }
 
@@ -1560,6 +1560,32 @@ export function formatMobileTaskListUnavailableMessage(
   return null;
 }
 
+export function formatSwitchedAdapterTaskListFailure(params: {
+  adapter: DaemonAdapterKind;
+  previousAdapter?: DaemonAdapterKind;
+  error: unknown;
+}): string {
+  const raw = params.error instanceof Error
+    ? `${params.error.name}: ${params.error.message}`
+    : String(params.error);
+  const fallback = params.previousAdapter && params.previousAdapter !== params.adapter
+    ? `仍使用 ${formatDaemonAdapterLabel(params.previousAdapter)}。`
+    : "当前没有切换到其他终端。";
+  if (params.adapter === "deepseek" &&
+      /fetch failed|timed?\s*out|timeout|ETIMEDOUT|ECONNREFUSED|socket hang up/i.test(raw)) {
+    return [
+      "DSH Desktop 已打开，但本地接口没有响应，未完成切换。",
+      fallback,
+      "请在电脑上重启 DSH Desktop 后，再发送 /dsh。",
+    ].join("\n");
+  }
+  return [
+    `${formatDaemonAdapterLabel(params.adapter)} 暂时无法读取任务，未完成切换。`,
+    fallback,
+    `请稍后重试；如果持续失败，请在电脑上检查 ${formatDaemonAdapterLabel(params.adapter)}。`,
+  ].join("\n");
+}
+
 export function formatDaemonSwitchResultDetail(result: {
   created: boolean;
   openedVisible: boolean;
@@ -1635,13 +1661,16 @@ export function resolveDaemonDesktopApplicationLaunchPermission(params: {
 }
 
 export function shouldRecreateDesktopOwnerSlotForUserLaunch(params: {
+  adapter: DaemonAdapterKind;
   isDesktopOwner: boolean;
   userInitiated: boolean;
   status: BridgeWorkerStatus;
 }): boolean {
   return params.isDesktopOwner &&
     params.userInitiated &&
-    (params.status === "error" || params.status === "stopped");
+    ((params.adapter === "deepseek" && params.status === "idle") ||
+      params.status === "error" ||
+      params.status === "stopped");
 }
 
 export function buildDaemonRuntimeOptions(params: {
@@ -3149,6 +3178,7 @@ class WeRelayDaemon {
     let slot = this.slots.get(adapter);
     let created = false;
     if (slot && shouldRecreateDesktopOwnerSlotForUserLaunch({
+      adapter,
       isDesktopOwner: providerUsesDesktopOwner(adapter),
       userInitiated: options.userInitiated === true,
       status: slot.runtime.getState().status,
@@ -4009,6 +4039,7 @@ class WeRelayDaemon {
           openVisible: true,
           reuseExistingVisible: true,
           userInitiated: true,
+          activate: false,
         });
       } catch (error) {
         const raw = error instanceof Error ? error.message : String(error);
@@ -4029,45 +4060,97 @@ class WeRelayDaemon {
         );
         return;
       }
-      if (result.activated && previousSlot) {
-        previousSlot.awaitingBareTaskSelection = false;
+      if (!result.activated) {
+        const detail = formatDaemonSwitchResultDetail(result);
+        await this.queueWechatMessage(
+          message.senderId,
+          prefixDaemonAdapterMessage(
+            switchAdapter,
+            `切换 ${formatDaemonAdapterLabel(switchAdapter)} 失败。\n${detail}`,
+          ),
+          "inbound_error",
+        );
+        return;
       }
-      const detail = formatDaemonSwitchResultDetail(result);
-      const heading = result.activated
-        ? `已切换到 ${formatDaemonAdapterLabel(switchAdapter)}。`
-        : `切换 ${formatDaemonAdapterLabel(switchAdapter)} 失败。`;
-      await this.queueWechatMessage(
-        message.senderId,
-        prefixDaemonAdapterMessage(switchAdapter, `${heading}\n${detail}`),
-      );
-      if (result.activated) {
-        const switchedSlot = this.getActiveSlot();
-        if (switchedSlot?.adapter === switchAdapter) {
-          try {
-            await retrySwitchedAdapterTaskList(
-              () => this.handleSystemCommand(message, switchedSlot, {
-                type: "resume",
-                taskListScope: "adapter",
-              }),
-              {
-                onRetry: ({ attempt, delayMs, error }) => {
-                  appendDaemonLog(
-                    `switch_adapter_task_list_retry: adapter=${switchAdapter} attempt=${attempt} delay_ms=${delayMs} error=${truncatePreview(error instanceof Error ? error.message : String(error), 400)}`,
-                  );
-                },
-              },
-            );
-          } catch (error) {
-            appendDaemonLog(
-              `switch_adapter_task_list_error: adapter=${switchAdapter} error=${truncatePreview(error instanceof Error ? error.message : String(error), 400)}`,
-            );
-            await this.queueWechatMessage(
-              message.senderId,
-              "任务列表暂时无法读取，请稍后发送“任务”重试。",
-              "inbound_error",
-            );
-          }
+
+      const switchedSlot = this.slots.get(switchAdapter);
+      if (!switchedSlot) {
+        const previousAdapter = previousSlot?.adapter !== switchAdapter
+          ? previousSlot?.adapter
+          : undefined;
+        await this.queueWechatMessage(
+          message.senderId,
+          prefixDaemonAdapterMessage(
+            switchAdapter,
+            formatSwitchedAdapterTaskListFailure({
+              adapter: switchAdapter,
+              previousAdapter,
+              error: new Error("切换后的终端连接不存在。"),
+            }),
+          ),
+          "inbound_error",
+        );
+        return;
+      }
+
+      try {
+        await retrySwitchedAdapterTaskList(
+          async () => {
+            const candidates = await this.getCodexTaskCandidates(switchedSlot, {
+              forceRefresh: true,
+            });
+            this.updateDaemonTaskListSnapshot(switchedSlot, candidates, true);
+          },
+          {
+            onRetry: ({ attempt, delayMs, error }) => {
+              appendDaemonLog(
+                `switch_adapter_task_list_retry: adapter=${switchAdapter} attempt=${attempt} delay_ms=${delayMs} error=${truncatePreview(error instanceof Error ? error.message : String(error), 400)}`,
+              );
+            },
+          },
+        );
+        this.activeAdapter = switchAdapter;
+        this.persistActiveAdapter(switchAdapter);
+        if (previousSlot && previousSlot !== switchedSlot) {
+          previousSlot.awaitingBareTaskSelection = false;
         }
+        const detail = formatDaemonSwitchResultDetail(result);
+        await this.queueWechatMessage(
+          message.senderId,
+          prefixDaemonAdapterMessage(
+            switchAdapter,
+            `已切换到 ${formatDaemonAdapterLabel(switchAdapter)}。\n${detail}`,
+          ),
+        );
+        await this.handleSystemCommand(message, switchedSlot, {
+          type: "resume",
+          taskListScope: "adapter",
+          preserveTaskSnapshot: true,
+        });
+      } catch (error) {
+        appendDaemonLog(
+          `switch_adapter_task_list_error: adapter=${switchAdapter} error=${truncatePreview(error instanceof Error ? error.message : String(error), 400)}`,
+        );
+        if (switchAdapter === "deepseek") {
+          await this.disposeSlotForUserReconnect(switchedSlot);
+        }
+        const previousAdapter = previousSlot &&
+            previousSlot.adapter !== switchAdapter &&
+            this.slots.get(previousSlot.adapter) === previousSlot
+          ? previousSlot.adapter
+          : undefined;
+        await this.queueWechatMessage(
+          message.senderId,
+          prefixDaemonAdapterMessage(
+            switchAdapter,
+            formatSwitchedAdapterTaskListFailure({
+              adapter: switchAdapter,
+              previousAdapter,
+              error,
+            }),
+          ),
+          "inbound_error",
+        );
       }
       return;
     }
@@ -4662,15 +4745,7 @@ class WeRelayDaemon {
                   currentSessionId,
                   currentWorkerStatus: runtimeState.status,
                 })
-              : [
-                  `没有找到任务：${command.target}`,
-                  formatResumeSessionList({
-                    adapter: activeSlot.adapter,
-                    candidates: candidates.slice(0, pageSize),
-                    currentSessionId,
-                    hasMore: candidates.length > pageSize,
-                  }),
-                ].join("\n\n"),
+              : `没有找到“${command.target}”相关任务。\n可换个关键词，或发送“任务”查看最近任务。`,
           );
           return;
         }
@@ -7214,10 +7289,7 @@ class WeRelayDaemon {
               matches: matches.slice(0, CODEX_TASK_LIST_MAX_PAGE_SIZE),
               target: command.target,
             })
-          : [
-              `没有找到任务：${command.target}`,
-              formatGlobalTaskList({ snapshot, startIndex: 0, pageSize }),
-            ].join("\n\n"),
+          : `没有找到“${command.target}”相关任务。\n可换个关键词，或发送“任务”查看最近任务。`,
       );
       return;
     }

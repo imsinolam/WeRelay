@@ -21,6 +21,7 @@ import type {
 } from "./bridge-types.ts";
 import type { AdapterOptions, EventSink } from "./bridge-adapters.shared.ts";
 import { nowIso, truncatePreview } from "./bridge-utils.ts";
+import { recoverDeepSeekDesktopHarnessAccess } from "./deepseek-desktop-lifecycle.ts";
 
 const DEFAULT_DEEPSEEK_HARNESS_URL = "http://127.0.0.1:3080";
 const DEEPSEEK_HARNESS_URL_ENV = "WERELAY_DEEPSEEK_HARNESS_URL";
@@ -30,6 +31,8 @@ const DEEPSEEK_HARNESS_RECOVERY_INTERVAL_MS = 2_000;
 const DEEPSEEK_HARNESS_RECOVERY_MAX_MS = 30 * 60_000;
 const DEEPSEEK_HARNESS_DISCONNECT_RENOTIFY_MS = 10 * 60_000;
 const DEEPSEEK_HISTORY_LIMIT = 100;
+const DEEPSEEK_DESKTOP_RECOVERY_TIMEOUT_MS = 20_000;
+const DEEPSEEK_DESKTOP_RECOVERY_POLL_MS = 250;
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -208,6 +211,20 @@ export interface DeepSeekHarnessClientLike {
 
 export type DeepSeekHarnessAdapterDependencies = {
   createClient(baseUrl: string): DeepSeekHarnessClientLike;
+  resolveBaseUrl?(): string;
+  resolveRecoveredBaseUrl?(): string | null;
+  recoverDesktopAccess?(error: unknown): Promise<boolean>;
+  sleep?(ms: number): Promise<void>;
+  now?(): number;
+};
+
+type ResolvedDeepSeekHarnessAdapterDependencies = {
+  createClient(baseUrl: string): DeepSeekHarnessClientLike;
+  resolveBaseUrl(): string;
+  resolveRecoveredBaseUrl(): string | null;
+  recoverDesktopAccess(error: unknown): Promise<boolean>;
+  sleep(ms: number): Promise<void>;
+  now(): number;
 };
 
 type DeepSeekRpcEnvelope = {
@@ -351,7 +368,7 @@ function readDeepSeekDesktopListeners(pid: number): string {
   }
 }
 
-function discoverDeepSeekDesktopHarnessBaseUrl(
+export function discoverDeepSeekDesktopHarnessBaseUrl(
   discovery: DeepSeekHarnessEndpointDiscovery = {},
 ): string | null {
   if ((discovery.platform ?? process.platform) !== "darwin") {
@@ -691,7 +708,7 @@ function sessionCandidate(
     ...(summary.cwd
       ? {
           projectId: summary.cwd,
-          projectName: path.basename(summary.cwd) || "DeepSeek Harness",
+          projectName: path.basename(summary.cwd) || "DSH",
         }
       : {}),
     runtimeStatus,
@@ -793,7 +810,8 @@ function toolResultState(
 
 export class DeepSeekHarnessAdapter implements BridgeAdapter {
   private readonly options: AdapterOptions;
-  private readonly client: DeepSeekHarnessClientLike;
+  private client: DeepSeekHarnessClientLike;
+  private readonly dependencies: ResolvedDeepSeekHarnessAdapterDependencies;
   private readonly state: BridgeAdapterState;
   private eventSink: EventSink = () => undefined;
   private muxAbortController: AbortController | null = null;
@@ -820,14 +838,26 @@ export class DeepSeekHarnessAdapter implements BridgeAdapter {
     dependencies?: DeepSeekHarnessAdapterDependencies,
   ) {
     this.options = options;
-    const resolvedDependencies = dependencies ?? {
-      createClient: (baseUrl: string) => new DeepSeekHarnessHttpClient(baseUrl),
+    const resolveBaseUrl = dependencies?.resolveBaseUrl ?? (dependencies
+      ? () => normalizeDeepSeekHarnessBaseUrl()
+      : () => resolveDeepSeekHarnessBaseUrl());
+    this.dependencies = {
+      createClient: dependencies?.createClient ??
+        ((baseUrl: string) => new DeepSeekHarnessHttpClient(baseUrl)),
+      resolveBaseUrl,
+      resolveRecoveredBaseUrl: dependencies?.resolveRecoveredBaseUrl ??
+        (dependencies ? resolveBaseUrl : () => discoverDeepSeekDesktopHarnessBaseUrl()),
+      recoverDesktopAccess: dependencies?.recoverDesktopAccess ??
+        ((error) => recoverDeepSeekDesktopHarnessAccess({
+          error,
+          allowDesktopApplicationLaunch:
+            this.options.allowDesktopApplicationLaunch === true,
+        })),
+      sleep: dependencies?.sleep ??
+        ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
+      now: dependencies?.now ?? (() => Date.now()),
     };
-    this.client = resolvedDependencies.createClient(
-      dependencies
-        ? normalizeDeepSeekHarnessBaseUrl()
-        : resolveDeepSeekHarnessBaseUrl(),
-    );
+    this.client = this.dependencies.createClient(this.dependencies.resolveBaseUrl());
     const initialSessionId = options.sessionStartMode === "new"
       ? undefined
       : options.initialSharedSessionId ?? options.initialSharedThreadId;
@@ -853,28 +883,17 @@ export class DeepSeekHarnessAdapter implements BridgeAdapter {
     this.muxLastOutageNoticeAt = 0;
     this.setStatus("starting", "正在连接 DeepSeek Harness。");
     try {
-      await this.client.describeHost();
-      const sessions = (await this.client.listSessions()).sort(
-        (left, right) => right.updatedAt - left.updatedAt,
-      );
-      const requestedSessionId = this.state.sharedSessionId;
       let selected: DeepSeekHarnessSessionSummary | undefined;
-      if (this.options.sessionStartMode === "new") {
-        await this.createSessionAt(this.options.cwd, false);
-      } else {
-        if (requestedSessionId) {
-          selected = sessions.find((item) => item.sessionId === requestedSessionId);
-          if (!selected) {
-            throw new Error("无法恢复指定的 DeepSeek Harness 任务；为避免会话分叉，未切换到其他任务。");
-          }
-        } else {
-          selected = sessions[0];
+      try {
+        selected = await this.connectAndRestoreSession();
+      } catch (error) {
+        if (
+          this.options.allowDesktopApplicationLaunch !== true ||
+          !await this.dependencies.recoverDesktopAccess(error)
+        ) {
+          throw error;
         }
-        if (!selected) {
-          await this.createSessionAt(this.options.cwd, false);
-        } else {
-          this.setSessionId(selected.sessionId, selected.cwd);
-        }
+        selected = await this.retryAfterDesktopRecovery();
       }
       this.state.startedAt = nowIso();
       this.setStatus(selected?.running ? "busy" : "idle");
@@ -883,6 +902,56 @@ export class DeepSeekHarnessAdapter implements BridgeAdapter {
     } catch (error) {
       this.setStatus("error", "无法连接 DeepSeek Harness，请确认 DSH Desktop 或 dsh web 正在本机运行。");
       throw error;
+    }
+  }
+
+  private async connectAndRestoreSession(): Promise<DeepSeekHarnessSessionSummary | undefined> {
+    await this.client.describeHost();
+    const sessions = (await this.client.listSessions()).sort(
+      (left, right) => right.updatedAt - left.updatedAt,
+    );
+    const requestedSessionId = this.state.sharedSessionId;
+    let selected: DeepSeekHarnessSessionSummary | undefined;
+    if (this.options.sessionStartMode === "new") {
+      await this.createSessionAt(this.options.cwd, false);
+      return undefined;
+    }
+    if (requestedSessionId) {
+      selected = sessions.find((item) => item.sessionId === requestedSessionId);
+      if (!selected) {
+        throw new Error("无法恢复指定的 DeepSeek Harness 任务；为避免会话分叉，未切换到其他任务。");
+      }
+    } else {
+      selected = sessions[0];
+    }
+    if (!selected) {
+      await this.createSessionAt(this.options.cwd, false);
+    } else {
+      this.setSessionId(selected.sessionId, selected.cwd);
+    }
+    return selected;
+  }
+
+  private async retryAfterDesktopRecovery(): Promise<DeepSeekHarnessSessionSummary | undefined> {
+    const deadline = this.dependencies.now() + DEEPSEEK_DESKTOP_RECOVERY_TIMEOUT_MS;
+    let lastError: unknown;
+    while (true) {
+      const recoveredBaseUrl = this.dependencies.resolveRecoveredBaseUrl();
+      if (recoveredBaseUrl) {
+        this.client = this.dependencies.createClient(recoveredBaseUrl);
+        try {
+          return await this.connectAndRestoreSession();
+        } catch (error) {
+          lastError = error;
+        }
+      }
+      const remainingMs = deadline - this.dependencies.now();
+      if (remainingMs <= 0) {
+        throw lastError;
+      }
+      await this.dependencies.sleep(
+        Math.min(DEEPSEEK_DESKTOP_RECOVERY_POLL_MS, remainingMs),
+      );
     }
   }
 

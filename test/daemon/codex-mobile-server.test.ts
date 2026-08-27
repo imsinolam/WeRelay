@@ -1197,6 +1197,12 @@ function loadMobileTaskSidebarHelpers(): {
   ) => boolean;
   formatTaskBoardTime: (value: string, nowMs?: number) => string;
   shouldShowTaskAdapterLabels: (tasks: Array<{ adapter?: string }>) => boolean;
+  taskListProjectLabel: (task: { projectName?: string }, view: string) => string;
+  taskBoardContextText: (
+    task: { adapterLabel?: string; projectName?: string },
+    showAdapterLabel: boolean,
+    suffix?: string,
+  ) => string;
   projectTaskCreationSource: <T extends {
     threadId: string;
     canCreateInProject?: boolean;
@@ -1218,6 +1224,8 @@ return {
   taskBoardMatchesQuery,
   formatTaskBoardTime,
   shouldShowTaskAdapterLabels,
+  taskListProjectLabel,
+  taskBoardContextText,
   projectTaskCreationSource
 };`)() as ReturnType<typeof loadMobileTaskSidebarHelpers>;
 }
@@ -1941,7 +1949,7 @@ describe("Codex mobile persistent cache", () => {
       currentAdapter: "codex",
       adapters: [
         { id: "codex", label: "Codex" },
-        { id: "deepseek", label: "DeepSeek Harness" },
+        { id: "deepseek", label: "DSH" },
       ],
       taskSnapshots: {
         codex: {
@@ -1999,7 +2007,7 @@ describe("Codex mobile persistent cache", () => {
     expect(state.currentThreadId).toBe("task-a");
     expect(state.adapters).toEqual([
       { id: "codex", label: "Codex", status: "" },
-      { id: "deepseek", label: "DeepSeek Harness", status: "" },
+      { id: "deepseek", label: "DSH", status: "" },
     ]);
     expect(state.serverMessages).toEqual([
       { role: "assistant", text: "缓存中的最近回复" },
@@ -2051,7 +2059,7 @@ describe("Codex mobile persistent cache", () => {
     state.authenticated = true;
     state.adapters = [
       { id: "codex", label: "Codex", status: "running", secret: "no-cache" },
-      { id: "deepseek", label: "DeepSeek Harness", status: "idle" },
+      { id: "deepseek", label: "DSH", status: "idle" },
     ];
     state.currentAdapter = "codex";
     state.currentThreadId = "shared-id";
@@ -2088,7 +2096,7 @@ describe("Codex mobile persistent cache", () => {
     expect(snapshot.queuedMessages).toEqual([]);
     expect(payload.adapters).toEqual([
       { id: "codex", label: "Codex", status: "" },
-      { id: "deepseek", label: "DeepSeek Harness", status: "" },
+      { id: "deepseek", label: "DSH", status: "" },
     ]);
     expect(raw).not.toContain("SECRET_IMAGE");
     expect(raw).not.toContain("secret approval");
@@ -2772,6 +2780,26 @@ describe("Codex mobile web rendering", () => {
       "2026-08-07T02:30:00.000Z",
       Date.parse("2026-08-07T03:00:00.000Z"),
     )).toBe("30 分钟前");
+  });
+
+  test("keeps project names visible in recent lists and task-board contexts", () => {
+    const { taskListProjectLabel, taskBoardContextText } = loadMobileTaskSidebarHelpers();
+
+    expect(taskListProjectLabel({ projectName: "DeskRelay" }, "recent")).toBe("DeskRelay");
+    expect(taskListProjectLabel({ projectName: "DeskRelay" }, "projects")).toBe("");
+    expect(taskListProjectLabel({}, "recent")).toBe("");
+    expect(taskBoardContextText({
+      adapterLabel: "DeepSeek Harness",
+      projectName: "trade_highlow_v3",
+    }, false)).toBe("trade_highlow_v3");
+    expect(taskBoardContextText({
+      adapterLabel: "DeepSeek Harness",
+      projectName: "trade_highlow_v3",
+    }, true, "已完成")).toBe("DeepSeek Harness · trade_highlow_v3 · 已完成");
+    expect(taskBoardContextText({ adapterLabel: "Codex" }, false, "已完成")).toBe("已完成");
+
+    expect(CODEX_MOBILE_JS).toContain('class="task-copy"><span class="task-title"></span><span class="task-project"></span>');
+    expect(CODEX_MOBILE_CSS).toContain(".task-project {");
   });
 
   test("adapts mobile task terminal labels to the currently rendered page", () => {
@@ -4781,7 +4809,7 @@ describe("mobile settings API", () => {
         providers: [
           {
             id: "deepseek",
-            label: "DeepSeek Harness",
+            label: "DSH",
             transport: "harness_host",
             owner: "shared_service_owner",
             continuity: "same_owner",

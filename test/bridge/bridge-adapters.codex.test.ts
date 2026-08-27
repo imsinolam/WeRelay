@@ -1561,6 +1561,68 @@ describe("Codex desktop live conversation messages", () => {
     }
   });
 
+  test("compacts rollout and live progress that map to the same visible summary", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-progress-source-dedup-"));
+    const threadId = "thread-progress-source-dedup";
+    const filePath = path.join(directory, `rollout-${threadId}.jsonl`);
+    fs.writeFileSync(filePath, JSON.stringify({
+      type: "response_item",
+      payload: {
+        type: "reasoning",
+        id: "rollout-planning",
+        summary: [{ type: "summary_text", text: "Planning next steps" }],
+        internal_chat_message_metadata_passthrough: { turn_id: "turn-progress-source-dedup" },
+      },
+    }) + "\n", "utf8");
+
+    try {
+      const adapter = new CodexPtyAdapter({
+        kind: "codex",
+        command: "codex",
+        cwd: process.cwd(),
+        renderMode: "headless",
+        codexTransport: "desktop",
+      }) as any;
+      adapter.desktopThreadRuntimeStatusCache.set(threadId, {
+        filePath,
+        fileSize: fs.statSync(filePath).size,
+        modifiedAtMs: fs.statSync(filePath).mtimeMs,
+        scannedAtMs: Date.now(),
+        runtimeStatus: { type: "active", activeFlags: [] },
+      });
+      adapter.desktopIpcClient = {
+        getThreadStateView: () => ({
+          threadRuntimeStatus: { type: "active", activeFlags: [] },
+          turnHistory: {
+            history: {
+              entitiesByKey: {
+                "tail:0:local:current": {
+                  turnId: "turn-progress-source-dedup",
+                  status: "inProgress",
+                  items: [{
+                    type: "reasoning",
+                    id: "live-planning",
+                    summary: ["Designing next steps"],
+                  }],
+                },
+              },
+            },
+          },
+        }),
+      };
+
+      expect(await adapter.getSessionProgress(threadId, { lightweight: true })).toEqual([{
+        id: "live-planning",
+        turnId: "turn-progress-source-dedup",
+        kind: "reasoning",
+        status: "completed",
+        text: "规划下一步处理",
+      }]);
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   test("falls back to rollout progress when cached desktop state is summary-only", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-rollout-summary-cache-"));
     const threadId = "thread-summary-cache";
@@ -1791,12 +1853,82 @@ describe("Codex desktop task progress", () => {
     ]);
   });
 
+  test("compacts repeated semantic progress from distinct Codex items", () => {
+    const progress = extractCodexDesktopThreadProgress({
+      threadRuntimeStatus: { type: "active", activeFlags: [] },
+      turnHistory: {
+        history: {
+          entitiesByKey: {
+            "tail:0:local:current": {
+              turnId: "turn_repeated_progress",
+              status: "inProgress",
+              items: [
+                {
+                  type: "commandExecution",
+                  id: "command_1",
+                  status: "completed",
+                  commandActions: [{ type: "unknown", command: "pwd" }],
+                },
+                {
+                  type: "commandExecution",
+                  id: "command_2",
+                  status: "completed",
+                  commandActions: [{ type: "unknown", command: "git status" }],
+                },
+                { type: "reasoning", id: "thinking_1", summary: ["Thinking through the task"] },
+                { type: "reasoning", id: "thinking_2", summary: ["Considering the task"] },
+                { type: "reasoning", id: "testing_1", summary: ["Running tests"] },
+                { type: "reasoning", id: "planning_1", summary: ["Planning next steps"] },
+                { type: "reasoning", id: "planning_2", summary: ["Designing next steps"] },
+                { type: "reasoning", id: "planning_3", summary: ["Planning the next action"] },
+                { type: "reasoning", id: "testing_2", summary: ["Testing the implementation"] },
+              ],
+            },
+          },
+        },
+      },
+    });
+
+    expect(progress).toEqual([
+      {
+        id: "command_2",
+        turnId: "turn_repeated_progress",
+        kind: "command",
+        status: "completed",
+        text: "已运行命令",
+      },
+      {
+        id: "thinking_2",
+        turnId: "turn_repeated_progress",
+        kind: "reasoning",
+        status: "completed",
+        text: "继续分析任务",
+      },
+      {
+        id: "planning_3",
+        turnId: "turn_repeated_progress",
+        kind: "reasoning",
+        status: "completed",
+        text: "规划下一步处理",
+      },
+      {
+        id: "testing_2",
+        turnId: "turn_repeated_progress",
+        kind: "reasoning",
+        status: "completed",
+        text: "运行并检查测试",
+      },
+    ]);
+  });
+
   test("uses only the latest active desktop tail and caps noisy activity", () => {
     const items = Array.from({ length: 16 }, (_, index) => ({
-      type: "commandExecution",
-      id: `command_${index}`,
+      type: "fileChange",
+      id: `file_${index}`,
       status: index === 15 ? "inProgress" : "completed",
-      commandActions: [{ type: "unknown", command: `echo ${index}` }],
+      changes: Array.from({ length: index + 1 }, (_, changeIndex) => ({
+        path: `/tmp/file-${index}-${changeIndex}.txt`,
+      })),
     }));
     const progress = extractCodexDesktopThreadProgress({
       threadRuntimeStatus: { type: "active", activeFlags: [] },
@@ -1825,9 +1957,9 @@ describe("Codex desktop task progress", () => {
     expect(progress).toHaveLength(10);
     expect(progress.some((item) => item.turnId === "turn_stale")).toBe(false);
     expect(progress.at(-1)).toMatchObject({
-      id: "command_15",
+      id: "file_15",
       status: "running",
-      text: "正在运行命令",
+      text: "正在修改 16 个文件",
     });
   });
 

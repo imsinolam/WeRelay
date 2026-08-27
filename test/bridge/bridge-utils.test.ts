@@ -1153,9 +1153,9 @@ describe("formatResumeThreadList", () => {
 
     expect(output).toContain("1. Fix the bridge resume flow");
     expect(output).toContain("当前");
-    expect(output).toContain("回复序号进入任务");
-    expect(output).toContain("发送“任务”可重新选择");
-    expect(output).toContain("发送“任务：关键词”搜索");
+    expect(output).toContain("回复序号进入；发送“3：内容”可直接下发");
+    expect(output).toContain("序号保持到下次发送“任务”");
+    expect(output).toContain("搜索“任务：关键词”");
     expect(output).not.toContain("/t2");
     expect(output).not.toContain("03/23");
   });
@@ -1212,14 +1212,44 @@ describe("formatResumeSessionList", () => {
       currentSessionId: "session_1",
     });
 
-    expect(output).toContain("最近任务");
+    expect(output).toContain("Claude Code 最近任务");
     expect(output).not.toContain("session_1");
-    expect(output).toContain("[当前]");
-    expect(output).toContain("回复序号进入任务");
-    expect(output).toContain("数字：内容");
-    expect(output).toContain("6：继续处理");
+    expect(output).toContain("当前");
+    expect(output).toContain("回复序号进入；发送“3：内容”可直接下发");
+    expect(output).toContain("3：内容");
     expect(output).not.toContain("/resume");
   });
+
+  test("renders project names and unified runtime markers for non-Codex sessions", () => {
+    const output = formatResumeSessionList({
+      adapter: "deepseek",
+      candidates: [
+        {
+          sessionId: "dsh-1",
+          title: "US中转服务器",
+          projectName: "trade_highlow_v3",
+          lastUpdatedAt: "2026-08-08T10:00:00.000Z",
+          runtimeStatus: { type: "active", activeFlags: [] },
+        },
+        {
+          sessionId: "dsh-2",
+          title: "等待审批",
+          projectName: "DeskRelay",
+          lastUpdatedAt: "2026-08-08T09:00:00.000Z",
+          runtimeStatus: { type: "active", activeFlags: ["waitingOnApproval"] },
+        },
+      ],
+      currentSessionId: "dsh-1",
+      currentWorkerStatus: "busy",
+    });
+
+    expect(output).toContain("DSH 最近任务");
+    expect(output).toContain("1. [trade_highlow_v3] US中转服务器 · 当前 · 处理中");
+    expect(output).toContain("2. [DeskRelay] 等待审批 · 待审批");
+    expect(output).not.toContain("🟢");
+    expect(output).not.toContain("[当前]");
+  });
+
 });
 
 describe("adapter-aware message formatting", () => {
@@ -1516,11 +1546,11 @@ describe("Codex task fuzzy selection", () => {
       currentSessionId: "thread-4",
     });
 
-    expect(output).toContain("匹配任务：market simulator");
+    expect(output).toContain("搜索“market simulator”");
     expect(output).toContain("2. [market-simulator] 优化震荡行情止损");
     expect(output).toContain("4. [market-simulator] 定位开仓后价格转折记录逻辑");
     expect(output).toContain("当前");
-    expect(output).toContain("回复序号或发送“任务2”进入");
+    expect(output).toContain("回复序号进入；补充关键词可缩小范围");
   });
 });
 
@@ -1633,15 +1663,15 @@ describe("formatResumeSessionList for Codex desktop tasks", () => {
     expect(output).not.toContain("dddddddd");
     expect(output).not.toContain("07/25");
     expect(output).toContain("当前 · 待审批");
-    expect(output).toContain("运行完整测试\u3000🟢");
-    expect(output).not.toContain("运行完整测试\u3000运行中");
+    expect(output).toContain("运行完整测试 · 处理中");
+    expect(output).not.toContain("🟢");
     expect(output).not.toContain("[进行中]");
-    expect(output).toContain("回复序号进入任务");
-    expect(output).toContain("发送“任务”可重新选择");
-    expect(output).toContain("发送“新建：内容”创建任务并直接开始");
+    expect(output).toContain("回复序号进入；发送“3：内容”可直接下发");
+    expect(output).toContain("搜索“任务：关键词”");
+    expect(output).toContain("发送“新建：内容”新建任务");
     expect(output).not.toContain("上一页");
-    expect(output).toContain("不会中断后台运行");
-    expect(output).toContain("序号在再次发送“任务”前保持不变");
+    expect(output).toContain("序号保持到下次发送“任务”");
+    expect(output).not.toContain("切换任务不会中断后台运行");
   });
 
   test("shows global task numbers and next-page instructions", () => {
@@ -1672,14 +1702,14 @@ describe("formatResumeSessionList for Codex desktop tasks", () => {
       hasMore: true,
     });
 
-    expect(output).toContain("11. 第十六个任务\u3000🟢");
+    expect(output).toContain("11. 第十六个任务 · 处理中");
     expect(output).not.toContain("11. 第十六个任务\u3000运行中");
     expect(output).toContain("12. 第十七个任务");
-    expect(output).toContain("发送“下一页”查看更多");
-    expect(output).toContain("发送“上一页”返回");
-    expect(output).toContain("回复序号进入任务");
-    expect(output).toContain("发送“任务”可重新选择");
-    expect(output).toContain("发送“新建：内容”创建任务并直接开始");
+    expect(output).toContain("“下一页20”查看更多");
+    expect(output).toContain("“上一页”返回");
+    expect(output).toContain("回复序号进入；发送“3：内容”可直接下发");
+    expect(output).toContain("搜索“任务：关键词”");
+    expect(output).toContain("发送“新建：内容”新建任务");
   });
 
   test("supports a custom next-page size without skipping tasks", () => {
@@ -1730,6 +1760,6 @@ describe("formatResumeSessionList for Codex desktop tasks", () => {
       page: 3,
     });
 
-    expect(output).toBe("没有更多任务。\n发送“上一页”返回。");
+    expect(output).toBe("已经到底了。\n发送“上一页”返回。");
   });
 });

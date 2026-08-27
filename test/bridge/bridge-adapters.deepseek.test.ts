@@ -357,6 +357,80 @@ describe("DeepSeek Harness adapter", () => {
     ]);
   });
 
+  test("recovers a protected DSH Desktop host only after an explicit switch", async () => {
+    const queue = new AsyncEnvelopeQueue();
+    const { client: workingClient } = createFakeClient(queue);
+    const protectedClient: DeepSeekHarnessClientLike = {
+      ...workingClient,
+      async describeHost() {
+        throw new Error("DeepSeek Harness host.describe transport failed: HTTP 403");
+      },
+    };
+    let clientCount = 0;
+    let recoveryCount = 0;
+    let recoveredEndpointChecks = 0;
+    const adapter = new DeepSeekHarnessAdapter({
+      kind: "deepseek",
+      command: "dsh",
+      cwd: "/tmp/project",
+      allowDesktopApplicationLaunch: true,
+    }, {
+      createClient: () => clientCount++ === 0 ? protectedClient : workingClient,
+      resolveBaseUrl: () => "http://127.0.0.1:43120",
+      resolveRecoveredBaseUrl: () => recoveredEndpointChecks++ === 0
+        ? null
+        : "http://127.0.0.1:43120",
+      recoverDesktopAccess: async () => {
+        recoveryCount += 1;
+        return true;
+      },
+      sleep: async () => undefined,
+      now: (() => {
+        let now = 0;
+        return () => now += 100;
+      })(),
+    });
+
+    await adapter.start();
+    expect(recoveryCount).toBe(1);
+    expect(clientCount).toBe(2);
+    expect(recoveredEndpointChecks).toBe(2);
+    expect(adapter.getState()).toMatchObject({
+      status: "idle",
+      sharedSessionId: "session-1",
+    });
+    await adapter.dispose();
+  });
+
+  test("does not restart DSH Desktop during background startup", async () => {
+    const queue = new AsyncEnvelopeQueue();
+    const { client } = createFakeClient(queue);
+    const protectedClient: DeepSeekHarnessClientLike = {
+      ...client,
+      async describeHost() {
+        throw new Error("DeepSeek Harness host.describe transport failed: HTTP 403");
+      },
+    };
+    let recoveryCount = 0;
+    const adapter = new DeepSeekHarnessAdapter({
+      kind: "deepseek",
+      command: "dsh",
+      cwd: "/tmp/project",
+      allowDesktopApplicationLaunch: false,
+    }, {
+      createClient: () => protectedClient,
+      resolveBaseUrl: () => "http://127.0.0.1:43120",
+      recoverDesktopAccess: async () => {
+        recoveryCount += 1;
+        return true;
+      },
+    });
+
+    await expect(adapter.start()).rejects.toThrow("HTTP 403");
+    expect(recoveryCount).toBe(0);
+    await adapter.dispose();
+  });
+
   test("uses the existing Harness owner and forwards a WeChat turn without reasoning", async () => {
     const queue = new AsyncEnvelopeQueue();
     const { client, prompts } = createFakeClient(queue);

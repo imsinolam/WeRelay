@@ -8,6 +8,7 @@ import { describe, expect, test } from "bun:test";
 import {
   WorkBuddyDesktopRpcClient,
   buildWorkBuddyDesktopHookSource,
+  WORKBUDDY_BUNDLE_ID,
   ensureWorkBuddyDesktopHookFile,
   isWorkBuddyDesktopDaemonCommandLine,
   isWorkBuddyMainProcessCommandLine,
@@ -155,6 +156,11 @@ describe("WorkBuddy desktop RPC client", () => {
     } finally {
       await fs.promises.rm(dir, { recursive: true, force: true });
     }
+  });
+
+
+  test("uses the installed WorkBuddy bundle id for explicit restart", () => {
+    expect(WORKBUDDY_BUNDLE_ID).toBe("com.tencent.workbuddy.mac");
   });
 
   test("automatically relaunches an already open WorkBuddy when the desktop hook is missing", async () => {
