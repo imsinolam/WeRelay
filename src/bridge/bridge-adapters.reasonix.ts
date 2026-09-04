@@ -46,6 +46,7 @@ type ReasonixSessionMetadata = {
   lastUpdatedAt: string;
   cwd: string;
   model?: string;
+  userRenamed: boolean;
   acp: boolean;
 };
 
@@ -274,6 +275,7 @@ function readReasonixSessionMetadata(
     lastUpdatedAt,
     cwd: path.resolve(cwd),
     model,
+    userRenamed: Boolean(readString(branchMeta?.custom_title)),
     acp: acpMeta !== null,
   };
 }
@@ -324,7 +326,9 @@ export async function listReasonixSessions(
       title: metadata.title,
       lastUpdatedAt: metadata.lastUpdatedAt,
       cwd: metadata.cwd,
-      projectName: path.basename(metadata.cwd) || metadata.cwd,
+      ...(metadata.userRenamed
+        ? { projectName: path.basename(metadata.cwd) || metadata.cwd }
+        : {}),
     });
   }
   for (const session of acpSessions) {

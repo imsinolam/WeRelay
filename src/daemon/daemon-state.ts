@@ -20,6 +20,13 @@ import {
 
 export type CodexWechatReplyMode = "preview" | "full";
 
+export type DaemonWechatTaskTarget = {
+  adapter: DaemonAdapterKind;
+  sessionId: string;
+  title: string;
+  lastUpdatedAt: string;
+};
+
 export type DaemonRecentTaskCompletion = {
   adapter: DaemonAdapterKind;
   threadId: string;
@@ -69,6 +76,7 @@ export type DaemonWorkspaceState = {
   cwd: string;
   activeAdapter?: DaemonAdapterKind;
   adapterSessionIds?: Partial<Record<DaemonAdapterKind, string>>;
+  latestWechatTaskTarget?: DaemonWechatTaskTarget;
   codexThreadId?: string;
   codexWechatThreadId?: string;
   mobileAccessToken?: string;
@@ -92,6 +100,27 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isCodexWechatReplyMode(value: unknown): value is CodexWechatReplyMode {
   return value === "preview" || value === "full";
+}
+
+function normalizeWechatTaskTarget(value: unknown): DaemonWechatTaskTarget | undefined {
+  if (
+    !isRecord(value) ||
+    !isDaemonAdapterKind(value.adapter) ||
+    typeof value.sessionId !== "string" ||
+    !value.sessionId.trim() ||
+    typeof value.title !== "string" ||
+    !value.title.trim() ||
+    typeof value.lastUpdatedAt !== "string" ||
+    !Number.isFinite(Date.parse(value.lastUpdatedAt))
+  ) {
+    return undefined;
+  }
+  return {
+    adapter: value.adapter,
+    sessionId: value.sessionId.trim(),
+    title: value.title.trim(),
+    lastUpdatedAt: value.lastUpdatedAt.trim(),
+  };
 }
 
 function isSameWorkspace(left: string, right: string): boolean {
@@ -365,6 +394,9 @@ function normalizeDaemonWorkspaceState(
   const recentTaskCompletions = normalizeRecentTaskCompletions(
     value.recentTaskCompletions,
   );
+  const latestWechatTaskTarget = normalizeWechatTaskTarget(
+    value.latestWechatTaskTarget,
+  );
   const mobileApprovalResults = normalizeMobileApprovalResults(
     value.mobileApprovalResults,
   );
@@ -383,6 +415,7 @@ function normalizeDaemonWorkspaceState(
     cwd: normalizeWorkspacePath(cwd),
     activeAdapter: value.activeAdapter,
     adapterSessionIds,
+    latestWechatTaskTarget,
     codexThreadId:
       typeof value.codexThreadId === "string"
         ? value.codexThreadId.trim()
@@ -466,6 +499,9 @@ export class DaemonWorkspaceStateStore {
       ...(this.state.recentTaskCompletions
         ? { recentTaskCompletions: this.state.recentTaskCompletions.map((entry) => ({ ...entry })) }
         : {}),
+      ...(this.state.latestWechatTaskTarget
+        ? { latestWechatTaskTarget: { ...this.state.latestWechatTaskTarget } }
+        : {}),
       ...(this.state.mobileApprovalResults
         ? { mobileApprovalResults: this.state.mobileApprovalResults.map((entry) => ({ ...entry })) }
         : {}),
@@ -534,6 +570,30 @@ export class DaemonWorkspaceStateStore {
       return;
     }
     this.state.activeAdapter = adapter;
+    this.persist();
+  }
+
+  getLatestWechatTaskTarget(): DaemonWechatTaskTarget | null {
+    return this.state.latestWechatTaskTarget
+      ? { ...this.state.latestWechatTaskTarget }
+      : null;
+  }
+
+  setLatestWechatTaskTarget(target: DaemonWechatTaskTarget): void {
+    const normalized = normalizeWechatTaskTarget(target);
+    if (!normalized) {
+      throw new Error("最近微信任务目标无效。");
+    }
+    const current = this.state.latestWechatTaskTarget;
+    if (
+      current?.adapter === normalized.adapter &&
+      current.sessionId === normalized.sessionId &&
+      current.title === normalized.title &&
+      current.lastUpdatedAt === normalized.lastUpdatedAt
+    ) {
+      return;
+    }
+    this.state.latestWechatTaskTarget = normalized;
     this.persist();
   }
 

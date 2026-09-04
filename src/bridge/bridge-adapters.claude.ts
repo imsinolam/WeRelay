@@ -267,14 +267,12 @@ function inspectClaudeTranscript(filePath: string): ClaudeStoredSession | null {
     return null;
   }
   if (!lastUpdatedAt) lastUpdatedAt = stat.mtime.toISOString();
-  const projectName = cwd?.split(/[\\/]/).filter(Boolean).at(-1);
   return {
     sessionId,
     threadId: sessionId,
     title: title || `会话 ${sessionId.slice(0, 8)}`,
     lastUpdatedAt,
     ...(cwd ? { cwd } : {}),
-    ...(projectName ? { projectName } : {}),
     transcriptPath: filePath,
   };
 }

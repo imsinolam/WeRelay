@@ -1,4 +1,5 @@
 import { listClaudeStoredSessions } from "../bridge/bridge-adapters.claude.ts";
+import { readCodexStateDbSessionCatalog } from "../bridge/bridge-adapters.codex.ts";
 import { listCodeBuddySessions } from "../bridge/bridge-adapters.codebuddy.ts";
 import { listDeepSeekHarnessSessions } from "../bridge/bridge-adapters.deepseek.ts";
 import { listGrokStoredSessions } from "../bridge/bridge-adapters.grok.ts";
@@ -7,6 +8,8 @@ import { listReasonixSessions } from "../bridge/bridge-adapters.reasonix.ts";
 import { listWorkBuddyDesktopSessionCandidates } from "../bridge/bridge-adapters.workbuddy.ts";
 import type { BridgeResumeSessionCandidate } from "../bridge/bridge-types.ts";
 import type { DaemonAdapterKind } from "../bridge/bridge-providers.ts";
+
+const DEEPSEEK_GLOBAL_CATALOG_TIMEOUT_MS = 2_000;
 
 function markNotLoaded(
   candidates: BridgeResumeSessionCandidate[],
@@ -51,6 +54,9 @@ export async function listLightweightAdapterSessions(
   adapter: DaemonAdapterKind,
   cwd: string,
   limit = 100,
+  dependencies: {
+    listDeepSeekSessions?: typeof listDeepSeekHarnessSessions;
+  } = {},
 ): Promise<BridgeResumeSessionCandidate[]> {
   switch (adapter) {
     case "claude":
@@ -67,7 +73,11 @@ export async function listLightweightAdapterSessions(
     case "workbuddy":
       return await listWorkBuddyDesktopSessionCandidates(limit);
     case "deepseek":
-      return await listDeepSeekHarnessSessions(limit);
+      return await (
+        dependencies.listDeepSeekSessions ?? listDeepSeekHarnessSessions
+      )(limit, undefined, {
+        timeoutMs: DEEPSEEK_GLOBAL_CATALOG_TIMEOUT_MS,
+      });
     case "opencode":
       return markNotLoaded(listOpenCodeStoredSessions(limit).map((session) => ({
         sessionId: session.id,
@@ -75,10 +85,8 @@ export async function listLightweightAdapterSessions(
         title: session.title || `会话 ${session.id.slice(0, 8)}`,
         lastUpdatedAt: new Date(session.time.updated).toISOString(),
         cwd: session.directory,
-        projectId: session.projectID,
-        projectName: session.directory.split(/[\\/]/).filter(Boolean).at(-1) || "OpenCode",
       })));
     case "codex":
-      return [];
+      return (await readCodexStateDbSessionCatalog({ limit }))?.candidates ?? [];
   }
 }

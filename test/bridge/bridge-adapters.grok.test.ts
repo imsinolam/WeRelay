@@ -10,6 +10,7 @@ import {
   buildGrokAcpArgs,
   buildGrokNativeArgs,
   isGrokLeaderCommandLine,
+  listGrokStoredSessions,
   parseGrokLeaderSocketOwnerPids,
   resolveGrokLeaderSocket,
   selectGrokLeaderSocketOwnerPids,
@@ -203,6 +204,102 @@ describe("Grok shared owner adapter", () => {
     expect(await adapter.getSessionMessages("stored-session")).toEqual(expected);
     expect(await adapter.getSessionMessageMedia("stored-session")).toEqual(expected);
     expect(await adapter.getLatestSessionMessage("stored-session")).toEqual(expected[0]);
+  });
+
+  test("does not use the cwd folder as a project name for stored Grok tasks", () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "werelay-grok-history-"));
+    const previous = process.env.GROK_HOME;
+    process.env.GROK_HOME = home;
+    try {
+      const sessionId = "grok-session";
+      const sessionDir = path.join(
+        home,
+        "sessions",
+        encodeURIComponent("/repo/grok-project"),
+        sessionId,
+      );
+      fs.mkdirSync(sessionDir, { recursive: true });
+      fs.writeFileSync(path.join(sessionDir, "summary.json"), JSON.stringify({
+        info: { id: sessionId, cwd: "/repo/grok-project" },
+        generated_title: "Grok 自动标题",
+        updated_at: "2026-08-28T01:00:00.000Z",
+      }));
+
+      expect(listGrokStoredSessions(10)).toMatchObject([{
+        sessionId,
+        title: "Grok 自动标题",
+        cwd: "/repo/grok-project",
+      }]);
+      expect(listGrokStoredSessions(10)[0]?.projectName).toBeUndefined();
+    } finally {
+      if (previous === undefined) delete process.env.GROK_HOME;
+      else process.env.GROK_HOME = previous;
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("detects a running standalone Grok turn from the live process event file", () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "werelay-grok-running-"));
+    const previous = process.env.GROK_HOME;
+    process.env.GROK_HOME = home;
+    try {
+      const sessionId = "grok-running-session";
+      const sessionDir = path.join(
+        home,
+        "sessions",
+        encodeURIComponent("/repo/grok-project"),
+        sessionId,
+      );
+      fs.mkdirSync(sessionDir, { recursive: true });
+      fs.writeFileSync(path.join(sessionDir, "summary.json"), JSON.stringify({
+        info: { id: sessionId, cwd: "/repo/grok-project" },
+        generated_title: "正在运行的 Grok 任务",
+        updated_at: "2026-08-28T05:00:00.000Z",
+      }));
+      const eventsPath = path.join(sessionDir, "events.jsonl");
+      fs.writeFileSync(eventsPath, [
+        JSON.stringify({
+          ts: "2026-08-28T05:00:00.000Z",
+          type: "turn_started",
+          session_id: sessionId,
+        }),
+        JSON.stringify({
+          ts: "2026-08-28T05:00:01.000Z",
+          type: "phase_changed",
+          phase: "waiting_for_model",
+        }),
+      ].join("\n"));
+
+      expect(listGrokStoredSessions(10, { liveEventPaths: [] })[0]?.runtimeStatus)
+        .toEqual({ type: "notLoaded" });
+      expect(listGrokStoredSessions(10, { liveEventPaths: [eventsPath] })[0]?.runtimeStatus)
+        .toEqual({ type: "active", activeFlags: [] });
+
+      fs.appendFileSync(eventsPath, `\n${JSON.stringify({
+        ts: "2026-08-28T05:00:02.000Z",
+        type: "permission_requested",
+        tool_name: "run_terminal_command",
+      })}`);
+      expect(listGrokStoredSessions(10, { liveEventPaths: [eventsPath] })[0]?.runtimeStatus)
+        .toEqual({ type: "active", activeFlags: [] });
+
+      fs.appendFileSync(eventsPath, `\n${JSON.stringify({
+        ts: "2026-08-28T05:00:03.000Z",
+        type: "permission_resolved",
+        tool_name: "run_terminal_command",
+        decision: "allow",
+      })}\n${JSON.stringify({
+        ts: "2026-08-28T05:00:04.000Z",
+        type: "turn_ended",
+        outcome: "completed",
+      })}`);
+      expect(listGrokStoredSessions(10, { liveEventPaths: [eventsPath] })[0]?.runtimeStatus)
+        .toEqual({ type: "idle" });
+    } finally {
+      if (previous === undefined) delete process.env.GROK_HOME;
+      else process.env.GROK_HOME = previous;
+      fs.rmSync(home, { recursive: true, force: true });
+    }
   });
 
 });

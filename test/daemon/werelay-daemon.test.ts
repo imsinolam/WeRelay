@@ -26,16 +26,24 @@ import {
   formatCurrentCodexFullReplyMessages,
   formatCompactTaskDuration,
   formatDaemonRestartNotice,
+  formatDaemonWechatHelp,
+  formatDaemonTaskScopedMessage,
+  formatDaemonTaskDispatchReceipt,
   formatDaemonSwitchResultDetail,
   formatSwitchedAdapterTaskListFailure,
   formatDaemonStatus,
   formatMobileTaskListUnavailableMessage,
+  formatMobileAdapterLabel,
+  collectRunningMobileAdapterIds,
+  formatTaskListLoadingMessage,
   isCodexTaskCandidateCacheFresh,
+  isDesktopOwnerSlotReady,
   isMobileTaskAvailableForDirectAction,
   isExplicitGlobalTaskListRequest,
   detectOpenMobileAdaptersFromProcessList,
   filterCodexMobileProgressForCurrentTurn,
   mapCodexMobileTaskStatus,
+  mergeAcceleratedMobileMessagesWithNativeTail,
   observeCodexTask,
   parseDaemonApprovalShortcutSequence,
   parseDaemonCliArgs,
@@ -54,6 +62,7 @@ import {
   resolveCodexMobileTaskStatusFromSignals,
   resolveDaemonTaskListSnapshot,
   resolveDaemonTaskTargetedMessage,
+  resolveDaemonWechatReplyTarget,
   resolveCreatedMobileTask,
   resolveCodexWechatReplyThreadId,
   resolveCodexMobilePendingApprovalFromSignals,
@@ -72,6 +81,7 @@ import {
   shouldSendCodexMobileTaskLink,
   shouldSendCodexCompletionNotification,
   shouldSendDaemonRestartNotice,
+  shouldResolveTaskTargetAgainstGlobalSnapshot,
   retrySwitchedAdapterTaskList,
   waitForVisibleClientConnection,
 } from "../../src/daemon/werelay-daemon.ts";
@@ -111,6 +121,34 @@ function buildDaemonEndpoint(overrides: Partial<DaemonEndpoint> = {}): DaemonEnd
     ...overrides,
   };
 }
+
+describe("desktop owner slot readiness", () => {
+  test("keeps WorkBuddy web connected even when no runtime task is selected", () => {
+    expect(isDesktopOwnerSlotReady({
+      adapter: "workbuddy",
+      status: "idle",
+      sessionId: undefined,
+    })).toBe(true);
+    expect(isDesktopOwnerSlotReady({
+      adapter: "workbuddy",
+      status: "error",
+      sessionId: undefined,
+    })).toBe(false);
+  });
+
+  test("still requires a selected task for other desktop owners", () => {
+    expect(isDesktopOwnerSlotReady({
+      adapter: "codex",
+      status: "idle",
+      sessionId: undefined,
+    })).toBe(false);
+    expect(isDesktopOwnerSlotReady({
+      adapter: "codex",
+      status: "idle",
+      sessionId: "thread-1",
+    })).toBe(true);
+  });
+});
 
 describe("mobile image persistence", () => {
   test("does not delete an uploaded image when desktop acceptance is uncertain", () => {
@@ -426,6 +464,38 @@ describe("mobile transcript visibility", () => {
   });
 });
 
+describe("mobile accelerated history live tail", () => {
+  test("replaces stale accelerated suffix with native commentary and final output", () => {
+    expect(mergeAcceleratedMobileMessagesWithNativeTail(
+      [
+        { role: "assistant", text: "更早历史" },
+        { role: "user", text: '请继续处理\n<image path="local.png">' },
+        { role: "assistant", text: "[tool_use]" },
+      ],
+      [
+        { id: "native-user", role: "user", text: "请继续处理", turnId: "turn-live" },
+        {
+          id: "native-commentary",
+          role: "assistant",
+          text: "正在检查权限状态",
+          turnId: "turn-live",
+          phase: "commentary",
+        },
+      ],
+    )).toEqual([
+      { role: "assistant", text: "更早历史" },
+      { id: "native-user", role: "user", text: "请继续处理", turnId: "turn-live" },
+      {
+        id: "native-commentary",
+        role: "assistant",
+        text: "正在检查权限状态",
+        turnId: "turn-live",
+        phase: "commentary",
+      },
+    ]);
+  });
+});
+
 describe("werelay-daemon helpers", () => {
   test("redacts command credentials before approval text is logged or persisted", () => {
     expect(redactSensitiveCommandText(
@@ -506,7 +576,35 @@ describe("werelay-daemon helpers", () => {
     }]);
   });
 
+  test("collects running task state across terminal catalogs", () => {
+    const running = collectRunningMobileAdapterIds([
+      { adapter: "workbuddy", runtimeStatus: { type: "active", activeFlags: [] } },
+      { adapter: "deepseek", runtimeStatus: { type: "idle" } },
+      { adapter: "grok", runtimeStatus: { type: "active", activeFlags: ["waitingOnApproval"] } },
+    ]);
+
+    expect([...running].sort()).toEqual(["grok", "workbuddy"]);
+  });
+
+  test("refreshes terminal status from the global catalog without a duplicate board scan", () => {
+    const source = readRepoFile("src/daemon/werelay-daemon.ts");
+    const adaptersStart = source.indexOf("  private async listMobileAdapters(");
+    const adaptersEnd = source.indexOf("\n  private async buildMobileSettings", adaptersStart);
+    const adaptersBlock = source.slice(adaptersStart, adaptersEnd);
+    const boardStart = source.indexOf("  private async listMobileTaskBoard(");
+    const boardEnd = source.indexOf("\n  private async recordRecentTaskCompletion", boardStart);
+    const boardBlock = source.slice(boardStart, boardEnd);
+
+    expect(adaptersStart).toBeGreaterThan(-1);
+    expect(adaptersBlock).toContain("selectRunningGlobalTaskAdapters");
+    expect(adaptersBlock).toContain("await this.listGlobalTaskCandidates(adapters)");
+    expect(adaptersBlock).toContain("collectRunningMobileAdapterIds(globalCandidates)");
+    expect(boardBlock).toContain("await this.listMobileAdapters({ globalCandidates: candidates })");
+    expect(boardBlock.match(/listGlobalTaskCandidates/g)?.length).toBe(1);
+  });
+
   test("reports an open terminal separately from a daemon-connected adapter", () => {
+    expect(formatMobileAdapterLabel("deepseek")).toBe("DeepSeek Harness");
     expect(resolveMobileAdapterDisplayStatus({
       visibleClientOpen: true,
     })).toBe("open");
@@ -516,8 +614,13 @@ describe("werelay-daemon helpers", () => {
     })).toBe("busy");
     expect(resolveMobileAdapterDisplayStatus({
       slotStatus: "awaiting_approval",
+      hasRunningTask: true,
       visibleClientOpen: true,
     })).toBe("awaiting_approval");
+    expect(resolveMobileAdapterDisplayStatus({
+      slotStatus: "idle",
+      hasRunningTask: true,
+    })).toBe("busy");
     expect(resolveMobileAdapterDisplayStatus({})).toBe("stopped");
   });
 
@@ -692,14 +795,38 @@ describe("werelay-daemon helpers", () => {
     );
   });
 
-  test("routes a plain follow-up to the task named by the latest task notification", () => {
-    expect(resolveCodexWechatReplyThreadId({
+  test("routes a plain follow-up to the latest notified task across terminals", () => {
+    expect(resolveDaemonWechatReplyTarget({
+      currentAdapter: "codex",
       currentThreadId: "thread-3",
-      notifiedThreadId: "thread-2",
-    })).toBe("thread-2");
-    expect(resolveCodexWechatReplyThreadId({
+      latestTask: {
+        adapter: "workbuddy",
+        sessionId: "thread-2",
+      },
+    })).toEqual({ adapter: "workbuddy", threadId: "thread-2" });
+    expect(resolveDaemonWechatReplyTarget({
+      currentAdapter: "codex",
       currentThreadId: "thread-3",
-    })).toBe("thread-3");
+    })).toEqual({ adapter: "codex", threadId: "thread-3" });
+  });
+
+  test("always resolves explicit 任务x content against the global task snapshot", () => {
+    expect(shouldResolveTaskTargetAgainstGlobalSnapshot({
+      text: "任务2：继续处理",
+      activeScope: "adapter",
+    })).toBe(true);
+    expect(shouldResolveTaskTargetAgainstGlobalSnapshot({
+      text: "任务 2 : 继续处理",
+      activeScope: "adapter",
+    })).toBe(true);
+    expect(shouldResolveTaskTargetAgainstGlobalSnapshot({
+      text: "2：继续处理",
+      activeScope: "adapter",
+    })).toBe(false);
+    expect(shouldResolveTaskTargetAgainstGlobalSnapshot({
+      text: "2：继续处理",
+      activeScope: "global",
+    })).toBe(true);
   });
 
   test("routes number-colon content to the matching stable task number for every adapter", () => {
@@ -1127,7 +1254,9 @@ describe("werelay-daemon helpers", () => {
 
     expect(listStart).toBeGreaterThan(-1);
     expect(listEnd).toBeGreaterThan(listStart);
-    expect(listBlock).toContain('adapter === "codex"');
+    expect(listBlock).toContain("listLightweightAdapterSessions(adapter, this.cwd, 100)");
+    expect(listBlock).not.toContain("runtime.start()");
+    expect(listBlock).not.toContain("createRuntimeHost(buildDaemonTaskCatalogRuntimeOptions");
     expect(listBlock).not.toContain("this.stateStore.getAdapterSessionId(adapter)");
   });
 
@@ -1147,6 +1276,9 @@ describe("werelay-daemon helpers", () => {
   });
 
   test("uses the global task index for bare task commands and preserves the current list scope for navigation", () => {
+    expect(formatTaskListLoadingMessage()).toBe("全部任务正在获取中");
+    expect(formatTaskListLoadingMessage("deepseek")).toBe("DSH最近任务列表获取中");
+    expect(formatTaskListLoadingMessage("workbuddy")).toBe("WorkBuddy最近任务列表获取中");
     expect(isExplicitGlobalTaskListRequest("任务")).toBe(true);
     expect(isExplicitGlobalTaskListRequest("任务列表")).toBe(true);
     expect(isExplicitGlobalTaskListRequest("任务：canvas")).toBe(true);
@@ -1302,7 +1434,7 @@ describe("werelay-daemon helpers", () => {
         url: "http://192.168.50.10:4396/?task=0000000a&key=secret",
       }),
     ).toBe(
-      "[完善移动版消息] 已完成，用时9m 7s\n本次任务：让完成通知明确显示本次处理的具体请求\n\n已完成移动端消息刷新。\n\n发送“全文”查看完整回答；网页版可查看完整任务及列表。\n\nhttp://192.168.50.10:4396/?task=0000000a&key=secret",
+      "[任务 3 · 完善移动版消息] 已完成，用时9m 7s\n本次任务：让完成通知明确显示本次处理的具体请求\n\n已完成移动端消息刷新。\n\n发送“全文”查看完整回答；网页版可查看完整任务及列表。\n\nhttp://192.168.50.10:4396/?task=0000000a&key=secret",
     );
     expect(
       formatCodexTaskCompletionMessage({
@@ -1485,11 +1617,36 @@ describe("werelay-daemon helpers", () => {
 
     expect(messages.length).toBeGreaterThan(1);
     expect(messages.every((message) => message.length <= 1_200)).toBe(true);
-    expect(messages.join("\n")).toContain("[全文任务] 已完成，用时9s");
+    expect(messages.join("\n")).toContain("[任务 8 · 全文任务] 已完成，用时9s");
     expect(messages.join("")).toContain("完整内容".repeat(500));
     expect(messages.at(-1)).toEndWith(
       "http://192.168.50.10:4396/?task=thread&key=secret",
     );
+  });
+
+  test("sends a long preview conclusion in multiple safe messages instead of only the first paragraph", () => {
+    const firstConclusion = "结论一：已修复队列自动续跑。";
+    const lastConclusion = "结论末：网页版与 ClawBot 状态保持一致。";
+    const text = [
+      firstConclusion,
+      ...Array.from({ length: 90 }, (_, index) => `结论 ${index + 2}：${"补充说明".repeat(8)}`),
+      lastConclusion,
+    ].join("\n\n");
+    const messages = formatCodexTaskCompletionMessages({
+      title: "长结论任务",
+      outcome: "completed",
+      durationMs: 61_000,
+      text,
+      url: "https://werelay.example/?task=thread-long",
+      mode: "preview",
+    });
+
+    expect(messages.length).toBeGreaterThan(1);
+    expect(messages.every((message) => message.length <= 1_200)).toBe(true);
+    expect(messages.join("\n")).toContain(firstConclusion);
+    expect(messages.join("\n")).toContain("后面还有");
+    expect(messages.at(-1)).toEndWith("https://werelay.example/?task=thread-long");
+    expect(messages.join("\n")).not.toContain(lastConclusion);
   });
 
   test("formats the current task latest full reply for on-demand fallback", () => {
@@ -1596,13 +1753,13 @@ describe("werelay-daemon helpers", () => {
     expect(temporarilyUnavailable.observation.runningSinceMs).toBe(1_000);
   });
 
-  test("keeps the terminal prefix at entry and uses only task labels afterwards", () => {
+  test("keeps the terminal prefix at entry and starts task messages with their number", () => {
     expect(prefixDaemonAdapterMessage("codex", "已进入 Codex。"))
       .toBe("[Codex]\n已进入 Codex。");
     expect(prefixDaemonAdapterMessage("deepseek", "已切换。"))
       .toBe("[DSH]\n已切换。");
     expect(prefixDaemonTaskMessage("codex", "需要审批", 3, "thread_a"))
-      .toBe("[Codex 任务]\n需要审批");
+      .toBe("[任务 3 · Codex 任务]\n需要审批");
     expect(prefixDaemonTaskMessage("claude", "任务已继续"))
       .toBe("任务已继续");
     expect(prefixDaemonTaskMessage(
@@ -1618,7 +1775,30 @@ describe("werelay-daemon helpers", () => {
       3,
       "thread_a",
       "codex-clawbot",
-    )).toBe("[WeRelay]\n需要审批");
+    )).toBe("[任务 3 · WeRelay]\n需要审批");
+    expect(formatDaemonTaskScopedMessage({
+      adapter: "workbuddy",
+      text: "已发送，WorkBuddy 正在处理。",
+      taskNumber: 4,
+      threadId: "workbuddy-a",
+      taskTitle: "整理服务器列表",
+      url: "https://werelay.example/t/task-4",
+    })).toBe(
+      "[WorkBuddy · 整理服务器列表]\n" +
+      "已发送，WorkBuddy 正在处理。\n\n" +
+      "https://werelay.example/t/task-4",
+    );
+  });
+
+  test("handles ClawBot help before requiring an active terminal", () => {
+    expect(formatDaemonWechatHelp()).toContain("ClawBot 指令");
+    expect(formatDaemonWechatHelp("deepseek")).toContain("当前终端：DeepSeek Harness");
+    const source = readRepoFile("src/daemon/werelay-daemon.ts");
+    const inboundStart = source.indexOf("  private async handleInboundMessage(");
+    const noSlotCheck = source.indexOf("    const slot = this.getActiveSlot();", inboundStart);
+    const helpCheck = source.indexOf("isDaemonWechatHelpCommand(message.text)", inboundStart);
+    expect(helpCheck).toBeGreaterThan(inboundStart);
+    expect(helpCheck).toBeLessThan(noSlotCheck);
   });
 
   test("does not reuse an older turn reply as the next completion preview", () => {
@@ -1965,7 +2145,7 @@ describe("werelay-daemon helpers", () => {
     expect(block).toContain("已新建");
     expect(block).toContain("直接发送消息即可开始");
     expect(block).toContain("command.input");
-    expect(block).toContain("suppressCodexAcceptedNotice");
+    expect(block).toContain("suppressAcceptedNotice");
     expect(block).toContain("本次任务");
     expect(block).not.toContain("clearDeferredCodexInboundMessages");
     expect(block).not.toContain("activeTasks.clear");
@@ -2005,12 +2185,28 @@ describe("werelay-daemon helpers", () => {
     expect(switchStart).toBeGreaterThan(-1);
     expect(switchEnd).toBeGreaterThan(switchStart);
     expect(switchBlock).toContain("activate: false");
+    expect(switchBlock.indexOf("formatTaskListLoadingMessage(switchAdapter)")).toBeLessThan(
+      switchBlock.indexOf("result = await this.ensureSlot"),
+    );
     expect(switchBlock).toContain("if (!result.activated)");
     expect(switchBlock).toContain("await retrySwitchedAdapterTaskList(");
     expect(switchBlock).toContain("this.activeAdapter = switchAdapter;");
     expect(switchBlock).toContain("await this.handleSystemCommand(message, switchedSlot, {");
     expect(switchBlock).toContain('type: "resume"');
     expect(switchBlock).toContain("preserveTaskSnapshot: true");
+  });
+
+  test("acknowledges a fresh global task-list request before reading every terminal", () => {
+    const source = readRepoFile("src/daemon/werelay-daemon.ts");
+    const start = source.indexOf("  private async handleGlobalTaskCommand(");
+    const end = source.indexOf("\n  private async ", start + 10);
+    const block = source.slice(start, end);
+
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    expect(block.indexOf("formatTaskListLoadingMessage()")).toBeLessThan(
+      block.indexOf("await this.listWechatGlobalTaskCandidates()"),
+    );
   });
 
   test("retries exact global task restore while the companion is still starting", () => {
@@ -2044,7 +2240,7 @@ describe("werelay-daemon helpers", () => {
     expect(inboundBlock.indexOf("resolveGlobalTaskTargetedMessage")).toBeLessThan(
       inboundBlock.indexOf("resolveDaemonTaskTargetedMessage"),
     );
-    expect(inboundBlock).toContain('this.activeTaskListScope === "global"');
+    expect(inboundBlock).toContain("shouldResolveTaskTargetAgainstGlobalSnapshot");
     expect(inboundBlock).toContain("resolveDaemonTaskListScope");
     expect(inboundBlock).toContain("{ ...command, taskListScope }");
     expect(systemBlock).toContain('command.taskListScope === "global"');
@@ -2105,6 +2301,31 @@ describe("werelay-daemon helpers", () => {
         hasActiveTask: true,
       }),
     ).toBe(false);
+  });
+
+  test("formats task delivery receipts for every terminal with clear accepted and queued states", () => {
+    expect(formatDaemonTaskDispatchReceipt("workbuddy", {})).toBe(
+      "已发送，WorkBuddy 正在处理。\n完成后会在微信通知你；可打开下方链接查看实时进展。",
+    );
+    expect(formatDaemonTaskDispatchReceipt("deepseek", {
+      queued: true,
+      queuePosition: 3,
+    })).toBe(
+      "消息已排队（第 3 条），当前任务完成后自动发送。\n可打开下方链接查看队列和任务进展。",
+    );
+    expect(formatDaemonTaskDispatchReceipt("claude", { duplicate: true })).toBe(
+      "与最近一条消息相同，未重复发送。\n可打开下方链接查看任务状态。",
+    );
+  });
+
+  test("sends the task-scoped delivery receipt with a mobile link for every adapter", () => {
+    const source = readRepoFile("src/daemon/werelay-daemon.ts");
+    const start = source.indexOf("  private async dispatchInboundWechatText(");
+    const end = source.indexOf("\n  private async dispatchMobileText", start);
+    const block = source.slice(start, end);
+    expect(block).toContain("formatDaemonTaskDispatchReceipt(slot.adapter, sendResult)");
+    expect(block).toContain("if (!options.suppressAcceptedNotice)");
+    expect(block).toContain("this.prefixSlotMessageWithMobileLink(");
   });
 
   test("parseDaemonSwitchCommand recognizes terminal switch commands", () => {
@@ -2410,7 +2631,7 @@ describe("werelay-daemon helpers", () => {
         "0000000a-0000-7000-8000-00000000000a",
         "示例任务",
       ),
-    ).toBe("[示例任务]\n第一个任务已完成");
+    ).toBe("[任务 3 · 示例任务]\n第一个任务已完成");
     expect(
       prefixDaemonTaskMessage(
         "codex",

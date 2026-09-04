@@ -25,6 +25,7 @@ import {
   isClaudeProviderKind,
 } from "./bridge-providers.ts";
 import { formatTaskProjectLabel } from "./task-list-format.ts";
+import { formatTaskListDisplayTitle } from "./task-list-display.ts";
 
 const ANSI_ESCAPE_RE =
   // eslint-disable-next-line no-control-regex
@@ -465,6 +466,7 @@ export function parseSystemCommand(text: string): SystemCommand | null {
   switch (command) {
     case "/status":
       return { type: "status" };
+    case "/h":
     case "/help":
       return { type: "help" };
     case "/full":
@@ -654,7 +656,7 @@ export function parseWechatControlCommand(
   }
 }
 
-const WERELAY_RESERVED_SLASH_COMMAND_RE = /^(?:\/(?:tasks|threads|task|thread|resume|next|prev|new|new-session|stop|full|brief|preview|全文|预览|confirm|yes|deny|no|answer)|\/t[1-9]\d*)$/i;
+const WERELAY_RESERVED_SLASH_COMMAND_RE = /^(?:\/(?:h|help|tasks|threads|task|thread|resume|next|prev|new|new-session|stop|full|brief|preview|全文|预览|confirm|yes|deny|no|answer)|\/t[1-9]\d*)$/i;
 
 export function shouldForwardNativeSlashCommand(
   text: string,
@@ -1552,7 +1554,7 @@ function formatResumeSessionRuntimeMarkers(
 
   const currentWorkerMarker = isCurrent
     ? currentWorkerStatus === "busy"
-      ? "处理中"
+      ? "处理中 🟢"
       : currentWorkerStatus === "awaiting_approval"
         ? "待审批"
         : currentWorkerStatus === "awaiting_input"
@@ -1577,7 +1579,7 @@ function formatResumeSessionRuntimeMarkers(
     } else if (status.activeFlags.includes("waitingOnUserInput")) {
       markers.push("待输入");
     } else {
-      markers.push("处理中");
+      markers.push("处理中 🟢");
     }
   } else if (status?.type === "systemError") {
     markers.push("异常");
@@ -1643,7 +1645,7 @@ export function formatResumeSessionList(params: {
         isCurrent,
         currentWorkerStatus,
       );
-      return `${resolvedStartIndex + index + 1}. ${formatTaskProjectLabel(candidate)}${candidate.title}${markers}`;
+      return `${resolvedStartIndex + index + 1}. ${formatTaskProjectLabel(candidate)}${formatTaskListDisplayTitle(candidate.title)}${markers}`;
     }),
     ...formatResumeSessionInstructions({
       hasMore,
@@ -1663,7 +1665,7 @@ export function formatResumeSessionSearchResults(params: {
   const visibleMatches = params.matches.slice(0, limit);
   const remaining = Math.max(0, params.matches.length - visibleMatches.length);
   return [
-    `搜索“${params.target}”`,
+    `搜索“${formatTaskListDisplayTitle(params.target, 48)}”`,
     ...visibleMatches.map((match) => {
       const isCurrent = Boolean(
         params.currentSessionId && match.candidate.sessionId === params.currentSessionId,
@@ -1673,28 +1675,40 @@ export function formatResumeSessionSearchResults(params: {
         isCurrent,
         params.currentWorkerStatus,
       );
-      return `${match.index + 1}. ${formatTaskProjectLabel(match.candidate)}${match.candidate.title}${markers}`;
+      return `${match.index + 1}. ${formatTaskProjectLabel(match.candidate)}${formatTaskListDisplayTitle(match.candidate.title)}${markers}`;
     }),
     "回复序号进入；补充关键词可缩小范围",
     ...(remaining > 0 ? [`还有 ${remaining} 条，请补充关键词缩小范围。`] : []),
   ].join("\n");
 }
 
-export function formatCodexWechatHelp(): string {
+export function formatClawBotWechatHelp(
+  adapter?: BridgeAdapterKind,
+  adapterLabel?: string,
+): string {
+  const header = adapter
+    ? ["ClawBot 指令", `当前终端：${adapterLabel || getBridgeProvider(adapter).label}`, ""]
+    : ["ClawBot 指令", ""];
   return [
-    "Codex 微信使用",
+    ...header,
     "查看任务：发送“任务”",
-    "进入任务：发送“任务：2”",
+    "进入任务：回复任务序号",
     "指定任务发送：发送“数字：内容”或“任务数字：内容”（如：任务6：继续处理）",
     "搜索任务：发送“任务 canvas”、“任务canvas”或“任务：canvas”",
     "新建任务：发送“新建：内容”",
-    "继续对话：直接发送消息",
+    "直接发送内容：继续最近一条任务消息",
     "查看进度：发送“状态”",
     "停止任务：发送“停止”",
-    "完整回答：发送“全文”",
+    ...(!adapter || adapter === "codex" ? ["Codex 完整回答：发送“全文”"] : []),
     "翻页：发送“下一页”、“下一页20”或“上一页”",
+    "切换终端：/codex、/workbuddy、/claude、/tclaude、/grok、/codebuddy、/reasonix、/deepseek 或 /opencode",
+    "帮助：/h 或 /help",
     "任务运行较久时，可打开消息中的网页版链接查看实时进展。",
   ].join("\n");
+}
+
+export function formatCodexWechatHelp(): string {
+  return formatClawBotWechatHelp("codex");
 }
 
 function collectDesktopAttachmentAliases(text: string): {
@@ -2312,15 +2326,20 @@ function parseSingleUserInputAnswer(
   const answers: string[] = [];
 
   if (selection) {
-    const selectedLabel = resolveUserInputOptionLabel(question, selection);
-    if (selectedLabel) {
-      answers.push(selectedLabel);
-    } else if (question.isOther) {
-      note = note ? `${selection}; ${note}` : selection;
-    } else {
-      return {
-        error: `“${question.header}”请回复选项数字或名称。`,
-      };
+    const selections = question.multiSelect
+      ? selection.split(/\s*[,，、+]\s*/).map((value) => value.trim()).filter(Boolean)
+      : [selection];
+    for (const value of selections) {
+      const selectedLabel = resolveUserInputOptionLabel(question, value);
+      if (selectedLabel) {
+        if (!answers.includes(selectedLabel)) answers.push(selectedLabel);
+      } else if (question.isOther) {
+        note = note ? `${value}; ${note}` : value;
+      } else {
+        return {
+          error: `“${question.header}”请回复选项数字或名称。`,
+        };
+      }
     }
   }
 
@@ -2445,7 +2464,7 @@ export function formatUserInputRequestMessage(
         : `${question.options?.length ? "请选择" : "请补充"}：${truncatePreview(question.header, 40)}`,
     );
     if (question.options?.length) {
-      lines.push("选项：");
+      lines.push(question.multiSelect ? "选项（可多选）：" : "选项：");
       question.options.forEach((option, optionIndex) => {
         const description = option.description.trim();
         lines.push(
@@ -2454,6 +2473,9 @@ export function formatUserInputRequestMessage(
             : `  ${optionIndex + 1}. ${option.label}`,
         );
       });
+      if (question.multiSelect) {
+        lines.push("多选可用逗号分隔，如 1,3。");
+      }
     }
     if (question.isOther) {
       lines.push("可补充自定义说明。");

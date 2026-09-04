@@ -410,7 +410,13 @@ describe("Codex desktop IPC client", () => {
     const turn = await client.startTurn("thread-1", [
       { type: "text", text: "真实桌面消息" },
       { type: "localImage", path: "/tmp/mobile-image.png" },
-    ], { model: "gpt-5.6-terra" });
+    ], {
+      model: "gpt-5.6-terra",
+      approvalPolicy: "never",
+      approvalsReviewer: "user",
+      sandbox: "danger-full-access",
+      sandboxPolicy: { type: "dangerFullAccess" },
+    });
 
     expect(turn).toMatchObject({ id: "turn-1", status: "inProgress" });
     expect(
@@ -427,6 +433,10 @@ describe("Codex desktop IPC client", () => {
               { type: "localImage", path: "/tmp/mobile-image.png" },
             ],
             model: "gpt-5.6-terra",
+            approvalPolicy: "never",
+            approvalsReviewer: "user",
+            sandbox: "danger-full-access",
+            sandboxPolicy: { type: "dangerFullAccess" },
           },
         },
       },

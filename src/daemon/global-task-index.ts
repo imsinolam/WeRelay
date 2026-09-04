@@ -5,6 +5,7 @@ import {
 } from "../bridge/bridge-providers.ts";
 import type { BridgeResumeSessionCandidate } from "../bridge/bridge-types.ts";
 import { resolveTaskProjectName } from "../bridge/task-list-format.ts";
+import { formatTaskListDisplayTitle } from "../bridge/task-list-display.ts";
 
 export type GlobalTaskCandidate = BridgeResumeSessionCandidate & {
   adapter: DaemonAdapterKind;
@@ -243,9 +244,16 @@ function runtimeMarker(candidate: GlobalTaskCandidate): string {
   if (status?.type === "active") {
     if (status.activeFlags.includes("waitingOnApproval")) return " · 待审批";
     if (status.activeFlags.includes("waitingOnUserInput")) return " · 待输入";
-    return " · 处理中";
+    return " · 处理中 🟢";
   }
   return status?.type === "systemError" ? " · 异常" : "";
+}
+
+export function formatGlobalTaskDisplayTitle(
+  value: string,
+  maxChars?: number,
+): string {
+  return formatTaskListDisplayTitle(value, maxChars);
 }
 
 function taskIdentityLabel(
@@ -257,7 +265,7 @@ function taskIdentityLabel(
     parts.push(getBridgeProvider(candidate.adapter).label);
   }
   const projectName = resolveTaskProjectName(candidate);
-  if (projectName) parts.push(projectName);
+  if (projectName) parts.push(formatGlobalTaskDisplayTitle(projectName, 36));
   return parts.length > 0 ? `[${parts.join(" · ")}] ` : "";
 }
 
@@ -294,10 +302,9 @@ export function formatGlobalTaskList(params: {
   }
   const showAdapterLabels = true;
   return [
-    "最近任务",
-    "全部终端 · 按更新时间排序",
+    "全部任务",
     ...page.candidates.map((candidate, index) => (
-      `${page.startIndex + index + 1}. ${taskIdentityLabel(candidate, showAdapterLabels)}${candidate.title}${runtimeMarker(candidate)}`
+      `${page.startIndex + index + 1}. ${taskIdentityLabel(candidate, showAdapterLabels)}${formatGlobalTaskDisplayTitle(candidate.title)}${runtimeMarker(candidate)}`
     )),
     ...globalTaskInstructionLines(page),
   ].join("\n");
@@ -310,12 +317,12 @@ export function formatGlobalTaskSearchResults(params: {
 }): string {
   const showAdapterLabels = true;
   return [
-    `搜索“${params.target}”`,
+    `搜索“${formatGlobalTaskDisplayTitle(params.target, 48)}”`,
     ...params.matches.map((candidate) => {
       const number = params.snapshot.numberByIdentity.get(
         globalTaskIdentityKey(candidate.adapter, candidate.sessionId),
       );
-      return `${number ?? "?"}. ${taskIdentityLabel(candidate, showAdapterLabels)}${candidate.title}${runtimeMarker(candidate)}`;
+      return `${number ?? "?"}. ${taskIdentityLabel(candidate, showAdapterLabels)}${formatGlobalTaskDisplayTitle(candidate.title)}${runtimeMarker(candidate)}`;
     }),
     "回复序号进入；补充关键词可缩小范围",
   ].join("\n");

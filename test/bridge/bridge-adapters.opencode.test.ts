@@ -3145,6 +3145,7 @@ describe("OpenCode stored sessions", () => {
     const path = await import("node:path");
     const {
       listOpenCodeStoredSessions,
+      OpenCodeServerAdapter,
       readOpenCodeStoredSessionMessages,
     } = await import("../../src/bridge/bridge-adapters.opencode.ts");
     const storage = fs.mkdtempSync(path.join(os.tmpdir(), "werelay-opencode-"));
@@ -3189,6 +3190,25 @@ describe("OpenCode stored sessions", () => {
       expect(listOpenCodeStoredSessions(10, storage)).toMatchObject([
         { id: sessionId, title: "继续 OpenCode 任务", directory: "/repo/opencode" },
       ]);
+      const previousStorage = process.env.OPENCODE_STORAGE_DIR;
+      process.env.OPENCODE_STORAGE_DIR = storage;
+      try {
+        const adapter = new OpenCodeServerAdapter({
+          kind: "opencode",
+          command: "opencode",
+          cwd: "/repo/opencode",
+        });
+        const [candidate] = await adapter.listResumeSessions(10);
+        expect(candidate).toMatchObject({
+          title: "继续 OpenCode 任务",
+          cwd: "/repo/opencode",
+        });
+        expect(candidate?.projectId).toBeUndefined();
+        expect(candidate?.projectName).toBeUndefined();
+      } finally {
+        if (previousStorage === undefined) delete process.env.OPENCODE_STORAGE_DIR;
+        else process.env.OPENCODE_STORAGE_DIR = previousStorage;
+      }
       expect(readOpenCodeStoredSessionMessages(sessionId, storage)).toEqual([
         { role: "user", text: "继续任务", id: "user" },
         {

@@ -13,6 +13,7 @@ import {
 import type {
   BridgeMessageImage,
   BridgeResumeSessionCandidate,
+  BridgeResumeSessionRuntimeStatus,
   BridgeSessionMessage,
 } from "./bridge-types.ts";
 import {
@@ -35,6 +36,13 @@ const GROK_LEADER_POLL_INTERVAL_MS = 100;
 const GROK_EXISTING_LEADER_READY_TIMEOUT_MS = 3_000;
 const GROK_LEADER_EXIT_TIMEOUT_MS = 4_000;
 const GROK_PROCESS_PROBE_MAX_BUFFER_BYTES = 4 * 1024 * 1024;
+const GROK_EVENT_TAIL_MAX_BYTES = 1024 * 1024;
+const GROK_LIVE_EVENT_CACHE_TTL_MS = 2_000;
+
+const grokLiveEventPathCache = new Map<string, {
+  expiresAtMs: number;
+  paths: Set<string>;
+}>();
 
 type GrokLeaderSocketOptions = {
   platform?: NodeJS.Platform;
@@ -454,10 +462,130 @@ export function parseGrokChatHistory(text: string): BridgeSessionMessage[] {
   return messages;
 }
 
+function parseGrokLiveEventPaths(
+  lsofOutput: string,
+  sessionsRoot: string,
+): Set<string> {
+  const normalizedRoot = `${path.resolve(sessionsRoot)}${path.sep}`;
+  const eventPaths = new Set<string>();
+  for (const line of lsofOutput.split(/\r?\n/)) {
+    if (!line.startsWith("n") || line.length <= 1) continue;
+    const candidate = path.resolve(line.slice(1));
+    if (
+      candidate.startsWith(normalizedRoot) &&
+      path.basename(candidate) === "events.jsonl"
+    ) {
+      eventPaths.add(candidate);
+    }
+  }
+  return eventPaths;
+}
+
+function probeGrokLiveEventPaths(sessionsRoot: string): Set<string> {
+  if (process.platform === "win32") return new Set();
+  const cacheKey = path.resolve(sessionsRoot);
+  const cached = grokLiveEventPathCache.get(cacheKey);
+  if (cached && cached.expiresAtMs > Date.now()) return cached.paths;
+  try {
+    const result = spawnSync("lsof", ["-nP", "-Fpn", "-c", "grok"], {
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: 2_000,
+      maxBuffer: GROK_PROCESS_PROBE_MAX_BUFFER_BYTES,
+    });
+    if (result.error || (result.status !== 0 && result.status !== 1)) {
+      return new Set();
+    }
+    const paths = parseGrokLiveEventPaths(result.stdout ?? "", sessionsRoot);
+    grokLiveEventPathCache.set(cacheKey, {
+      expiresAtMs: Date.now() + GROK_LIVE_EVENT_CACHE_TTL_MS,
+      paths,
+    });
+    return paths;
+  } catch {
+    return new Set();
+  }
+}
+
+function readGrokEventTail(eventsPath: string): string {
+  try {
+    const stat = fs.statSync(eventsPath);
+    const bytesToRead = Math.min(stat.size, GROK_EVENT_TAIL_MAX_BYTES);
+    if (bytesToRead <= 0) return "";
+    const buffer = Buffer.allocUnsafe(bytesToRead);
+    const fd = fs.openSync(eventsPath, "r");
+    try {
+      fs.readSync(fd, buffer, 0, bytesToRead, stat.size - bytesToRead);
+    } finally {
+      fs.closeSync(fd);
+    }
+    let text = buffer.toString("utf8");
+    if (bytesToRead < stat.size) {
+      const firstLineBreak = text.indexOf("\n");
+      text = firstLineBreak >= 0 ? text.slice(firstLineBreak + 1) : "";
+    }
+    return text;
+  } catch {
+    return "";
+  }
+}
+
+function inferGrokLiveRuntimeStatus(eventsPath: string): BridgeResumeSessionRuntimeStatus {
+  let turnActive = false;
+  let sawTurnActivity = false;
+  for (const line of readGrokEventTail(eventsPath).split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let event: unknown;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!isRecord(event)) continue;
+    const type = readString(event.type);
+    if (type === "turn_started") {
+      sawTurnActivity = true;
+      turnActive = true;
+      continue;
+    }
+    if (type === "turn_ended") {
+      sawTurnActivity = true;
+      turnActive = false;
+      continue;
+    }
+    if (type === "permission_requested") {
+      sawTurnActivity = true;
+      turnActive = true;
+      continue;
+    }
+    if (type === "permission_resolved") continue;
+    if (
+      type === "loop_started" ||
+      type === "phase_changed" ||
+      type === "first_token" ||
+      type === "tool_started" ||
+      type === "tool_completed"
+    ) {
+      sawTurnActivity = true;
+      turnActive = true;
+    }
+  }
+  if (!sawTurnActivity || !turnActive) return { type: "idle" };
+  return { type: "active", activeFlags: [] };
+}
+
+type ListGrokStoredSessionsOptions = {
+  liveEventPaths?: Iterable<string>;
+};
+
 export function listGrokStoredSessions(
   limit = 10,
+  options: ListGrokStoredSessionsOptions = {},
 ): BridgeResumeSessionCandidate[] {
   const sessionsRoot = path.join(grokHomeDirectory(), "sessions");
+  const liveEventPaths = options.liveEventPaths === undefined
+    ? probeGrokLiveEventPaths(sessionsRoot)
+    : new Set([...options.liveEventPaths].map((eventPath) => path.resolve(eventPath)));
   const candidates: BridgeResumeSessionCandidate[] = [];
   let projects: fs.Dirent[];
   try {
@@ -498,13 +626,16 @@ export function listGrokStoredSessions(
       const lastUpdatedAt = readString(summary.last_active_at) ??
         readString(summary.updated_at) ??
         stat.mtime.toISOString();
+      const eventsPath = path.join(directory, "events.jsonl");
       candidates.push({
         sessionId,
         threadId: sessionId,
         title,
         lastUpdatedAt,
-        ...(cwd ? { cwd, projectName: path.basename(cwd) || cwd } : {}),
-        runtimeStatus: { type: "notLoaded" },
+        ...(cwd ? { cwd } : {}),
+        runtimeStatus: liveEventPaths.has(path.resolve(eventsPath))
+          ? inferGrokLiveRuntimeStatus(eventsPath)
+          : { type: "notLoaded" },
       });
     }
   }

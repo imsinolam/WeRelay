@@ -39,6 +39,9 @@ describe("LegacyAdapterRuntime optional capabilities", () => {
     expect(runtime.createSessionInProject).toBeUndefined();
     expect(runtime.getSessionModelState).toBeUndefined();
     expect(runtime.setSessionModel).toBeUndefined();
+    expect(runtime.setSessionReasoningEffort).toBeUndefined();
+    expect(runtime.getSessionPermissionState).toBeUndefined();
+    expect(runtime.setSessionPermission).toBeUndefined();
     expect(runtime.resolveApprovalRequest).toBeUndefined();
   });
 
@@ -77,6 +80,37 @@ describe("LegacyAdapterRuntime optional capabilities", () => {
         return {
           currentModel: model,
           options: [{ id: model }],
+          canChange: true,
+        };
+      },
+      async setSessionReasoningEffort(sessionId, reasoningEffort) {
+        expect(this).toBe(adapter);
+        expect(sessionId).toBe("session-1");
+        expect(reasoningEffort).toBe("high");
+        return {
+          currentModel: "gpt-5.6-terra",
+          currentReasoningEffort: reasoningEffort,
+          reasoningEffortOptions: [{ id: reasoningEffort }],
+          options: [{ id: "gpt-5.6-terra" }],
+          canChange: true,
+        };
+      },
+      async getSessionPermissionState(sessionId) {
+        expect(this).toBe(adapter);
+        expect(sessionId).toBe("session-1");
+        return {
+          currentPermission: "workspace-write",
+          options: [{ id: "workspace-write" }, { id: "danger-full-access" }],
+          canChange: true,
+        };
+      },
+      async setSessionPermission(sessionId, permission) {
+        expect(this).toBe(adapter);
+        expect(sessionId).toBe("session-1");
+        expect(permission).toBe("danger-full-access");
+        return {
+          currentPermission: permission,
+          options: [{ id: permission }],
           canChange: true,
         };
       },
@@ -122,6 +156,22 @@ describe("LegacyAdapterRuntime optional capabilities", () => {
       currentModel: "gpt-5.6-terra",
       options: [{ id: "gpt-5.6-terra" }],
       canChange: true,
+    });
+    expect(await runtime.setSessionReasoningEffort?.("session-1", "high")).toEqual({
+      currentModel: "gpt-5.6-terra",
+      currentReasoningEffort: "high",
+      reasoningEffortOptions: [{ id: "high" }],
+      options: [{ id: "gpt-5.6-terra" }],
+      canChange: true,
+    });
+    expect(await runtime.getSessionPermissionState?.("session-1")).toMatchObject({
+      currentPermission: "workspace-write",
+    });
+    expect(await runtime.setSessionPermission?.(
+      "session-1",
+      "danger-full-access",
+    )).toMatchObject({
+      currentPermission: "danger-full-access",
     });
     expect(runtime.createSessionInProject).toBeFunction();
     await runtime.createSessionInProject?.("source-session");

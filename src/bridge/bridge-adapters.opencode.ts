@@ -500,8 +500,6 @@ export class OpenCodeServerAdapter implements BridgeAdapter {
       title: session.title || `会话 ${session.id.slice(0, 8)}`,
       lastUpdatedAt: new Date(session.time.updated).toISOString(),
       cwd: session.directory,
-      projectId: session.projectID,
-      projectName: session.directory.split(/[\\/]/).filter(Boolean).at(-1) || "OpenCode",
       runtimeStatus: session.id === this.activeSessionId
         ? this.state.status === "busy" || this.state.status === "awaiting_approval"
           ? {

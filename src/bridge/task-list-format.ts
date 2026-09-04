@@ -1,6 +1,7 @@
 import path from "node:path";
 
 import type { BridgeResumeSessionCandidate } from "./bridge-types.ts";
+import { formatTaskListDisplayTitle } from "./task-list-display.ts";
 
 function isGeneratedCodexWorkspace(cwd: string | undefined): boolean {
   if (!cwd) return false;
@@ -26,5 +27,5 @@ export function formatTaskProjectLabel(
   candidate: Pick<BridgeResumeSessionCandidate, "projectName" | "cwd">,
 ): string {
   const projectName = resolveTaskProjectName(candidate);
-  return projectName ? `[${projectName}] ` : "";
+  return projectName ? `[${formatTaskListDisplayTitle(projectName, 36)}] ` : "";
 }

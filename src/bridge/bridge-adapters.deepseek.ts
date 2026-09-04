@@ -13,6 +13,8 @@ import type {
   BridgeSessionMessagePage,
   BridgeSessionMessagePageOptions,
   BridgeSessionModelState,
+  BridgeSessionPermissionOption,
+  BridgeSessionPermissionState,
   BridgeSessionProgressItem,
   BridgeSessionRunSummary,
   BridgeSessionSendResult,
@@ -35,6 +37,13 @@ const DEEPSEEK_DESKTOP_RECOVERY_TIMEOUT_MS = 20_000;
 const DEEPSEEK_DESKTOP_RECOVERY_POLL_MS = 250;
 
 type UnknownRecord = Record<string, unknown>;
+
+const DEEPSEEK_PERMISSION_LABELS: Record<string, string> = {
+  "read-only": "只读",
+  "workspace-write": "项目内读写",
+  "danger-full-access": "完全访问",
+  custom: "自定义权限",
+};
 
 export type DeepSeekHarnessSessionEvent = {
   type: string;
@@ -412,6 +421,7 @@ export class DeepSeekHarnessHttpClient implements DeepSeekHarnessClientLike {
   constructor(
     private readonly baseUrl: string,
     private readonly fetchFn: typeof fetch = fetch,
+    private readonly requestTimeoutMs = DEEPSEEK_HARNESS_HTTP_TIMEOUT_MS,
   ) {}
 
   async describeHost() {
@@ -491,7 +501,7 @@ export class DeepSeekHarnessHttpClient implements DeepSeekHarnessClientLike {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(message),
-      signal: AbortSignal.timeout(DEEPSEEK_HARNESS_HTTP_TIMEOUT_MS),
+      signal: AbortSignal.timeout(this.requestTimeoutMs),
     });
     if (!response.ok) {
       throw new Error(`DeepSeek Harness response transport failed: HTTP ${response.status}`);
@@ -600,7 +610,7 @@ export class DeepSeekHarnessHttpClient implements DeepSeekHarnessClientLike {
         method,
         payload,
       }),
-      signal: AbortSignal.timeout(DEEPSEEK_HARNESS_HTTP_TIMEOUT_MS),
+      signal: AbortSignal.timeout(this.requestTimeoutMs),
     });
     if (!response.ok) {
       throw new Error(`DeepSeek Harness ${method} transport failed: HTTP ${response.status}`);
@@ -685,11 +695,22 @@ function sessionTitle(summary: DeepSeekHarnessSessionSummary): string {
   return title ?? (summary.blank ? "DeepSeek 新任务" : `DeepSeek 任务 ${summary.sessionId.slice(0, 8)}`);
 }
 
+function sessionProject(cwd: string | undefined): {
+  projectId: string;
+  projectName: string;
+} | null {
+  const projectId = cwd?.trim().replace(/[\\/]+$/, "") ?? "";
+  if (!projectId) return null;
+  const projectName = projectId.split(/[\\/]/).at(-1)?.trim() ?? "";
+  return projectName ? { projectId, projectName } : null;
+}
+
 function sessionCandidate(
   summary: DeepSeekHarnessSessionSummary,
   pendingApprovals = false,
   pendingQuestions = false,
 ): BridgeResumeSessionCandidate {
+  const project = sessionProject(summary.cwd);
   const runtimeStatus = summary.running
     ? {
         type: "active" as const,
@@ -704,13 +725,11 @@ function sessionCandidate(
     threadId: summary.sessionId,
     title: sessionTitle(summary),
     lastUpdatedAt: new Date(summary.updatedAt).toISOString(),
-    ...(summary.cwd ? { cwd: summary.cwd } : {}),
-    ...(summary.cwd
-      ? {
-          projectId: summary.cwd,
-          projectName: path.basename(summary.cwd) || "DSH",
-        }
-      : {}),
+    ...(project
+      ? { cwd: project.projectId, ...project }
+      : summary.cwd
+        ? { cwd: summary.cwd }
+        : {}),
     runtimeStatus,
   };
 }
@@ -718,8 +737,13 @@ function sessionCandidate(
 export async function listDeepSeekHarnessSessions(
   limit = 100,
   baseUrl = resolveDeepSeekHarnessBaseUrl(),
+  options: { timeoutMs?: number } = {},
 ): Promise<BridgeResumeSessionCandidate[]> {
-  const client = new DeepSeekHarnessHttpClient(baseUrl);
+  const client = new DeepSeekHarnessHttpClient(
+    baseUrl,
+    fetch,
+    options.timeoutMs ?? DEEPSEEK_HARNESS_HTTP_TIMEOUT_MS,
+  );
   return (await client.listSessions()).slice(0, Math.max(0, limit)).map((item) =>
     sessionCandidate(item)
   );
@@ -830,6 +854,7 @@ export class DeepSeekHarnessAdapter implements BridgeAdapter {
   private readonly deliveredTurns = new Set<string>();
   private readonly historyReconciliationBySession = new Map<string, Promise<void>>();
   private readonly recoveryTaskBySession = new Map<string, Promise<void>>();
+  private readonly permissionSelectionBySession = new Map<string, string>();
   private muxOutageNoticeActive = false;
   private muxLastOutageNoticeAt = 0;
 
@@ -1197,18 +1222,49 @@ export class DeepSeekHarnessAdapter implements BridgeAdapter {
     };
   }
 
+  private reasoningEffortOptions(current?: string): Array<{
+    id: string;
+    label: string;
+  }> {
+    if (!current?.trim()) return [];
+    const options = [
+      { id: "low", label: "低" },
+      { id: "medium", label: "中" },
+      { id: "high", label: "高" },
+    ];
+    return options.some((option) => option.id === current)
+      ? options
+      : [...options, { id: current, label: current }];
+  }
+
   async getSessionModelState(sessionId: string): Promise<BridgeSessionModelState> {
     const state = await this.client.readModels(sessionId);
+    const reasoningEffortOptions = this.reasoningEffortOptions(
+      state.current.reasoningEffort,
+    );
+    // routable 只说明当前选中的 provider 已不可用；只要目录里还有可切换的
+    // 模型，就必须允许用户改选，否则失效模型（如已下线的 ox-alpha）会把任务
+    // 永久卡在既不能发消息也不能换模型的状态。模型目录继续展开全部 provider，
+    // 供用户精确改选。
+    const options = state.groups.flatMap((group) => group.models.map((model) => ({
+        id: this.modelSelectionId(group.id, model.id),
+        label: model.name,
+        group: group.name,
+        ...(model.description ? { description: model.description } : {}),
+      })));
     return {
       currentModel: this.modelSelectionId(state.current.provider, state.current.model),
-      options: state.groups.flatMap((group) => group.models.map((model) => ({
-        id: this.modelSelectionId(group.id, model.id),
-        label: `${group.name} · ${model.name}`,
-        ...(model.description ? { description: model.description } : {}),
-      }))),
-      canChange: state.routable,
-      ...(!state.routable
-        ? { unavailableReason: "DeepSeek Harness 当前模型路由不可用。" }
+      options,
+      canChange: options.length > 0,
+      ...(state.current.reasoningEffort
+        ? { currentReasoningEffort: state.current.reasoningEffort }
+        : {}),
+      ...(reasoningEffortOptions.length > 0 ? { reasoningEffortOptions } : {}),
+      ...(reasoningEffortOptions.length > 0
+        ? { canChangeReasoningEffort: options.length > 0 }
+        : {}),
+      ...(options.length === 0
+        ? { unavailableReason: "DeepSeek Harness 当前没有可切换的模型。" }
         : {}),
     };
   }
@@ -1235,9 +1291,111 @@ export class DeepSeekHarnessAdapter implements BridgeAdapter {
     await this.client.selectModel(sessionId, {
       provider: group.id,
       model: selectedModel,
-      ...(selectedModel === "deepseek-v4-flash" ? { reasoningEffort: "high" } : {}),
+      ...(current.current.reasoningEffort
+        ? { reasoningEffort: current.current.reasoningEffort }
+        : {}),
     });
     return await this.getSessionModelState(sessionId);
+  }
+
+  async setSessionReasoningEffort(
+    sessionId: string,
+    reasoningEffort: string,
+  ): Promise<BridgeSessionModelState> {
+    const normalizedEffort = reasoningEffort.trim();
+    if (!normalizedEffort) throw new Error("请选择推理强度。");
+    const current = await this.client.readModels(sessionId);
+    const options = this.reasoningEffortOptions(current.current.reasoningEffort);
+    if (!current.routable) {
+      throw new Error("DeepSeek Harness 当前模型路由不可用。");
+    }
+    if (!options.some((option) => option.id === normalizedEffort)) {
+      throw new Error("这个推理强度当前不可用，请重新选择。");
+    }
+    await this.client.selectModel(sessionId, {
+      provider: current.current.provider,
+      model: current.current.model,
+      reasoningEffort: normalizedEffort,
+    });
+    return await this.getSessionModelState(sessionId);
+  }
+
+  async getSessionPermissionState(
+    sessionId: string,
+  ): Promise<BridgeSessionPermissionState> {
+    const normalizedSessionId = sessionId.trim();
+    if (!normalizedSessionId) throw new Error("请选择一个 DeepSeek Harness 任务。");
+    const [history, summary] = await Promise.all([
+      this.client.readHistory(normalizedSessionId, { maxMessages: 1 }),
+      this.client.listSessions().then((sessions) =>
+        sessions.find((item) => item.sessionId === normalizedSessionId)
+      ),
+    ]);
+    if (!summary) throw new Error("没有找到这个 DeepSeek Harness 任务。");
+    const rawPermissions = history.projections?.values?.permissions;
+    const permissions = isRecord(rawPermissions) ? rawPermissions : null;
+    const rawOptions = Array.isArray(permissions?.options) ? permissions.options : [];
+    const options = rawOptions.flatMap((raw): BridgeSessionPermissionOption[] => {
+      if (!isRecord(raw)) return [];
+      const id = readString(raw.value) ?? readString(raw.id);
+      if (!id) return [];
+      const label = DEEPSEEK_PERMISSION_LABELS[id] ?? readString(raw.name) ?? id;
+      const description = readString(raw.description);
+      return [{
+        id,
+        label,
+        ...(description ? { description } : {}),
+        ...(id === "danger-full-access" ? { requiresConfirmation: true } : {}),
+      }];
+    });
+    const projectedPermission = readString(permissions?.currentValue);
+    const selectedPermission = this.permissionSelectionBySession.get(normalizedSessionId);
+    const currentPermission = selectedPermission &&
+        options.some((option) => option.id === selectedPermission)
+      ? selectedPermission
+      : projectedPermission;
+    if (projectedPermission === selectedPermission) {
+      this.permissionSelectionBySession.delete(normalizedSessionId);
+    }
+    const taskRunning = summary.running === true;
+    const hasSelectableOptions = options.some((option) => option.id !== "custom");
+    return {
+      ...(currentPermission ? { currentPermission } : {}),
+      options,
+      canChange: hasSelectableOptions && !taskRunning,
+      ...(!hasSelectableOptions
+        ? { unavailableReason: "DeepSeek Harness 当前任务没有提供可切换的权限范围。" }
+        : taskRunning
+          ? { unavailableReason: "任务正在处理，完成或停止后再切换权限范围。" }
+          : {}),
+    };
+  }
+
+  async setSessionPermission(
+    sessionId: string,
+    permission: string,
+  ): Promise<BridgeSessionPermissionState> {
+    const normalizedSessionId = sessionId.trim();
+    const normalizedPermission = permission.trim();
+    if (!normalizedSessionId) throw new Error("请选择一个 DeepSeek Harness 任务。");
+    if (!normalizedPermission) throw new Error("请选择权限范围。");
+    const state = await this.getSessionPermissionState(normalizedSessionId);
+    if (!state.canChange) {
+      throw new Error(state.unavailableReason || "当前任务暂时不能切换权限范围。");
+    }
+    const option = state.options.find((candidate) => candidate.id === normalizedPermission);
+    if (!option || option.id === "custom") {
+      throw new Error("这个 DeepSeek Harness 权限范围当前不可用。");
+    }
+    await this.client.prompt(normalizedSessionId, [{
+      type: "text",
+      text: `/permission ${normalizedPermission}`,
+    }]);
+    this.permissionSelectionBySession.set(normalizedSessionId, normalizedPermission);
+    return {
+      ...state,
+      currentPermission: normalizedPermission,
+    };
   }
 
   async createSession(): Promise<void> {

@@ -20,6 +20,7 @@ import {
   formatPendingUserInputReminder,
   formatCodexDesktopTaskLatestMessage,
   formatCodexDesktopTaskSelection,
+  formatClawBotWechatHelp,
   formatCodexWechatHelp,
   formatResumeSessionList,
   formatResumeSessionSearchResults,
@@ -44,6 +45,7 @@ import {
   sanitizeWechatInboundPromptForDisplay,
   resolveBareCodexTaskSelection,
   parseWechatControlCommand,
+  parsePendingUserInputAnswerCommand,
   resolveCodexTaskListPageNavigation,
   shouldDropStartupBacklogMessage,
   shouldNotifyTaskInterrupted,
@@ -80,6 +82,8 @@ describe("splitWechatTextIntoChunks", () => {
 describe("parseSystemCommand", () => {
   test("parses supported control commands", () => {
     expect(parseSystemCommand("/status")).toEqual({ type: "status" });
+    expect(parseSystemCommand("/h")).toEqual({ type: "help" });
+    expect(parseSystemCommand("/HELP")).toEqual({ type: "help" });
     expect(parseSystemCommand("/full")).toEqual({
       type: "codex_reply_mode",
       mode: "full",
@@ -229,7 +233,8 @@ describe("parseWechatControlCommand", () => {
       hasPendingUserInput: false,
     };
 
-    expect(parseWechatControlCommand("/help", options)).toBeNull();
+    expect(parseWechatControlCommand("/help", options)).toEqual({ type: "help" });
+    expect(parseWechatControlCommand("/h", options)).toEqual({ type: "help" });
     expect(parseWechatControlCommand("/status", options)).toBeNull();
     expect(parseWechatControlCommand("/reset", options)).toBeNull();
     expect(parseWechatControlCommand("/model claude-sonnet-4-6", options)).toBeNull();
@@ -365,19 +370,31 @@ describe("parseWechatControlCommand", () => {
     })).toEqual({ type: "resume", target: "hooks" });
   });
 
-  test("formats a command-free Codex WeChat help card", () => {
+  test("formats the Codex ClawBot help card", () => {
     const output = formatCodexWechatHelp();
     expect(output).toContain("查看任务：发送“任务”");
-    expect(output).toContain("进入任务：发送“任务：2”");
+    expect(output).toContain("进入任务：回复任务序号");
     expect(output).toContain("任务 canvas");
     expect(output).toContain("任务canvas");
     expect(output).toContain("任务：canvas");
     expect(output).toContain("新建任务：发送“新建：内容”");
-    expect(output).toContain("继续对话：直接发送消息");
+    expect(output).toContain("直接发送内容：继续最近一条任务消息");
     expect(output).toContain("查看进度：发送“状态”");
     expect(output).toContain("下一页20");
+    expect(output).toContain("帮助：/h 或 /help");
     expect(output).not.toContain("/tasks");
     expect(output).not.toContain("/t3");
+  });
+
+  test("formats one concise ClawBot help card for every terminal", () => {
+    const output = formatClawBotWechatHelp("workbuddy");
+    expect(output).toStartWith("ClawBot 指令\n当前终端：WorkBuddy");
+    expect(output).toContain("任务6：继续处理");
+    expect(output).toContain("直接发送内容：继续最近一条任务消息");
+    expect(output).toContain("/codex");
+    expect(output).toContain("/deepseek");
+    expect(output).toContain("帮助：/h 或 /help");
+    expect(output).not.toContain("完整回答");
   });
 
   test("uses numeric approval shortcuts only while an approval is pending", () => {
@@ -1244,10 +1261,29 @@ describe("formatResumeSessionList", () => {
     });
 
     expect(output).toContain("DSH 最近任务");
-    expect(output).toContain("1. [trade_highlow_v3] US中转服务器 · 当前 · 处理中");
+    expect(output).toContain("1. [trade_highlow_v3] US中转服务器 · 当前 · 处理中 🟢");
     expect(output).toContain("2. [DeskRelay] 等待审批 · 待审批");
-    expect(output).not.toContain("🟢");
+    expect(output).toContain("🟢");
     expect(output).not.toContain("[当前]");
+  });
+
+  test("renders task titles without clickable addresses or file names", () => {
+    const output = formatResumeSessionList({
+      adapter: "codex",
+      candidates: [{
+        sessionId: "linked-task",
+        title: "读取 https://example.com/review.md、quality-review.md 和 /Users/test/report.md",
+        lastUpdatedAt: "2026-08-31T10:00:00.000Z",
+        projectName: "docs.example.com",
+      }],
+    });
+
+    expect(output).not.toContain("https://");
+    expect(output).not.toContain("example.com");
+    expect(output).not.toContain("quality-review.md");
+    expect(output).not.toContain("/Users/");
+    expect(output).toContain("quality-review．md");
+    expect(output).toContain("[docs．example．com]");
   });
 
 });
@@ -1363,6 +1399,57 @@ describe("adapter-aware message formatting", () => {
     expect(shouldNotifyTaskInterrupted("interrupted", false)).toBe(false);
     expect(shouldNotifyTaskInterrupted("completed", true)).toBe(false);
     expect(formatTaskInterruptedMessage("codex")).toBe("Codex 任务已中断。");
+  });
+
+  test("parses multi-select answers without treating Ask Question as approval", () => {
+    const pending = {
+      summary: "需要补充信息",
+      questions: [
+        {
+          id: "q_0",
+          header: "交付形态",
+          question: "想要哪种交付形态？",
+          isOther: false,
+          isSecret: false,
+          multiSelect: false,
+          options: [
+            { label: "网页3D配置器", description: "可旋转缩放" },
+            { label: "3D模型文件", description: "输出 GLB" },
+          ],
+        },
+        {
+          id: "q_1",
+          header: "配置维度",
+          question: "需要配置哪些部分？",
+          isOther: false,
+          isSecret: false,
+          multiSelect: true,
+          options: [
+            { label: "车身底盘", description: "底盘与装甲" },
+            { label: "炮塔与主炮", description: "炮塔与武器" },
+            { label: "涂装", description: "迷彩与配色" },
+          ],
+        },
+      ],
+      createdAt: "2026-08-27T00:00:00.000Z",
+    };
+
+    expect(parsePendingUserInputAnswerCommand(
+      "1=1; 2=1,3",
+      pending,
+    )).toEqual({
+      answers: {
+        q_0: ["网页3D配置器"],
+        q_1: ["车身底盘", "涂装"],
+      },
+      preview: "q_0=网页3D配置器; q_1=车身底盘, 涂装",
+    });
+    expect(formatUserInputRequestMessage(pending, {
+      kind: "workbuddy",
+      status: "awaiting_input",
+      cwd: "/repo",
+      command: "workbuddy",
+    })).toContain("多选可用逗号分隔，如 1,3");
   });
 
   test("compacts English request-user-input metadata for mobile WeChat", () => {
@@ -1663,8 +1750,8 @@ describe("formatResumeSessionList for Codex desktop tasks", () => {
     expect(output).not.toContain("dddddddd");
     expect(output).not.toContain("07/25");
     expect(output).toContain("当前 · 待审批");
-    expect(output).toContain("运行完整测试 · 处理中");
-    expect(output).not.toContain("🟢");
+    expect(output).toContain("运行完整测试 · 处理中 🟢");
+    expect(output).toContain("🟢");
     expect(output).not.toContain("[进行中]");
     expect(output).toContain("回复序号进入；发送“3：内容”可直接下发");
     expect(output).toContain("搜索“任务：关键词”");

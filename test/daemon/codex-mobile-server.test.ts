@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 
@@ -466,6 +467,84 @@ describe("mobile terminal switcher status", () => {
     expect(CODEX_MOBILE_CSS).toContain(".adapter-menu-state { flex: 0 0 auto; white-space: nowrap;");
     expect(CODEX_MOBILE_JS).toContain("status.hidden = !status.textContent;");
   });
+
+  test("shows a breathing green dot for busy terminals and uses the full Harness name", () => {
+    expect(CODEX_MOBILE_CSS).toContain(".adapter-menu-running-dot");
+    expect(CODEX_MOBILE_CSS).toContain("animation: task-dot-breathe");
+    expect(CODEX_MOBILE_CSS).toContain(".task-dot.running, .adapter-menu-running-dot");
+    expect(CODEX_MOBILE_JS).toContain('deepseek: "DeepSeek Harness"');
+    expect(CODEX_MOBILE_JS).toContain('runningDot.hidden = adapter.status !== "busy";');
+    expect(CODEX_MOBILE_JS).toContain("syncCurrentAdapterStatusFromTasks();");
+    const loadTasksStart = CODEX_MOBILE_JS.indexOf("  async function loadTasks");
+    const loadTasksEnd = CODEX_MOBILE_JS.indexOf("\n  function syncComposerInset", loadTasksStart);
+    const loadTasksBlock = CODEX_MOBILE_JS.slice(loadTasksStart, loadTasksEnd);
+    expect(loadTasksBlock.indexOf("syncCurrentAdapterStatusFromTasks();"))
+      .toBeGreaterThan(loadTasksBlock.indexOf("state.tasks.push(previousCurrentTask)"));
+  });
+
+  test("promotes the current terminal from freshly loaded task status", () => {
+    const state = {
+      currentAdapter: "deepseek",
+      adapters: [{ id: "deepseek", status: "idle" }],
+      tasks: [{ status: "idle" }, { status: "running" }],
+    };
+    const sync = loadMobileAdapterTaskStatusSync(state);
+
+    sync();
+    expect(state.adapters[0]?.status).toBe("busy");
+
+    state.tasks = [{ status: "approval" }];
+    sync();
+    expect(state.adapters[0]?.status).toBe("awaiting_approval");
+
+    state.tasks = [{ status: "idle" }];
+    sync();
+    expect(state.adapters[0]?.status).toBe("idle");
+  });
+});
+
+describe("mobile reasoning effort selection", () => {
+  test("leaves the control unselected when the session does not report an effort", () => {
+    expect(CODEX_MOBILE_JS).toContain('"\\u8DDF\\u968F\\u4F1A\\u8BDD"');
+    expect(CODEX_MOBILE_JS).toContain('option.id === currentEffort ? "true" : "false"');
+  });
+});
+
+describe("mobile message text selection", () => {
+  test("limits Select All to the message content that started the selection", () => {
+    const { clamp, range, selected } = loadMobileMessageSelectionClamp();
+    const insideStart = {};
+    const insideEnd = {};
+    const outside = {};
+    const content = {
+      contains: (node: unknown) => node === insideStart || node === insideEnd,
+    };
+    let cleared = 0;
+    const added: unknown[] = [];
+    const selection = {
+      isCollapsed: false,
+      anchorNode: insideStart,
+      focusNode: outside,
+      removeAllRanges: () => { cleared += 1; },
+      addRange: (nextRange: unknown) => added.push(nextRange),
+    };
+
+    expect(clamp(selection, content)).toBe(true);
+    expect(selected).toEqual([content]);
+    expect(cleared).toBe(1);
+    expect(added).toEqual([range]);
+
+    selection.focusNode = insideEnd;
+    expect(clamp(selection, content)).toBe(false);
+    expect(cleared).toBe(1);
+
+    expect(CODEX_MOBILE_JS).toContain(
+      'document.addEventListener("pointerdown", rememberMessageSelectionScope, true);',
+    );
+    expect(CODEX_MOBILE_JS).toContain(
+      "clampSelectionToMessageContent(\n        window.getSelection && window.getSelection(),",
+    );
+  });
 });
 
 describe("mobile boot connection states", () => {
@@ -577,6 +656,28 @@ describe("mobile fetch resilience", () => {
     expect(CODEX_MOBILE_JS).toContain("if (error.network && !initial && state.tasks.length)");
     expect(CODEX_MOBILE_JS).toContain("if (!error.network) showToast");
     expect(CODEX_MOBILE_JS).toContain('var uncertain = Boolean(error && error.network) ||');
+  });
+
+  test("retries idempotent task creation once after a Relay timeout", async () => {
+    const requests: Array<Record<string, unknown>> = [];
+    let attempts = 0;
+    const requestTaskCreation = loadMobileTaskCreationRequester(async (_path, options) => {
+      attempts += 1;
+      requests.push(options as Record<string, unknown>);
+      if (attempts === 1) {
+        throw Object.assign(new Error("电脑响应超时，请稍后重试。"), { status: 504 });
+      }
+      return { task: { threadId: "task-created" } };
+    });
+
+    await expect(requestTaskCreation("/api/tasks", "local-draft-1")).resolves.toEqual({
+      task: { threadId: "task-created" },
+    });
+    expect(attempts).toBe(2);
+    expect(requests.map((request) => request.body)).toEqual([
+      JSON.stringify({ requestId: "local-draft-1" }),
+      JSON.stringify({ requestId: "local-draft-1" }),
+    ]);
   });
 });
 
@@ -992,6 +1093,20 @@ return {
 };`)() as ReturnType<typeof loadMobileFetchResilienceHelpers>;
 }
 
+function loadMobileTaskCreationRequester(
+  apiImpl: (path: string, options: Record<string, unknown>) => Promise<unknown>,
+): (path: string, requestId: string) => Promise<unknown> {
+  const start = CODEX_MOBILE_JS.indexOf("  function shouldRetryTaskCreationRequest");
+  const end = CODEX_MOBILE_JS.indexOf("\n  async function createTask(", start);
+  if (start < 0 || end < 0) throw new Error("Mobile task creation requester not found");
+  const source = CODEX_MOBILE_JS.slice(start, end);
+  return new Function("api", "waitForMobileFetchRetry", `${source}
+return requestTaskCreation;`)(
+    apiImpl,
+    async () => undefined,
+  ) as ReturnType<typeof loadMobileTaskCreationRequester>;
+}
+
 function loadMobileMarkdownRenderer(): (markdown: string, foldPrefix?: string) => string {
   const start = CODEX_MOBILE_JS.indexOf("  function escapeHtml");
   const end = CODEX_MOBILE_JS.indexOf("\n  async function fetchJson", start);
@@ -1069,6 +1184,24 @@ function loadMobileAdapterStateLabel(): (status: string) => string {
   return new Function(`${source}\nreturn adapterStateLabel;`)() as (status: string) => string;
 }
 
+function loadMobileAdapterTaskStatusSync(state: {
+  currentAdapter: string;
+  adapters: Array<{ id: string; status: string }>;
+  tasks: Array<{ status: string }>;
+}): () => void {
+  const start = CODEX_MOBILE_JS.indexOf("  function syncCurrentAdapterStatusFromTasks");
+  const end = CODEX_MOBILE_JS.indexOf("\n  function renderAdapterMenu", start);
+  if (start < 0 || end < 0) throw new Error("Mobile adapter-task status sync not found");
+  const source = CODEX_MOBILE_JS.slice(start, end);
+  return new Function("state", "currentAdapterEntry", `
+${source}
+return syncCurrentAdapterStatusFromTasks;
+`)(
+    state,
+    () => state.adapters.find((adapter) => adapter.id === state.currentAdapter) ?? null,
+  ) as () => void;
+}
+
 function loadMobileBootConnectionStateResolver(): (
   health: { ok?: boolean; deviceOnline?: boolean } | null,
   waitedMs?: number,
@@ -1144,6 +1277,25 @@ function loadMobileRunSummaryResolver(): (
   >;
 }
 
+function loadMobileComposerQueueDecision(): (
+  task: { status?: string } | null,
+  runSummary: { status?: string } | null,
+  queuedMessages: unknown[],
+  pendingApproval: unknown,
+  waitingForTaskCreation: boolean,
+) => boolean {
+  const start = CODEX_MOBILE_JS.indexOf("  function shouldQueueComposerSubmission");
+  const end = CODEX_MOBILE_JS.indexOf("\n  function updateHeader", start);
+  if (start < 0 || end < 0) throw new Error("Mobile composer queue decision not found");
+  const source = CODEX_MOBILE_JS.slice(start, end);
+  return new Function(
+    "isTaskActivelyRunning",
+    `${source}\nreturn shouldQueueComposerSubmission;`,
+  )((task: { status?: string } | null) => task?.status === "running") as ReturnType<
+    typeof loadMobileComposerQueueDecision
+  >;
+}
+
 function loadMobileRunHeaderLabel(): (
   summary: {
     status: string;
@@ -1162,6 +1314,32 @@ function loadMobileRunHeaderLabel(): (
   return new Function("state", `${source}\nreturn runHeaderLabel;`)(state) as ReturnType<
     typeof loadMobileRunHeaderLabel
   >;
+}
+
+function loadMobileRunSummaryUpdater(params: {
+  state: {
+    runSummary: Record<string, unknown> | null;
+    localRunSummary: Record<string, unknown> | null;
+    optimisticProgressTurnId: string | null;
+    stopRequestedThreadId: string;
+    currentThreadId: string;
+    sending: boolean;
+    pendingMessages: Array<{ inFlight?: boolean }>;
+  };
+}): (
+  summary: Record<string, unknown> | null,
+  task: { status: string } | null,
+  messages?: Array<{ role: string; turnId?: string }>,
+) => void {
+  const start = CODEX_MOBILE_JS.indexOf("  function updateRunSummary");
+  const end = CODEX_MOBILE_JS.indexOf("\n  function normalizeMessagePage", start);
+  if (start < 0 || end < 0) throw new Error("Mobile run-summary updater not found");
+  const source = CODEX_MOBILE_JS.slice(start, end);
+  return new Function("state", "isTaskActivelyRunning", "runDurationMs", `${source}\nreturn updateRunSummary;`)(
+    params.state,
+    (task: { status: string } | null) => Boolean(task && ["running", "approval", "input"].includes(task.status)),
+    (summary: Record<string, unknown> | null) => Number(summary?.durationMs) || 0,
+  ) as ReturnType<typeof loadMobileRunSummaryUpdater>;
 }
 
 function loadMobileComposerActionPredicate(): (
@@ -1203,6 +1381,16 @@ function loadMobileTaskSidebarHelpers(): {
     showAdapterLabel: boolean,
     suffix?: string,
   ) => string;
+  hasTaskBoardCachedContent: (
+    tasks: unknown[],
+    recentCompleted: unknown[],
+    lastLoadedAtMs: number,
+  ) => boolean;
+  buildCachedTaskBoardFallback: (
+    taskSnapshots: Record<string, { tasks?: Array<Record<string, unknown>> }>,
+    taskSnapshotOrder: string[],
+    adapters: Array<{ id: string; label?: string }>,
+  ) => { tasks: Array<Record<string, unknown>>; recentCompleted: Array<Record<string, unknown>> };
   projectTaskCreationSource: <T extends {
     threadId: string;
     canCreateInProject?: boolean;
@@ -1226,6 +1414,8 @@ return {
   shouldShowTaskAdapterLabels,
   taskListProjectLabel,
   taskBoardContextText,
+  hasTaskBoardCachedContent,
+  buildCachedTaskBoardFallback,
   projectTaskCreationSource
 };`)() as ReturnType<typeof loadMobileTaskSidebarHelpers>;
 }
@@ -1522,6 +1712,19 @@ return { messageNodeKey, getMessageNode };
   >;
 }
 
+function loadMobileConversationMessageVisibility(): (message: {
+  role?: string;
+  text?: string;
+}) => boolean {
+  const start = CODEX_MOBILE_JS.indexOf("  function isVisibleConversationMessage");
+  const end = CODEX_MOBILE_JS.indexOf("\n  function visibleMessageText", start);
+  if (start < 0 || end < 0) throw new Error("Mobile conversation-message visibility helper not found");
+  const source = CODEX_MOBILE_JS.slice(start, end);
+  return new Function(`${source}\nreturn isVisibleConversationMessage;`)() as ReturnType<
+    typeof loadMobileConversationMessageVisibility
+  >;
+}
+
 function loadMobileVisibleMessageText(): (message: {
   role?: string;
   text?: string;
@@ -1601,6 +1804,34 @@ function loadMobileTaskContextMenuTrigger(options: {
     clientY: number,
   ) => boolean;
   return trigger(button, 20, 30);
+}
+
+function loadMobileMessageSelectionClamp() {
+  const start = CODEX_MOBILE_JS.indexOf("  function selectionNodeWithin");
+  const end = CODEX_MOBILE_JS.indexOf("\n  function rememberMessageSelectionScope", start);
+  if (start < 0 || end < 0) throw new Error("Mobile message selection clamp not found");
+  const source = CODEX_MOBILE_JS.slice(start, end);
+  const selected: unknown[] = [];
+  const range = {
+    selectNodeContents: (node: unknown) => selected.push(node),
+  };
+  const document = {
+    createRange: () => range,
+  };
+  const clamp = new Function(
+    "document",
+    `${source}\nreturn clampSelectionToMessageContent;`,
+  )(document) as (
+    selection: {
+      isCollapsed: boolean;
+      anchorNode?: unknown;
+      focusNode?: unknown;
+      removeAllRanges: () => void;
+      addRange: (range: unknown) => void;
+    },
+    content: { contains: (node: unknown) => boolean },
+  ) => boolean;
+  return { clamp, range, selected };
 }
 
 function loadMobileSteeredPendingMessageBuilder(): (
@@ -1844,13 +2075,38 @@ describe("Codex mobile conversation cache", () => {
     );
   });
 
+  test("automatically retries a restored failed task draft when New Task is pressed", () => {
+    const createStart = CODEX_MOBILE_JS.indexOf("  async function createTask(");
+    const createEnd = CODEX_MOBILE_JS.indexOf("\n  async function selectTask(", createStart);
+    const createBlock = CODEX_MOBILE_JS.slice(createStart, createEnd);
+    const buttonStart = CODEX_MOBILE_JS.indexOf('  newTaskButton.addEventListener("click"');
+    const buttonEnd = CODEX_MOBILE_JS.indexOf("\n  taskList.addEventListener", buttonStart);
+    const buttonBlock = CODEX_MOBILE_JS.slice(buttonStart, buttonEnd);
+
+    expect(createBlock).toContain('reusableTask.localCreationState === "failed"');
+    expect(createBlock).toContain("existingTemporaryTask = reusableTask;");
+    expect(createBlock).toContain("sourceThreadId = reusableTask.localSourceThreadId || \"\";");
+    expect(buttonBlock).toContain('void createTask("", "");');
+    expect(buttonBlock).not.toContain("void selectTask(task.threadId, true);");
+  });
+
+  test("shows the real task creation failure beside the retry action", () => {
+    expect(CODEX_MOBILE_JS).toContain("function taskCreationErrorText(task)");
+    expect(CODEX_MOBILE_JS).toContain(
+      'taskCreationErrorText(taskById(message.threadId))',
+    );
+    expect(CODEX_MOBILE_JS).toContain(
+      "escapeHtml(taskCreationErrorText(emptyTask))",
+    );
+  });
+
   test("shows an optimistic task before waiting for desktop creation and preserves failed input", () => {
     const start = CODEX_MOBILE_JS.indexOf("  async function createTask(");
     const end = CODEX_MOBILE_JS.indexOf("\n  async function selectTask(", start);
     const block = CODEX_MOBILE_JS.slice(start, end);
     const insertIndex = block.indexOf("state.tasks.unshift(temporaryTask);");
     const selectIndex = block.indexOf("await selectTask(temporaryTask.threadId, true);");
-    const requestIndex = block.indexOf("var payload = await api(createPath");
+    const requestIndex = block.indexOf("var payload = await requestTaskCreation(createPath");
 
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);
@@ -1863,6 +2119,7 @@ describe("Codex mobile conversation cache", () => {
         block.includes("\\u521B\\u5EFA\\u5931\\u8D25\\uFF0C\\u8F93\\u5165\\u5185\\u5BB9\\u5DF2\\u4FDD\\u7559"),
     ).toBe(true);
     expect(block).not.toContain('composerInput.value = "";');
+    expect(block).toContain("requestTaskCreation(createPath, temporaryTask.threadId)");
     expect(CODEX_MOBILE_JS).toContain(
       "task && task.localCreationState === \"creating\"",
     );
@@ -2158,11 +2415,62 @@ describe("Codex mobile persistent cache", () => {
     const openEnd = CODEX_MOBILE_JS.indexOf("\n  function taskBoardSearch", openStart);
     const openBlock = CODEX_MOBILE_JS.slice(openStart, openEnd);
 
-    expect(loadBlock).toContain("state.boardTasks.length");
+    expect(loadBlock).toContain("hasTaskBoardCachedContent(");
     expect(loadBlock).toContain("if (error.network && hasCachedBoard) return;");
+    expect(CODEX_MOBILE_JS).toContain(
+      "state.boardLoading && !hasTaskBoardCachedContent("
+    );
     expect(openBlock.indexOf("renderTaskBoard();")).toBeLessThan(
       openBlock.indexOf("void loadTaskBoard(false);")
     );
+  });
+
+  test("keeps cached board cards visible while a silent refresh is running", () => {
+    const {
+      hasTaskBoardCachedContent,
+      buildCachedTaskBoardFallback,
+    } = loadMobileTaskSidebarHelpers();
+
+    expect(hasTaskBoardCachedContent([
+      { adapter: "codex", threadId: "cached-a" },
+    ], [], 0)).toBe(true);
+    expect(hasTaskBoardCachedContent([], [], 0)).toBe(false);
+    expect(hasTaskBoardCachedContent([], [], 123)).toBe(true);
+
+    const fallback = buildCachedTaskBoardFallback({
+      codex: {
+        tasks: [
+          {
+            threadId: "cached-a",
+            title: "缓存中的运行任务",
+            status: "running",
+            lastUpdatedAt: "2026-08-31T09:00:00.000Z",
+          },
+          {
+            threadId: "cached-done",
+            title: "缓存中的已完成任务",
+            status: "idle",
+            completedAt: "2026-08-31T08:00:00.000Z",
+            lastUpdatedAt: "2026-08-31T08:00:00.000Z",
+          },
+        ],
+      },
+    }, ["codex"], [{ id: "codex", label: "Codex" }]);
+
+    expect(fallback.tasks).toEqual([
+      expect.objectContaining({
+        adapter: "codex",
+        adapterLabel: "Codex",
+        threadId: "cached-a",
+      }),
+    ]);
+    expect(fallback.recentCompleted).toEqual([
+      expect.objectContaining({
+        adapter: "codex",
+        adapterLabel: "Codex",
+        threadId: "cached-done",
+      }),
+    ]);
   });
 
   test("shows the target adapter cache before waiting for the desktop switch", () => {
@@ -2202,6 +2510,45 @@ describe("Codex mobile approval consistency", () => {
 });
 
 describe("Codex mobile web rendering", () => {
+  test("keeps the task permission control visible while loading or unavailable", () => {
+    expect(CODEX_MOBILE_JS).toContain('"\\u83B7\\u53D6\\u4E2D"');
+    expect(CODEX_MOBILE_JS).toContain('"\\u6682\\u4E0D\\u53EF\\u7528"');
+    expect(CODEX_MOBILE_JS).not.toContain(
+      "(!currentPermission && options.length === 0 && !state.permissionChanging)",
+    );
+  });
+
+  test("uses server control state instead of a stale local running badge", () => {
+    expect(CODEX_MOBILE_JS).toContain("modelState && modelState.canChange && options.length > 0");
+    expect(CODEX_MOBILE_JS).toContain(
+      "modelState && modelState.canChangeReasoningEffort && options.length > 0",
+    );
+    expect(CODEX_MOBILE_JS).toContain(
+      "permissionState && permissionState.canChange && options.length > 0",
+    );
+  });
+
+  test("forces a lightweight message refresh while a task remains active", () => {
+    expect(CODEX_MOBILE_JS).toContain("shouldForceLiveMessageRefresh(Date.now())");
+    expect(CODEX_MOBILE_JS).toContain("state.lastLiveMessageRefreshAtMs");
+  });
+
+  test("renders a task permission scope selector beside model controls", () => {
+    expect(CODEX_MOBILE_HTML).toContain('id="composer-permission-control"');
+    expect(CODEX_MOBILE_HTML).toContain('id="composer-permission-button"');
+    expect(CODEX_MOBILE_HTML).toContain('id="composer-permission-menu"');
+    expect(CODEX_MOBILE_JS).toContain("loadCurrentTaskPermission");
+    expect(CODEX_MOBILE_JS).toContain("selectCurrentTaskPermission");
+    expect(CODEX_MOBILE_JS).toContain("taskPermissions: Object.create(null)");
+    expect(CODEX_MOBILE_JS).toContain('"/permission"');
+    expect(CODEX_MOBILE_JS).toContain("option.requiresConfirmation");
+    expect(CODEX_MOBILE_JS).toContain("window.confirm(");
+    expect(CODEX_MOBILE_JS).toContain("permissionState.unavailableReason");
+    expect(CODEX_MOBILE_JS).toContain("taskRunning");
+    expect(CODEX_MOBILE_JS).toContain("loadCurrentTaskPermission(false)");
+    expect(CODEX_MOBILE_JS).toContain("loadCurrentTaskPermission(true)");
+  });
+
   test("resolves full task ids and rejects ambiguous legacy prefixes", () => {
     const resolveTaskSelector = loadMobileTaskSelector();
     const tasks = [
@@ -2266,6 +2613,8 @@ describe("Codex mobile web rendering", () => {
     );
     expect(runFailureText({ status: "completed", errorMessage: "不应显示" })).toBe("");
     expect(CODEX_MOBILE_CSS).toContain(".run-failure");
+    expect(CODEX_MOBILE_JS).toContain("function runFailureTitle(summary)");
+    expect(CODEX_MOBILE_JS).toContain("escapeHtml(runFailureTitle(summary))");
   });
 
   test("navigates between user messages and hides directions at either boundary", () => {
@@ -2302,6 +2651,17 @@ describe("Codex mobile web rendering", () => {
     expect(visibleMessageModel({ role: "assistant" })).toBe("");
   });
 
+  test("hides exact assistant tool placeholders without removing normal conversation text", () => {
+    const isVisibleConversationMessage = loadMobileConversationMessageVisibility();
+    expect(isVisibleConversationMessage({ role: "assistant", text: "[tool_use]" })).toBe(false);
+    expect(isVisibleConversationMessage({ role: "assistant", text: "  [TOOL_RESULT]  " })).toBe(false);
+    expect(isVisibleConversationMessage({
+      role: "assistant",
+      text: "这里解释 [tool_use] 的含义",
+    })).toBe(true);
+    expect(isVisibleConversationMessage({ role: "user", text: "[tool_use]" })).toBe(true);
+  });
+
   test("hides screenshot transport labels while keeping the real user request", () => {
     const visibleMessageText = loadMobileVisibleMessageText();
     expect(visibleMessageText({
@@ -2310,6 +2670,32 @@ describe("Codex mobile web rendering", () => {
     })).toBe("请对比两个页面。");
     expect(visibleMessageText({ role: "user", text: "图片：png1\n[image]" })).toBe("已发送图片");
     expect(visibleMessageText({ role: "assistant", text: "图片：png1 是正文" })).toBe("图片：png1 是正文");
+  });
+
+  test("routes local web and file links through a fresh preview deployment page", () => {
+    const renderMarkdown = loadMobileMarkdownRenderer();
+    const html = renderMarkdown([
+      "本地页面 http://127.0.0.1:17800/dashboard",
+      "备用页面 http://localhost:4173/",
+      "[打开本地报告](file:///Users/demo/project/report.html)",
+      "[打开工作区文件](/Users/demo/project/output/index.html)",
+      "远程文档 https://example.com/docs",
+    ].join("\n"));
+
+    expect(html).toContain(
+      'href="/preview/open?target=http%3A%2F%2F127.0.0.1%3A17800%2Fdashboard"',
+    );
+    expect(html).toContain(
+      'href="/preview/open?target=http%3A%2F%2Flocalhost%3A4173%2F"',
+    );
+    expect(html).toContain(
+      'href="/preview/open?target=file%3A%2F%2F%2FUsers%2Fdemo%2Fproject%2Freport.html"',
+    );
+    expect(html).toContain(
+      'href="/preview/open?target=%2FUsers%2Fdemo%2Fproject%2Foutput%2Findex.html"',
+    );
+    expect(html).toContain('href="https://example.com/docs"');
+    expect(html).toContain('data-local-preview="true"');
   });
 
   test("folds long code or output blocks but keeps short snippets expanded", () => {
@@ -2377,6 +2763,31 @@ describe("Codex mobile web rendering", () => {
       [{ id: "queued-real", text: pending.text, imageCount: 1 }],
       [{ ...pending, status: "queued", queuedMessageId: "queued-real" }],
     )).toEqual([{ id: "queued-real", text: pending.text, imageCount: 1 }]);
+  });
+
+  test("places a new message directly in the queue when the live run summary is already running", () => {
+    const shouldQueue = loadMobileComposerQueueDecision();
+    expect(shouldQueue(
+      { status: "idle" },
+      { status: "running" },
+      [],
+      null,
+      false,
+    )).toBe(true);
+    expect(shouldQueue(
+      { status: "idle" },
+      { status: "completed" },
+      [],
+      null,
+      false,
+    )).toBe(false);
+    expect(shouldQueue(
+      { status: "running" },
+      null,
+      [],
+      null,
+      true,
+    )).toBe(false);
   });
 
   test("hides a confirmed queue card once the same input is the active transcript turn", () => {
@@ -2630,6 +3041,93 @@ describe("Codex mobile web rendering", () => {
       startedAtMs: nowMs - 4_000,
       durationMs: 4_000,
     });
+  });
+
+  test("clears an optimistic running summary when a mismatched remote turn has completed", () => {
+    const state = {
+      runSummary: null,
+      localRunSummary: {
+        turnId: "turn-local",
+        status: "running",
+        startedAtMs: Date.now() - 5_000,
+      },
+      optimisticProgressTurnId: "turn-local",
+      stopRequestedThreadId: "",
+      currentThreadId: "task-1",
+      sending: false,
+      pendingMessages: [],
+    };
+    const updateRunSummary = loadMobileRunSummaryUpdater({ state });
+
+    updateRunSummary(
+      { turnId: "turn-remote", status: "completed", durationMs: 4_000 },
+      { status: "idle" },
+      [
+        { role: "user", turnId: "turn-local" },
+        { role: "assistant", turnId: "turn-remote" },
+      ],
+    );
+
+    expect(state.localRunSummary).toBeNull();
+    expect(state.runSummary).toMatchObject({ status: "completed" });
+  });
+
+  test("keeps a new optimistic run when the server still reports the previous completed turn", () => {
+    const state = {
+      runSummary: null,
+      localRunSummary: {
+        turnId: "turn-new",
+        status: "running",
+        startedAtMs: Date.now() - 1_000,
+      },
+      optimisticProgressTurnId: "turn-new",
+      stopRequestedThreadId: "",
+      currentThreadId: "task-1",
+      sending: false,
+      pendingMessages: [],
+    };
+    const updateRunSummary = loadMobileRunSummaryUpdater({ state });
+
+    updateRunSummary(
+      { turnId: "turn-old", status: "completed", durationMs: 4_000 },
+      { status: "idle" },
+      [{ role: "user", turnId: "turn-new" }],
+    );
+
+    expect(state.localRunSummary).toMatchObject({
+      turnId: "turn-new",
+      status: "running",
+    });
+    expect(state.optimisticProgressTurnId).toBe("turn-new");
+  });
+
+  test("stops the pending animation when the latest assistant reply proves a stale running turn finished", () => {
+    const state = {
+      runSummary: null,
+      localRunSummary: {
+        turnId: "turn-1",
+        status: "running",
+        startedAtMs: Date.now() - 8_000,
+      },
+      optimisticProgressTurnId: "turn-1",
+      stopRequestedThreadId: "",
+      currentThreadId: "task-1",
+      sending: false,
+      pendingMessages: [],
+    };
+    const updateRunSummary = loadMobileRunSummaryUpdater({ state });
+
+    updateRunSummary(
+      { turnId: "turn-1", status: "running", durationMs: 8_000 },
+      { status: "idle" },
+      [
+        { role: "user", turnId: "turn-1" },
+        { role: "assistant", turnId: "turn-1" },
+      ],
+    );
+
+    expect(state.localRunSummary).toBeNull();
+    expect(state.runSummary).toMatchObject({ status: "unknown" });
   });
 
   test("shows a timed run header even when the runtime summary is temporarily missing", () => {
@@ -3057,7 +3555,11 @@ describe("Codex mobile server", () => {
   test("reads and switches the selected task model through the mobile API", async () => {
     const authStore = createAuthStore("a configured mobile password");
     const sessionCookie = `codex_mobile_session=${authStore.createSessionToken()}`;
-    const writes: Array<{ threadId: string; model: string; adapter?: string }> = [];
+    const writes: Array<{
+      threadId: string;
+      update: { model?: string; reasoningEffort?: string };
+      adapter?: string;
+    }> = [];
     const server = await startCodexMobileServer({
       host: "127.0.0.1",
       port: 0,
@@ -3073,14 +3575,20 @@ describe("Codex mobile server", () => {
         currentModel: threadId === "thread-model" ? "gpt-5.6-sol" : undefined,
         options: [{ id: "gpt-5.6-sol", label: "GPT-5.6 Sol" }],
         canChange: true,
+        currentReasoningEffort: "high",
+        reasoningEffortOptions: [{ id: "low" }, { id: "high" }],
+        canChangeReasoningEffort: true,
         adapter,
       }),
-      setTaskModel: async (threadId, model, adapter) => {
-        writes.push({ threadId, model, adapter });
+      setTaskModel: async (threadId, update, adapter) => {
+        writes.push({ threadId, update, adapter });
         return {
-          currentModel: model,
-          options: [{ id: model }],
+          currentModel: update.model ?? "gpt-5.6-sol",
+          options: [{ id: update.model ?? "gpt-5.6-sol" }],
           canChange: true,
+          currentReasoningEffort: update.reasoningEffort ?? "high",
+          reasoningEffortOptions: [{ id: "low" }, { id: "high" }],
+          canChangeReasoningEffort: true,
         };
       },
       readMessages: async (threadId) => ({
@@ -3121,9 +3629,121 @@ describe("Codex mobile server", () => {
       });
       expect(writes).toEqual([{
         threadId: "thread-model",
-        model: "gpt-5.6-terra",
+        update: { model: "gpt-5.6-terra" },
         adapter: "codex",
       }]);
+
+      const effortResponse = await fetch(
+        `${root}/api/tasks/thread-model/model?adapter=codex`,
+        {
+          method: "PUT",
+          headers: {
+            cookie: sessionCookie,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ reasoningEffort: "low" }),
+        },
+      );
+      expect(effortResponse.status).toBe(200);
+      expect(await effortResponse.json()).toMatchObject({
+        currentReasoningEffort: "low",
+        canChangeReasoningEffort: true,
+      });
+      expect(writes.at(-1)).toEqual({
+        threadId: "thread-model",
+        update: { reasoningEffort: "low" },
+        adapter: "codex",
+      });
+    } finally {
+      await server.close();
+    }
+  });
+
+  test("reads and switches the selected task permission through the mobile API", async () => {
+    const authStore = createAuthStore("a configured mobile password");
+    const sessionCookie = `codex_mobile_session=${authStore.createSessionToken()}`;
+    const writes: Array<{ threadId: string; permission: string; adapter?: string }> = [];
+    const server = await startCodexMobileServer({
+      host: "127.0.0.1",
+      port: 0,
+      lanAddress: "127.0.0.1",
+      accessToken: "mobile-secret",
+      authStore,
+      listTasks: async () => [{
+        threadId: "thread-permission",
+        title: "权限切换",
+        status: "idle",
+      }],
+      readTaskPermission: async (threadId, adapter) => ({
+        currentPermission: threadId === "thread-permission" ? "workspace-write" : undefined,
+        options: [
+          { id: "workspace-write", label: "项目内读写" },
+          { id: "danger-full-access", label: "完全访问", requiresConfirmation: true },
+        ],
+        canChange: true,
+        adapter,
+      }),
+      setTaskPermission: async (threadId, permission, adapter) => {
+        writes.push({ threadId, permission, adapter });
+        return {
+          currentPermission: permission,
+          options: [{ id: permission }],
+          canChange: true,
+        };
+      },
+      readMessages: async (threadId) => ({
+        threadId,
+        messages: [],
+        queuedMessages: [],
+      }),
+      sendMessage: async () => ({ queued: false }),
+    });
+
+    try {
+      const root = `http://127.0.0.1:${server.port}`;
+      const readResponse = await fetch(
+        `${root}/api/tasks/thread-permission/permission?adapter=deepseek`,
+        { headers: { cookie: sessionCookie } },
+      );
+      expect(readResponse.status).toBe(200);
+      expect(await readResponse.json()).toMatchObject({
+        currentPermission: "workspace-write",
+        canChange: true,
+      });
+
+      const writeResponse = await fetch(
+        `${root}/api/tasks/thread-permission/permission?adapter=deepseek`,
+        {
+          method: "PUT",
+          headers: {
+            cookie: sessionCookie,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ permission: "danger-full-access" }),
+        },
+      );
+      expect(writeResponse.status).toBe(200);
+      expect(await writeResponse.json()).toMatchObject({
+        currentPermission: "danger-full-access",
+      });
+      expect(writes).toEqual([{
+        threadId: "thread-permission",
+        permission: "danger-full-access",
+        adapter: "deepseek",
+      }]);
+
+      const invalidResponse = await fetch(
+        `${root}/api/tasks/thread-permission/permission?adapter=deepseek`,
+        {
+          method: "PUT",
+          headers: {
+            cookie: sessionCookie,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ permission: "" }),
+        },
+      );
+      expect(invalidResponse.status).toBe(400);
     } finally {
       await server.close();
     }
@@ -3886,8 +4506,10 @@ describe("Codex mobile server", () => {
       expect(css).toContain(".task-group-more");
       expect(css).toContain(".task-context-menu {");
       expect(css).toContain(".task-rename-overlay {");
+      expect(css).toContain(".task-list,\n.task-list * {");
       expect(css).toContain("-webkit-touch-callout: none;");
-      expect(css).toContain(".task-item * {");
+      expect(css).toContain("touch-action: pan-y;");
+      expect(css).toContain(".task-context-menu button {\n  width: 100%;\n  min-height: 44px;");
       expect(css).toContain(".task-status-badge.approval { display: inline-flex; }");
       expect(css).toContain(".task-dot.running { visibility: visible; background: var(--green); animation: task-dot-breathe");
       expect(css).toContain("@keyframes task-dot-breathe");
@@ -4021,7 +4643,7 @@ describe("Codex mobile server", () => {
       expect(js).not.toContain('class="run-stop-button"');
       expect(js).toContain("\\u5DF2\\u5B8C\\u6210");
       expect(js).toContain("if (!summary.completedAtMs || !summary.startedAtMs) return 0;");
-      expect(js).toContain("updateRunSummary(payload.runSummary || null, payload.task || null);");
+      expect(js).toContain("updateRunSummary(payload.runSummary || null, payload.task || null, messages);");
       expect(js).toContain('var LIVE_MESSAGE_PAGE_SIZE = 5;');
       expect(js).toContain('historyOnly ? "&history=1" : ""');
       expect(js).toContain('selectTask(requestedTask, false)');
@@ -4099,6 +4721,8 @@ describe("Codex mobile server", () => {
       expect(js).toContain('message.status === "unconfirmed"');
       expect(js).toContain('if (result.duplicate)');
       expect(js).toContain("\\u4E0E\\u6700\\u8FD1\\u4E00\\u6761\\u6D88\\u606F\\u76F8\\u540C\\uFF0C\\u672A\\u91CD\\u590D\\u53D1\\u9001");
+      expect(js).toContain("filterVisibleConversationMessages(state.serverMessages)");
+      expect(js).toContain("filterVisibleConversationMessages(payload.messages || [])");
       expect(js).toContain("renderResponsePendingIndicator");
       expect(js).toContain("if (responsePending) nodes.push(responsePending)");
       expect(js).toContain("syncChildOrder(messagesEl, nodes)");
@@ -4109,6 +4733,13 @@ describe("Codex mobile server", () => {
       expect(js).toContain("hasActiveTextSelection()");
       expect(js).toContain('app.classList.contains("sidebar-open")');
       expect(js).toContain('document.addEventListener("selectionchange"');
+      expect(js).toContain('if (!taskContextMenu.hidden) {\n      clearActiveTextSelection();\n      return;\n    }');
+      expect(js).not.toContain('if (!taskContextMenu.hidden && app.classList.contains("sidebar-open"))');
+      expect(js).toContain("var longPressTriggered = false;");
+      expect(js).toContain('event.pointerType === "touch"');
+      expect(js).toContain("if (longPressTriggered) {");
+      expect(js).toContain("longPressTriggered = false;");
+      expect(js).toContain('state.suppressTaskClickThreadId = "";');
       expect(js).toContain('taskList.addEventListener("selectstart"');
       expect(js).toContain('messagesEl.addEventListener("selectstart"');
       expect(js).toContain('messagesEl.addEventListener("contextmenu"');
@@ -4628,6 +5259,114 @@ describe("Codex mobile task creation", () => {
           selected: true,
         },
       });
+    } finally {
+      await server.close();
+    }
+  });
+
+  test("reuses one created task when the browser retries the same local draft", async () => {
+    const authStore = createAuthStore("a configured mobile password");
+    const sessionCookie = `codex_mobile_session=${authStore.createSessionToken()}`;
+    let createCalls = 0;
+    const server = await startCodexMobileServer({
+      host: "127.0.0.1",
+      port: 0,
+      lanAddress: "127.0.0.1",
+      accessToken: "mobile-secret",
+      authStore,
+      listTasks: async () => [],
+      createTask: async () => {
+        createCalls += 1;
+        await Bun.sleep(10);
+        return {
+          threadId: "canonical-created-task",
+          title: "新任务",
+          status: "idle",
+        };
+      },
+      readMessages: async (threadId) => ({
+        threadId,
+        messages: [],
+        queuedMessages: [],
+      }),
+      sendMessage: async () => ({ queued: false }),
+    });
+
+    try {
+      const create = () => fetch(
+        `http://127.0.0.1:${server.port}/api/tasks?adapter=codex`,
+        {
+          method: "POST",
+          headers: {
+            cookie: sessionCookie,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ requestId: "local-new-123" }),
+        },
+      );
+      const [first, retry] = await Promise.all([create(), create()]);
+
+      expect(first.status).toBe(201);
+      expect(retry.status).toBe(201);
+      expect(await first.json()).toEqual(await retry.json());
+      expect(createCalls).toBe(1);
+    } finally {
+      await server.close();
+    }
+  });
+
+  test("allows the same local draft to retry after task creation fails", async () => {
+    const authStore = createAuthStore("a configured mobile password");
+    const sessionCookie = `codex_mobile_session=${authStore.createSessionToken()}`;
+    let createCalls = 0;
+    const server = await startCodexMobileServer({
+      host: "127.0.0.1",
+      port: 0,
+      lanAddress: "127.0.0.1",
+      accessToken: "mobile-secret",
+      authStore,
+      listTasks: async () => [],
+      createTask: async () => {
+        createCalls += 1;
+        if (createCalls === 1) throw new Error("temporary create failure");
+        return {
+          threadId: "canonical-created-after-retry",
+          title: "新任务",
+          status: "idle",
+        };
+      },
+      readMessages: async (threadId) => ({
+        threadId,
+        messages: [],
+        queuedMessages: [],
+      }),
+      sendMessage: async () => ({ queued: false }),
+    });
+
+    try {
+      const create = () => fetch(
+        `http://127.0.0.1:${server.port}/api/tasks?adapter=codex`,
+        {
+          method: "POST",
+          headers: {
+            cookie: sessionCookie,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ requestId: "local-new-retry" }),
+        },
+      );
+      expect((await create()).status).toBe(409);
+      const retry = await create();
+
+      expect(retry.status).toBe(201);
+      expect(await retry.json()).toEqual({
+        task: {
+          threadId: "canonical-created-after-retry",
+          title: "新任务",
+          status: "idle",
+        },
+      });
+      expect(createCalls).toBe(2);
     } finally {
       await server.close();
     }
@@ -5159,3 +5898,115 @@ return {
   };
   return { ...runtime, composerInput, renderEvents };
 }
+
+describe("Codex mobile local preview deployment", () => {
+  test("serves the progress page and creates a fresh sandboxed deployment each time", async () => {
+    let version = "预览第一版";
+    const fixture = http.createServer((_request, response) => {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end(`<main><h1>${version}</h1></main>`);
+    });
+    const fixturePort = await new Promise<number>((resolve, reject) => {
+      fixture.once("error", reject);
+      fixture.listen(0, "127.0.0.1", () => {
+        const address = fixture.address();
+        if (!address || typeof address === "string") {
+          reject(new Error("missing preview fixture address"));
+          return;
+        }
+        resolve(address.port);
+      });
+    });
+    const authStore = createAuthStore("preview password");
+    const sessionCookie = `codex_mobile_session=${authStore.createSessionToken()}`;
+    const server = await startCodexMobileServer({
+      host: "127.0.0.1",
+      port: 0,
+      lanAddress: "127.0.0.1",
+      previewRoot: process.cwd(),
+      accessToken: "mobile-secret",
+      authStore,
+      listTasks: async () => [],
+      readMessages: async (threadId) => ({
+        threadId,
+        messages: [],
+        queuedMessages: [],
+      }),
+      sendMessage: async () => ({ queued: false }),
+    });
+
+    async function deployLatest() {
+      const createdResponse = await fetch(
+        `http://127.0.0.1:${server.port}/api/previews/jobs`,
+        {
+          method: "POST",
+          headers: {
+            cookie: sessionCookie,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ target: `http://127.0.0.1:${fixturePort}/` }),
+        },
+      );
+      expect(createdResponse.status).toBe(202);
+      const created = await createdResponse.json() as { jobId: string };
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const statusResponse = await fetch(
+          `http://127.0.0.1:${server.port}/api/previews/jobs/${encodeURIComponent(created.jobId)}`,
+          { headers: { cookie: sessionCookie } },
+        );
+        const status = await statusResponse.json() as {
+          status: string;
+          readyUrl?: string;
+          deploymentId?: string;
+          entryPath?: string;
+        };
+        if (status.status === "ready") return status;
+        await Bun.sleep(10);
+      }
+      throw new Error("mobile preview deployment timed out");
+    }
+
+    try {
+      const progressPage = await fetch(
+        `http://127.0.0.1:${server.port}/preview/open?target=${encodeURIComponent(`http://127.0.0.1:${fixturePort}/`)}`,
+      );
+      expect(progressPage.status).toBe(200);
+      expect(await progressPage.text()).toContain(
+        "正在部署到服务器上，以方便手机预览",
+      );
+      expect(progressPage.headers.get("content-security-policy")).toContain(
+        "script-src 'nonce-",
+      );
+
+      const first = await deployLatest();
+      const firstView = await fetch(
+        `http://127.0.0.1:${server.port}${first.readyUrl}`,
+      );
+      const firstViewHtml = await firstView.text();
+      expect(firstViewHtml).toContain("sandbox=\"allow-scripts allow-downloads allow-popups allow-modals\"");
+      expect(firstView.headers.get("content-security-policy")).toContain(
+        "style-src 'nonce-",
+      );
+      const firstContent = await fetch(
+        `http://127.0.0.1:${server.port}/preview/content/${encodeURIComponent(first.deploymentId ?? "")}/${first.entryPath}`,
+      );
+      expect(await firstContent.text()).toContain("预览第一版");
+      expect(firstContent.headers.get("content-security-policy")).toContain("sandbox");
+      expect(firstContent.headers.get("cache-control")).toBe("no-store");
+
+      version = "预览第二版";
+      const second = await deployLatest();
+      const secondContent = await fetch(
+        `http://127.0.0.1:${server.port}/preview/content/${encodeURIComponent(second.deploymentId ?? "")}/${second.entryPath}`,
+      );
+      expect(second.deploymentId).not.toBe(first.deploymentId);
+      expect(await secondContent.text()).toContain("预览第二版");
+    } finally {
+      await server.close();
+      await new Promise<void>((resolve) => {
+        fixture.close(() => resolve());
+        fixture.closeAllConnections?.();
+      });
+    }
+  });
+});

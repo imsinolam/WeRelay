@@ -11,6 +11,9 @@ import {
 } from "../../src/relay/relay-client.ts";
 import {
   WERELAY_RELAY_POLL_PATH,
+  WERELAY_RELAY_PROTOCOL_VERSION,
+  WERELAY_RELAY_RESPONSE_PATH,
+  type WeRelayRelayCommand,
 } from "../../src/relay/relay-protocol.ts";
 import {
   startWeRelayRelayServer,
@@ -96,6 +99,62 @@ async function waitUntilOnline(baseUrl: string): Promise<void> {
 }
 
 describe("WeRelay application relay", () => {
+  test("delivers a queued write before older read requests", async () => {
+    const relay = await startWeRelayRelayServer({
+      host: "127.0.0.1",
+      port: 0,
+      deviceId: "priority-device",
+      deviceToken: "priority-token",
+      pollTimeoutMs: 10,
+      commandTimeoutMs: 2_000,
+    });
+    closers.push(() => relay.close());
+    const deviceHeaders = {
+      authorization: "Bearer priority-token",
+      "x-werelay-device-id": "priority-device",
+      "content-type": "application/json",
+    };
+    await fetch(`${relay.baseUrl}${WERELAY_RELAY_POLL_PATH}`, {
+      method: "POST",
+      headers: deviceHeaders,
+      body: "{}",
+    });
+    const readRequest = fetch(`${relay.baseUrl}/api/tasks`).catch(() => null);
+    const writeRequest = fetch(`${relay.baseUrl}/api/tasks`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ requestId: "draft-priority" }),
+    }).catch(() => null);
+    await Bun.sleep(10);
+
+    const poll = async () => await fetch(`${relay.baseUrl}${WERELAY_RELAY_POLL_PATH}`, {
+      method: "POST",
+      headers: deviceHeaders,
+      body: "{}",
+    }).then((response) => response.json()) as WeRelayRelayCommand;
+    const respond = async (command: WeRelayRelayCommand) => {
+      await fetch(`${relay.baseUrl}${WERELAY_RELAY_RESPONSE_PATH}`, {
+        method: "POST",
+        headers: deviceHeaders,
+        body: JSON.stringify({
+          protocolVersion: WERELAY_RELAY_PROTOCOL_VERSION,
+          commandId: command.id,
+          statusCode: 200,
+          headers: { "content-type": "application/json" },
+          bodyBase64: Buffer.from('{"ok":true}').toString("base64"),
+        }),
+      });
+    };
+    const first = await poll();
+    await respond(first);
+    const second = await poll();
+    await respond(second);
+    await Promise.all([readRequest, writeRequest]);
+
+    expect(first.request.method).toBe("POST");
+    expect(second.request.method).toBe("GET");
+  });
+
   test("serves versioned assets with immutable caching, validators, and compression", async () => {
     const relay = await startWeRelayRelayServer({
       host: "127.0.0.1",
@@ -122,14 +181,14 @@ describe("WeRelay application relay", () => {
     expect(notModified.status).toBe(304);
   });
 
-  test("prewarms authenticated task data before the browser opens again", async () => {
+  test("refreshes cached browser paths only when the browser asks again", async () => {
     const sessionToken = `v1.${Date.now() + 60_000}.nonce.signature`;
     let version = 1;
     const requestCounts = new Map<string, number>();
     const localServer = http.createServer((request, response) => {
-      const path = request.url ?? "/";
-      const url = new URL(path, "http://werelay.local");
-      requestCounts.set(path, (requestCounts.get(path) ?? 0) + 1);
+      const requestPath = request.url ?? "/";
+      const url = new URL(requestPath, "http://werelay.local");
+      requestCounts.set(requestPath, (requestCounts.get(requestPath) ?? 0) + 1);
       const prewarmAuthorized = request.headers["x-werelay-relay-prewarm"] ===
         "local-prewarm-secret";
       if (
@@ -143,51 +202,30 @@ describe("WeRelay application relay", () => {
       let payload: unknown;
       if (url.pathname === "/api/auth/status") {
         payload = { authenticated: true, configured: true, canSetup: false };
-      } else if (url.pathname === "/api/adapters") {
-        payload = {
-          activeAdapter: "codex",
-          adapters: [
-            { id: "codex", label: "Codex", status: "idle", active: true },
-            { id: "claude", label: "Claude Code", status: "idle", active: false },
-          ],
-        };
       } else if (url.pathname === "/api/task-board") {
         payload = {
-          tasks: [
-            {
-              adapter: "codex",
-              adapterLabel: "Codex",
-              threadId: "thread-1",
-              title: `任务列表 ${version}`,
-              status: "idle",
-              lastUpdatedAt: `2026-08-15T00:00:0${version}.000Z`,
-            },
-            {
-              adapter: "claude",
-              adapterLabel: "Claude Code",
-              threadId: "claude-thread",
-              title: `Claude 任务 ${version}`,
-              status: "idle",
-              lastUpdatedAt: "2026-08-14T23:59:59.000Z",
-            },
-          ],
+          tasks: [{
+            adapter: "codex",
+            threadId: "thread-1",
+            title: `任务列表 ${version}`,
+            status: "idle",
+            lastUpdatedAt: `2026-08-15T00:00:0${version}.000Z`,
+          }],
           recentCompleted: [],
         };
       } else if (url.pathname === "/api/tasks") {
-        const adapter = url.searchParams.get("adapter") || "codex";
         payload = {
           tasks: [{
-            threadId: adapter === "claude" ? "claude-thread" : "thread-1",
-            title: adapter === "claude" ? `Claude 任务 ${version}` : `任务列表 ${version}`,
+            threadId: "thread-1",
+            title: `任务列表 ${version}`,
             status: "idle",
             lastUpdatedAt: `2026-08-15T00:00:0${version}.000Z`,
           }],
         };
       } else {
-        const threadId = url.pathname.includes("claude-thread") ? "claude-thread" : "thread-1";
         payload = {
-          threadId,
-          messages: [{ role: "assistant", text: `${threadId} 任务详情 ${version}` }],
+          threadId: "thread-1",
+          messages: [{ role: "assistant", text: `任务详情 ${version}` }],
           queuedMessages: [],
           progressItems: [],
           runSummary: null,
@@ -203,11 +241,8 @@ describe("WeRelay application relay", () => {
       localServer.once("error", reject);
       localServer.listen(0, "127.0.0.1", () => {
         const address = localServer.address();
-        if (!address || typeof address === "string") {
-          reject(new Error("missing local address"));
-          return;
-        }
-        resolve(address.port);
+        if (!address || typeof address === "string") reject(new Error("missing local address"));
+        else resolve(address.port);
       });
     });
     closers.push(async () => {
@@ -222,10 +257,10 @@ describe("WeRelay application relay", () => {
       port: 0,
       deviceId: "example-device",
       deviceToken: "test-device-token",
-      pollTimeoutMs: 30,
-      deviceOfflineMs: 60,
-      warmRefreshIntervalMs: 60_000,
-      warmCacheFreshMs: 5,
+      pollTimeoutMs: 20,
+      deviceOfflineMs: 500,
+      warmCacheFreshMs: 0,
+      warmCacheTtlMs: 500,
     });
     closers.push(() => relay.close());
     const client = startWeRelayRelayClient({
@@ -234,65 +269,61 @@ describe("WeRelay application relay", () => {
       deviceToken: "test-device-token",
       localBaseUrl: `http://127.0.0.1:${localPort}`,
       localPrewarmToken: "local-prewarm-secret",
-      retryDelayMs: 10,
+      retryDelayMs: 5,
     });
     closers.push(() => client.close());
     await waitUntilOnline(relay.baseUrl);
 
-    const headers = { cookie: `codex_mobile_session=${sessionToken}` };
     const tasksPath = "/api/tasks?adapter=codex";
+    const boardPath = "/api/task-board";
     const messagesPath = "/api/tasks/thread-1/messages?limit=40&history=1&adapter=codex";
-    const claudeMessagesPath =
-      "/api/tasks/claude-thread/messages?limit=40&history=1&adapter=claude";
-    const firstWarmDeadline = Date.now() + 2_000;
-    while (
-      Date.now() < firstWarmDeadline &&
-      ((requestCounts.get(tasksPath) ?? 0) < 1 ||
-        (requestCounts.get(messagesPath) ?? 0) < 1 ||
-        (requestCounts.get(claudeMessagesPath) ?? 0) < 1)
-    ) await Bun.sleep(20);
-    expect(requestCounts.get(tasksPath)).toBeGreaterThanOrEqual(1);
-    expect(requestCounts.get(messagesPath)).toBeGreaterThanOrEqual(1);
-    expect(requestCounts.get(claudeMessagesPath)).toBeGreaterThanOrEqual(1);
+    await Bun.sleep(80);
+    expect(requestCounts.get(tasksPath) ?? 0).toBe(0);
+    expect(requestCounts.get(boardPath) ?? 0).toBe(0);
+    expect(requestCounts.get(messagesPath) ?? 0).toBe(0);
 
-    const taskCountBeforeUpdate = requestCounts.get(tasksPath) ?? 0;
-    const messageCountBeforeUpdate = requestCounts.get(messagesPath) ?? 0;
+    const headers = { cookie: `codex_mobile_session=${sessionToken}` };
+    expect((await fetch(`${relay.baseUrl}/api/auth/status`, { headers })).status).toBe(200);
+    expect((await fetch(`${relay.baseUrl}${tasksPath}`, { headers })).status).toBe(200);
+    expect((await fetch(`${relay.baseUrl}${boardPath}`, { headers })).status).toBe(200);
+    const messages = await fetch(`${relay.baseUrl}${messagesPath}`, { headers });
+    expect(messages.status).toBe(200);
+    expect(messages.headers.get("x-werelay-cache")).toBeNull();
+
+    const initialTaskRequests = requestCounts.get(tasksPath) ?? 0;
+    const initialBoardRequests = requestCounts.get(boardPath) ?? 0;
+    const initialMessageRequests = requestCounts.get(messagesPath) ?? 0;
     version = 2;
-    const deadline = Date.now() + 2_000;
-    while (
-      Date.now() < deadline &&
-      ((requestCounts.get(tasksPath) ?? 0) <= taskCountBeforeUpdate ||
-        (requestCounts.get(messagesPath) ?? 0) <= messageCountBeforeUpdate)
-    ) await Bun.sleep(20);
-    expect(requestCounts.get(tasksPath)).toBeGreaterThan(taskCountBeforeUpdate);
-    expect(requestCounts.get(messagesPath)).toBeGreaterThan(messageCountBeforeUpdate);
+    await Bun.sleep(120);
+    expect(requestCounts.get(tasksPath)).toBe(initialTaskRequests);
+    expect(requestCounts.get(boardPath)).toBe(initialBoardRequests);
+    expect(requestCounts.get(messagesPath)).toBe(initialMessageRequests);
 
-    const authStatus = await fetch(`${relay.baseUrl}/api/auth/status`, { headers });
-    expect(await authStatus.json()).toMatchObject({ authenticated: true });
-    const preloadedTasks = await fetch(`${relay.baseUrl}${tasksPath}`, { headers });
-    expect(preloadedTasks.headers.get("x-werelay-cache")).toBe("warm");
-    expect(await preloadedTasks.json()).toMatchObject({
-      tasks: [{ title: "任务列表 2" }],
-    });
-
-    await client.close();
-    await Bun.sleep(90);
     const cachedTasks = await fetch(`${relay.baseUrl}${tasksPath}`, { headers });
-    expect(cachedTasks.status).toBe(200);
     expect(cachedTasks.headers.get("x-werelay-cache")).toBe("warm");
     expect(await cachedTasks.json()).toMatchObject({
+      tasks: [{ title: "任务列表 1" }],
+    });
+    const refreshDeadline = Date.now() + 1_000;
+    while (
+      Date.now() < refreshDeadline &&
+      (requestCounts.get(tasksPath) ?? 0) <= initialTaskRequests
+    ) await Bun.sleep(10);
+    expect(requestCounts.get(tasksPath)).toBe(initialTaskRequests + 1);
+    expect(requestCounts.get(boardPath)).toBe(initialBoardRequests);
+    expect(requestCounts.get(messagesPath)).toBe(initialMessageRequests);
+
+    const refreshedTasks = await fetch(`${relay.baseUrl}${tasksPath}`, { headers });
+    expect(refreshedTasks.headers.get("x-werelay-cache")).toBe("warm");
+    expect(await refreshedTasks.json()).toMatchObject({
       tasks: [{ title: "任务列表 2" }],
     });
-    const cachedMessages = await fetch(`${relay.baseUrl}${messagesPath}`, { headers });
-    expect(cachedMessages.headers.get("x-werelay-cache")).toBe("warm");
-    expect(await cachedMessages.json()).toMatchObject({
-      messages: [{ text: "thread-1 任务详情 2" }],
-    });
-
-    const rejected = await fetch(`${relay.baseUrl}${tasksPath}`, {
-      headers: { cookie: "codex_mobile_session=another-session" },
-    });
-    expect(rejected.status).toBe(503);
+    await Bun.sleep(30);
+    const requestsAfterBrowserReads = [...requestCounts.entries()];
+    await Bun.sleep(120);
+    expect([...requestCounts.entries()]).toEqual(requestsAfterBrowserReads);
+    expect(requestCounts.get(boardPath)).toBe(initialBoardRequests);
+    expect(requestCounts.get(messagesPath)).toBe(initialMessageRequests);
   });
 
   test("invalidates every browser warm cache after a successful write", async () => {
@@ -374,64 +405,6 @@ describe("WeRelay application relay", () => {
     expect(await refreshed.json()).toMatchObject({ currentModel: "model-2" });
   });
 
-  test("resumes device prewarming after the cache ttl has elapsed", async () => {
-    let clockMs = Date.now();
-    let taskRequests = 0;
-    const localServer = http.createServer((request, response) => {
-      if (request.url === "/api/tasks") taskRequests += 1;
-      response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify(request.url === "/api/adapters"
-        ? { activeAdapter: "codex", adapters: [] }
-        : { tasks: [] }));
-    });
-    const localPort = await new Promise<number>((resolve, reject) => {
-      localServer.once("error", reject);
-      localServer.listen(0, "127.0.0.1", () => {
-        const address = localServer.address();
-        if (!address || typeof address === "string") reject(new Error("missing local address"));
-        else resolve(address.port);
-      });
-    });
-    closers.push(async () => {
-      await new Promise<void>((resolve) => {
-        localServer.close(() => resolve());
-        localServer.closeAllConnections?.();
-      });
-    });
-    const relay = await startWeRelayRelayServer({
-      host: "127.0.0.1",
-      port: 0,
-      deviceId: "example-device",
-      deviceToken: "test-device-token",
-      pollTimeoutMs: 20,
-      deviceOfflineMs: 500,
-      warmRefreshIntervalMs: 10,
-      warmCacheFreshMs: 0,
-      warmCacheTtlMs: 20,
-      now: () => clockMs,
-    });
-    closers.push(() => relay.close());
-    const client = startWeRelayRelayClient({
-      relayUrl: relay.baseUrl,
-      deviceId: "example-device",
-      deviceToken: "test-device-token",
-      localBaseUrl: `http://127.0.0.1:${localPort}`,
-      localPrewarmToken: "local-prewarm-secret",
-      retryDelayMs: 5,
-    });
-    closers.push(() => client.close());
-    await waitUntilOnline(relay.baseUrl);
-    const firstDeadline = Date.now() + 1_000;
-    while (Date.now() < firstDeadline && taskRequests < 1) await Bun.sleep(10);
-    expect(taskRequests).toBeGreaterThanOrEqual(1);
-
-    await Bun.sleep(30);
-    clockMs += 100;
-    const beforeResume = taskRequests;
-    const resumeDeadline = Date.now() + 1_000;
-    while (Date.now() < resumeDeadline && taskRequests <= beforeResume) await Bun.sleep(10);
-    expect(taskRequests).toBeGreaterThan(beforeResume);
-  });
 
   test("serves the mobile shell and forwards only mobile API requests through the Mac client", async () => {
     const local = await startLocalMobileStub();
@@ -618,5 +591,155 @@ describe("WeRelay application relay", () => {
     expect(response.headers.get("location")).toContain(
       "/?task=0000000a-0000-7000-8000-00000000000a&adapter=workbuddy&appv=",
     );
+  });
+});
+
+describe("WeRelay relay local preview deployment", () => {
+  test("stores the Mac snapshot on Relay and serves it only to the authenticated browser session", async () => {
+    const deployment = {
+      version: 1 as const,
+      deploymentId: "preview-relay-test",
+      sourceLabel: "127.0.0.1:17800/",
+      entryPath: "index.html",
+      createdAtMs: Date.now(),
+      totalBytes: Buffer.byteLength("<h1>Relay 最新预览</h1>"),
+      files: [{
+        path: "index.html",
+        contentType: "text/html; charset=utf-8",
+        bodyBase64: Buffer.from("<h1>Relay 最新预览</h1>").toString("base64"),
+      }],
+    };
+    const localServer = http.createServer((request, response) => {
+      const url = new URL(request.url ?? "/", "http://deskrelay.local");
+      response.setHeader("content-type", "application/json; charset=utf-8");
+      if (request.method === "GET" && url.pathname === "/api/auth/status") {
+        response.writeHead(200);
+        response.end(JSON.stringify({
+          authenticated: request.headers.cookie === "codex_mobile_session=preview-browser-session",
+          configured: true,
+          canSetup: false,
+        }));
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/api/previews/jobs") {
+        response.writeHead(202);
+        response.end(JSON.stringify({
+          jobId: "preview-job-relay-test",
+          status: "queued",
+          progress: 4,
+          message: "正在请求电脑准备最新内容",
+        }));
+        return;
+      }
+      if (
+        request.method === "GET" &&
+        url.pathname === "/api/previews/jobs/preview-job-relay-test"
+      ) {
+        expect(request.headers["x-werelay-relay"]).toBe("1");
+        response.writeHead(200);
+        response.end(JSON.stringify({
+          jobId: "preview-job-relay-test",
+          status: "ready",
+          progress: 100,
+          message: "部署完成，正在打开最新页面",
+          deploymentId: deployment.deploymentId,
+          entryPath: deployment.entryPath,
+          readyUrl: `/preview/view/${deployment.deploymentId}`,
+          previewPackage: deployment,
+        }));
+        return;
+      }
+      response.writeHead(404);
+      response.end(JSON.stringify({ error: "not found" }));
+    });
+    const localPort = await new Promise<number>((resolve, reject) => {
+      localServer.once("error", reject);
+      localServer.listen(0, "127.0.0.1", () => {
+        const address = localServer.address();
+        if (!address || typeof address === "string") {
+          reject(new Error("missing local preview stub address"));
+          return;
+        }
+        resolve(address.port);
+      });
+    });
+    closers.push(async () => {
+      await new Promise<void>((resolve) => {
+        localServer.close(() => resolve());
+        localServer.closeAllConnections?.();
+      });
+    });
+
+    const relay = await startWeRelayRelayServer({
+      host: "127.0.0.1",
+      port: 0,
+      deviceId: "example-device",
+      deviceToken: "test-device-token",
+      pollTimeoutMs: 50,
+      deviceOfflineMs: 500,
+    });
+    closers.push(() => relay.close());
+    const client = startWeRelayRelayClient({
+      relayUrl: relay.baseUrl,
+      deviceId: "example-device",
+      deviceToken: "test-device-token",
+      localBaseUrl: `http://127.0.0.1:${localPort}`,
+      retryDelayMs: 10,
+    });
+    closers.push(() => client.close());
+    await waitUntilOnline(relay.baseUrl);
+
+    const cookie = "codex_mobile_session=preview-browser-session";
+    const progressPage = await fetch(
+      `${relay.baseUrl}/preview/open?target=${encodeURIComponent("http://127.0.0.1:17800/")}`,
+    );
+    expect(progressPage.status).toBe(200);
+    expect(await progressPage.text()).toContain(
+      "正在部署到服务器上，以方便手机预览",
+    );
+    expect(progressPage.headers.get("content-security-policy")).toContain(
+      "script-src 'nonce-",
+    );
+
+    const create = await fetch(`${relay.baseUrl}/api/previews/jobs`, {
+      method: "POST",
+      headers: { cookie, "content-type": "application/json" },
+      body: JSON.stringify({ target: "http://127.0.0.1:17800/" }),
+    });
+    expect(create.status).toBe(202);
+
+    const status = await fetch(
+      `${relay.baseUrl}/api/previews/jobs/preview-job-relay-test`,
+      { headers: { cookie } },
+    );
+    expect(status.status).toBe(200);
+    const statusPayload = await status.json() as Record<string, unknown>;
+    expect(statusPayload.readyUrl).toBe("/preview/view/preview-relay-test");
+    expect(statusPayload.previewPackage).toBeUndefined();
+
+    const unauthenticated = await fetch(
+      `${relay.baseUrl}/preview/content/preview-relay-test/index.html`,
+    );
+    expect(unauthenticated.status).toBe(401);
+
+    const view = await fetch(`${relay.baseUrl}/preview/view/preview-relay-test`, {
+      headers: { cookie },
+    });
+    expect(view.status).toBe(200);
+    expect(await view.text()).toContain(
+      'sandbox="allow-scripts allow-downloads allow-popups allow-modals"',
+    );
+    expect(view.headers.get("content-security-policy")).toContain(
+      "style-src 'nonce-",
+    );
+
+    const content = await fetch(
+      `${relay.baseUrl}/preview/content/preview-relay-test/index.html`,
+      { headers: { cookie } },
+    );
+    expect(content.status).toBe(200);
+    expect(await content.text()).toContain("Relay 最新预览");
+    expect(content.headers.get("content-security-policy")).toContain("sandbox");
+    expect(content.headers.get("cache-control")).toBe("no-store");
   });
 });

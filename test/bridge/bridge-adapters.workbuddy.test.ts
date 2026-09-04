@@ -9,6 +9,7 @@ import {
   buildWorkBuddyDesktopTaskUrl,
   parseWorkBuddyTranscript,
   parseWorkBuddyTranscriptRunSummary,
+  parseWorkBuddyTranscriptTitle,
   resolveWorkBuddySidecarSocketPath,
   type WorkBuddyAdapterDependencies,
 } from "../../src/bridge/bridge-adapters.workbuddy.ts";
@@ -28,6 +29,253 @@ function deferred<T>() {
 }
 
 describe("WorkBuddy Desktop adapter", () => {
+  test("reads and changes the real WorkBuddy task permission mode", async () => {
+    const calls: Array<{ channel: string; args: unknown[] }> = [];
+    const row = {
+      id: "wb-permission",
+      cwd: "/repo",
+      title: "权限任务",
+      customTitle: null,
+      status: "completed",
+      createdAt: 100,
+      updatedAt: 200,
+      lastActivityAt: 200,
+      projectId: null,
+      permissionMode: "acceptEdits",
+    };
+    const dependencies: WorkBuddyAdapterDependencies = {
+      createDesktopClient: () => ({
+        connect: async () => undefined,
+        invoke: async (channel, ...args) => {
+          calls.push({ channel, args });
+          return {};
+        },
+        close: async () => undefined,
+      }),
+      listSessions: async () => [row],
+      readSession: async () => row,
+      readMessages: async () => [],
+      readRunSummary: async () => null,
+      readLocalImage: async () => ({ data: "aW1hZ2U=", mimeType: "image/png" }),
+    };
+    const adapter = new WorkBuddyDesktopAdapter({
+      kind: "workbuddy",
+      command: "workbuddy",
+      cwd: "/repo",
+      sessionStartMode: "restore",
+    }, dependencies) as any;
+    await adapter.start();
+
+    expect(await adapter.getSessionPermissionState("wb-permission")).toMatchObject({
+      currentPermission: "acceptEdits",
+      canChange: true,
+      options: [
+        { id: "default" },
+        { id: "acceptEdits" },
+        { id: "fullAccess", requiresConfirmation: true },
+        { id: "bypassPermissions", requiresConfirmation: true },
+        { id: "plan" },
+      ],
+    });
+
+    const next = await adapter.setSessionPermission("wb-permission", "fullAccess");
+    expect(calls).toContainEqual({
+      channel: "session:setMode",
+      args: ["wb-permission", { modeId: "fullAccess" }],
+    });
+    expect(next.currentPermission).toBe("fullAccess");
+  });
+
+  test("does not change WorkBuddy permission while the task is running", async () => {
+    const row = {
+      id: "wb-running",
+      cwd: "/repo",
+      title: "运行中任务",
+      customTitle: null,
+      status: "working",
+      createdAt: 100,
+      updatedAt: 200,
+      lastActivityAt: 200,
+      projectId: null,
+      permissionMode: "default",
+    };
+    const dependencies: WorkBuddyAdapterDependencies = {
+      createDesktopClient: () => ({
+        connect: async () => undefined,
+        invoke: async () => ({}),
+        close: async () => undefined,
+      }),
+      listSessions: async () => [row],
+      readSession: async () => row,
+      readMessages: async () => [],
+      readRunSummary: async () => null,
+      readLocalImage: async () => ({ data: "aW1hZ2U=", mimeType: "image/png" }),
+    };
+    const adapter = new WorkBuddyDesktopAdapter({
+      kind: "workbuddy",
+      command: "workbuddy",
+      cwd: "/repo",
+      sessionStartMode: "restore",
+    }, dependencies) as any;
+    await adapter.start();
+
+    expect(await adapter.getSessionPermissionState("wb-running")).toMatchObject({
+      currentPermission: "default",
+      canChange: false,
+      unavailableReason: "任务正在处理，完成或停止后再切换权限范围。",
+    });
+    await expect(
+      adapter.setSessionPermission("wb-running", "acceptEdits"),
+    ).rejects.toThrow("任务正在处理");
+  });
+
+  test("connects immediately without probing unrelated tasks when the persisted WorkBuddy task was deleted", async () => {
+    const staleSessionId = "stale-session";
+    const currentSession = {
+      id: "current-session",
+      cwd: "/repo/current",
+      title: "当前有效任务",
+      customTitle: null,
+      status: "working",
+      createdAt: 100,
+      updatedAt: 300,
+      lastActivityAt: 300,
+      projectId: null,
+    };
+    const calls: Array<{ channel: string; args: unknown[] }> = [];
+    let closeCount = 0;
+    const dependencies: WorkBuddyAdapterDependencies = {
+      createDesktopClient: () => ({
+        connect: async () => undefined,
+        invoke: async (channel, ...args) => {
+          calls.push({ channel, args });
+          return true;
+        },
+        close: async () => {
+          closeCount += 1;
+        },
+      }),
+      listSessions: async () => [currentSession],
+      readSession: async (sessionId) => sessionId === staleSessionId ? null : currentSession,
+      readMessages: async () => [],
+      readRunSummary: async () => null,
+      readLocalImage: async () => ({ data: "aW1hZ2U=", mimeType: "image/png" }),
+    };
+    const adapter = new WorkBuddyDesktopAdapter({
+      kind: "workbuddy",
+      command: "workbuddy",
+      cwd: "/repo",
+      sessionStartMode: "restore",
+      initialSharedSessionId: staleSessionId,
+    }, dependencies);
+
+    await adapter.start();
+
+    expect(closeCount).toBe(0);
+    expect(calls).toEqual([]);
+    expect(adapter.getState()).toMatchObject({ status: "idle" });
+    expect(adapter.getState().sharedSessionId).toBeUndefined();
+    expect(adapter.getState().activeRuntimeSessionId).toBeUndefined();
+  });
+
+  test("keeps WorkBuddy connected without a selected task when startup restore has no valid fallback", async () => {
+    let closeCount = 0;
+    const dependencies: WorkBuddyAdapterDependencies = {
+      createDesktopClient: () => ({
+        connect: async () => undefined,
+        invoke: async () => {
+          throw new Error("不应加载已删除任务");
+        },
+        close: async () => {
+          closeCount += 1;
+        },
+      }),
+      listSessions: async () => [],
+      readSession: async () => null,
+      readMessages: async () => [],
+      readRunSummary: async () => null,
+      readLocalImage: async () => ({ data: "aW1hZ2U=", mimeType: "image/png" }),
+    };
+    const adapter = new WorkBuddyDesktopAdapter({
+      kind: "workbuddy",
+      command: "workbuddy",
+      cwd: "/repo",
+      sessionStartMode: "restore",
+      initialSharedSessionId: "deleted-session",
+    }, dependencies);
+
+    await adapter.start();
+
+    expect(closeCount).toBe(0);
+    expect(adapter.getState()).toMatchObject({ status: "idle" });
+    expect(adapter.getState().sharedSessionId).toBeUndefined();
+    expect(adapter.getState().activeRuntimeSessionId).toBeUndefined();
+  });
+
+  test("stays connected without probing more tasks when WorkBuddy runtime rejects startup restore", async () => {
+    const staleSession = {
+      id: "runtime-missing-session",
+      cwd: "/repo/stale",
+      title: "运行时已失效",
+      customTitle: null,
+      status: "working",
+      createdAt: 100,
+      updatedAt: 400,
+      lastActivityAt: 400,
+      projectId: null,
+    };
+    const currentSession = {
+      ...staleSession,
+      id: "current-session",
+      cwd: "/repo/current",
+      title: "当前有效任务",
+      updatedAt: 300,
+      lastActivityAt: 300,
+    };
+    const loadedSessions: string[] = [];
+    const loadTimeouts: number[] = [];
+    const dependencies: WorkBuddyAdapterDependencies = {
+      createDesktopClient: () => ({
+        connect: async () => undefined,
+        invoke: async () => true,
+        invokeWithTimeout: async (channel, timeoutMs, ...args) => {
+          if (channel === "session:load") {
+            const sessionId = String(args[0]);
+            loadedSessions.push(sessionId);
+            loadTimeouts.push(timeoutMs);
+            if (sessionId === staleSession.id) {
+              throw new Error("conversation not found");
+            }
+          }
+          return true;
+        },
+        close: async () => undefined,
+      }),
+      listSessions: async () => [staleSession, currentSession],
+      readSession: async (sessionId) => (
+        sessionId === staleSession.id ? staleSession : currentSession
+      ),
+      readMessages: async () => [],
+      readRunSummary: async () => null,
+      readLocalImage: async () => ({ data: "aW1hZ2U=", mimeType: "image/png" }),
+    };
+    const adapter = new WorkBuddyDesktopAdapter({
+      kind: "workbuddy",
+      command: "workbuddy",
+      cwd: "/repo",
+      sessionStartMode: "restore",
+      initialSharedSessionId: staleSession.id,
+    }, dependencies);
+
+    await adapter.start();
+
+    expect(loadedSessions).toEqual([staleSession.id]);
+    expect(loadTimeouts).toEqual([5_000]);
+    expect(adapter.getState()).toMatchObject({ status: "idle" });
+    expect(adapter.getState().sharedSessionId).toBeUndefined();
+    expect(adapter.getState().activeRuntimeSessionId).toBeUndefined();
+  });
+
   test("probes an empty WorkBuddy composer before deciding focus failed", () => {
     const script = buildWorkBuddyDesktopPromptScript();
 
@@ -54,6 +302,17 @@ describe("WorkBuddy Desktop adapter", () => {
       configDir,
       platform: "win32",
     })).toBe(`\\\\.\\pipe\\workbuddy-${instanceHash}-sidecar-control`);
+  });
+
+  test("prefers WorkBuddy custom titles and falls back to the latest generated title", () => {
+    expect(parseWorkBuddyTranscriptTitle([
+      JSON.stringify({ type: "ai-title", aiTitle: "自动标题" }),
+      JSON.stringify({ type: "custom-title", customTitle: "用户重命名" }),
+      JSON.stringify({ type: "ai-title", aiTitle: "后续自动标题" }),
+    ].join("\n"))).toBe("用户重命名");
+    expect(parseWorkBuddyTranscriptTitle(
+      JSON.stringify({ type: "ai-title", aiTitle: "战车模型模块化配置需求" }),
+    )).toBe("战车模型模块化配置需求");
   });
 
   test("opens and attaches to the exact existing WorkBuddy task without restarting the app", async () => {
@@ -157,6 +416,57 @@ describe("WorkBuddy Desktop adapter", () => {
     await client.close();
   });
 
+  test("switches WorkBuddy permission mode through the active sidecar session", async () => {
+    const acpCalls: Array<{ method: string; params: Record<string, unknown> }> = [];
+    const client = new WorkBuddyHybridRpcClient({
+      onEvent: () => undefined,
+    }, {
+      desktopHookAvailable: () => false,
+      desktopApplicationRunning: () => true,
+      listSidecarSessions: async () => [{
+        sessionId: "target-session",
+        acpEndpoint: "http://127.0.0.1:43123/api/v1/acp",
+      }],
+      openDesktopSession: async () => undefined,
+      sendDesktopPrompt: async () => undefined,
+      readSession: async () => ({
+        id: "target-session",
+        cwd: "/repo",
+        title: "目标任务",
+        customTitle: null,
+        status: "completed",
+        createdAt: 1,
+        updatedAt: 2,
+        lastActivityAt: 2,
+        projectId: null,
+        permissionMode: "default",
+      }),
+      readRunSummary: async () => null,
+      createAcpClient: () => ({
+        connect: async () => undefined,
+        request: async (method, params) => {
+          acpCalls.push({ method, params });
+          return {};
+        },
+        notify: async () => undefined,
+        respond: async () => undefined,
+        close: async () => undefined,
+      }),
+      delay: async () => undefined,
+      sessionReadyTimeoutMs: 100,
+    });
+
+    await client.connect();
+    await client.invoke("session:load", "target-session", { cwd: "/repo" });
+    await client.invoke("session:setMode", "target-session", { modeId: "acceptEdits" });
+
+    expect(acpCalls).toContainEqual({
+      method: "session/set_mode",
+      params: { sessionId: "target-session", modeId: "acceptEdits" },
+    });
+    await client.close();
+  });
+
   test("waits for the new WorkBuddy turn instead of treating the accepted idle snapshot as completed", async () => {
     let targetVisible = false;
     let sessionReadCount = 0;
@@ -217,18 +527,21 @@ describe("WorkBuddy Desktop adapter", () => {
     await client.close();
   });
 
-  test("does not restart an already-open WorkBuddy when neither desktop interface is ready", async () => {
-    let desktopClientCreated = false;
+  test("reconnects an explicitly selected already-open WorkBuddy when neither desktop interface is ready", async () => {
+    const launchPermissions: boolean[] = [];
+    let desktopConnectCount = 0;
     const client = new WorkBuddyHybridRpcClient({
       allowDesktopApplicationLaunch: true,
       onEvent: () => undefined,
     }, {
       desktopHookAvailable: () => false,
       desktopApplicationRunning: () => true,
-      createDesktopClient: () => {
-        desktopClientCreated = true;
+      createDesktopClient: (options) => {
+        launchPermissions.push(options.allowDesktopApplicationLaunch === true);
         return {
-          connect: async () => undefined,
+          connect: async () => {
+            desktopConnectCount += 1;
+          },
           invoke: async () => ({}),
           close: async () => undefined,
         };
@@ -238,8 +551,11 @@ describe("WorkBuddy Desktop adapter", () => {
       },
     });
 
-    await expect(client.connect()).rejects.toThrow("不会自动重启应用");
-    expect(desktopClientCreated).toBe(false);
+    await client.connect();
+
+    expect(launchPermissions).toEqual([true]);
+    expect(desktopConnectCount).toBe(1);
+    await client.close();
   });
 
   test("forwards WorkBuddy ACP approvals to the existing desktop task", async () => {
@@ -616,6 +932,203 @@ describe("WorkBuddy Desktop adapter", () => {
       channel: "session:resolvePermission",
       args: ["wb-session", "permission-1", "allow-always"],
     });
+    expect(adapter.getState().pendingApproval).toBeNull();
+  });
+
+  test("routes AskUserQuestion permission envelopes to user input and returns structured answers", async () => {
+    let onEvent: ((channel: string, data: unknown) => void) | null = null;
+    const calls: Array<{ channel: string; args: unknown[] }> = [];
+    const row = {
+      id: "wb-session",
+      cwd: "/repo",
+      title: null,
+      customTitle: null,
+      status: "working",
+      createdAt: 100,
+      updatedAt: 200,
+      lastActivityAt: 200,
+      projectId: null,
+    };
+    const dependencies: WorkBuddyAdapterDependencies = {
+      createDesktopClient: (callbacks) => {
+        onEvent = callbacks.onEvent;
+        return {
+          connect: async () => undefined,
+          invoke: async (channel, ...args) => {
+            calls.push({ channel, args });
+            return true;
+          },
+          close: async () => undefined,
+        };
+      },
+      listSessions: async () => [row],
+      readSession: async () => row,
+      readMessages: async () => [],
+      readRunSummary: async () => null,
+      readSessionTitle: async () => "战车配置器",
+      readLocalImage: async () => ({ data: "aW1hZ2U=", mimeType: "image/png" }),
+    };
+    const adapter = new WorkBuddyDesktopAdapter({
+      kind: "workbuddy",
+      command: "workbuddy",
+      cwd: "/repo",
+      sessionStartMode: "restore",
+    }, dependencies);
+    const events: BridgeEvent[] = [];
+    adapter.setEventSink((event) => events.push(event));
+
+    await adapter.start();
+    onEvent!("session:event:wb-session", {
+      type: "permissionRequest",
+      sessionId: "wb-session",
+      requestId: "call-question-1",
+      request: {
+        options: [
+          { optionId: "allow", name: "允许", kind: "allow_once" },
+          { optionId: "reject", name: "拒绝", kind: "reject_once" },
+        ],
+        toolCall: {
+          toolCallId: "call-question-1",
+          rawInput: {
+            questions: [
+              {
+                question: "想要哪种交付形态？",
+                header: "交付形态",
+                options: [
+                  { label: "网页3D配置器", description: "可旋转缩放" },
+                  { label: "3D模型文件", description: "输出 GLB" },
+                ],
+              },
+              {
+                question: "需要配置哪些部分？",
+                header: "配置维度",
+                multiSelect: true,
+                options: [
+                  { label: "车身底盘", description: "底盘与装甲" },
+                  { label: "炮塔与主炮", description: "炮塔与武器" },
+                ],
+              },
+            ],
+          },
+        },
+      },
+    });
+
+    expect(adapter.getState().status).toBe("awaiting_input");
+    expect(adapter.getState().pendingApproval).toBeNull();
+    expect(adapter.getState().pendingUserInput?.questions).toEqual([
+      {
+        id: "q_0",
+        header: "交付形态",
+        question: "想要哪种交付形态？",
+        isOther: false,
+        isSecret: false,
+        multiSelect: false,
+        options: [
+          { label: "网页3D配置器", description: "可旋转缩放" },
+          { label: "3D模型文件", description: "输出 GLB" },
+        ],
+      },
+      {
+        id: "q_1",
+        header: "配置维度",
+        question: "需要配置哪些部分？",
+        isOther: false,
+        isSecret: false,
+        multiSelect: true,
+        options: [
+          { label: "车身底盘", description: "底盘与装甲" },
+          { label: "炮塔与主炮", description: "炮塔与武器" },
+        ],
+      },
+    ]);
+    expect(events.some((event) => event.type === "approval_required")).toBe(false);
+    expect(events.some((event) =>
+      event.type === "user_input_required" &&
+      event.request.threadId === "wb-session"
+    )).toBe(true);
+    expect((await adapter.listResumeSessions(10))[0]?.title).toBe("战车配置器");
+    expect((await adapter.listResumeSessions(10))[0]?.runtimeStatus).toEqual({
+      type: "active",
+      activeFlags: ["waitingOnUserInput"],
+    });
+    expect(await adapter.resolveApprovalForSession()).toBe(false);
+
+    expect(await adapter.submitUserInput({
+      q_0: ["网页3D配置器"],
+      q_1: ["车身底盘", "炮塔与主炮"],
+    })).toBe(true);
+    expect(calls.at(-1)).toEqual({
+      channel: "session:answerQuestion",
+      args: ["wb-session", "call-question-1", {
+        q_0: "网页3D配置器",
+        q_1: ["车身底盘", "炮塔与主炮"],
+      }],
+    });
+    expect(adapter.getState().pendingUserInput).toBeNull();
+  });
+
+  test("keeps replayed AskUserQuestion pending after startup session restore", async () => {
+    let onEvent: ((channel: string, data: unknown) => void) | null = null;
+    const row = {
+      id: "wb-session",
+      cwd: "/repo",
+      title: "等待补充信息",
+      customTitle: null,
+      status: "working",
+      createdAt: 100,
+      updatedAt: 200,
+      lastActivityAt: 200,
+      projectId: null,
+    };
+    const dependencies: WorkBuddyAdapterDependencies = {
+      createDesktopClient: (callbacks) => {
+        onEvent = callbacks.onEvent;
+        return {
+          connect: async () => undefined,
+          invoke: async (channel) => {
+            if (channel === "session:load") {
+              onEvent!("session:event:wb-session", {
+                type: "permissionRequest",
+                sessionId: "wb-session",
+                requestId: "call-question-on-restore",
+                request: {
+                  toolCall: {
+                    toolCallId: "call-question-on-restore",
+                    name: "AskUserQuestion",
+                    rawInput: {
+                      questions: [{
+                        question: "请选择输出格式",
+                        options: [{ label: "Markdown" }, { label: "PDF" }],
+                      }],
+                    },
+                  },
+                },
+              });
+            }
+            return true;
+          },
+          close: async () => undefined,
+        };
+      },
+      listSessions: async () => [row],
+      readSession: async () => row,
+      readMessages: async () => [],
+      readRunSummary: async () => null,
+      readLocalImage: async () => ({ data: "aW1hZ2U=", mimeType: "image/png" }),
+    };
+    const adapter = new WorkBuddyDesktopAdapter({
+      kind: "workbuddy",
+      command: "workbuddy",
+      cwd: "/repo",
+      sessionStartMode: "restore",
+    }, dependencies);
+
+    await adapter.start();
+
+    expect(adapter.getState().status).toBe("awaiting_input");
+    expect(adapter.getState().pendingUserInput?.questions[0]?.question)
+      .toBe("请选择输出格式");
     expect(adapter.getState().pendingApproval).toBeNull();
   });
 

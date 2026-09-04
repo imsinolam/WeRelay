@@ -39,6 +39,16 @@ import {
   WERELAY_RELAY_TASK_LINK_REGISTER_PATH,
   WeRelayRelayTaskLinkStore,
 } from "./relay-task-links.ts";
+import {
+  EphemeralLocalPreviewStore,
+  isLocalPreviewPackage,
+} from "../preview/local-preview.ts";
+import {
+  createLocalPreviewOpenHtml,
+  createLocalPreviewViewerHtml,
+  localPreviewOpenContentSecurityPolicy,
+  localPreviewViewerContentSecurityPolicy,
+} from "../preview/local-preview-web.ts";
 
 const ASSET_VERSION_PLACEHOLDER = "__WE_RELAY_ASSET_VERSION__";
 const MOBILE_HTML = CODEX_MOBILE_HTML.replaceAll(
@@ -64,16 +74,13 @@ const DEFAULT_POLL_TIMEOUT_MS = 25_000;
 const DEFAULT_COMMAND_TIMEOUT_MS = 90_000;
 const DEFAULT_COMMAND_LEASE_MS = 35_000;
 const DEFAULT_DEVICE_OFFLINE_MS = 45_000;
-const DEFAULT_WARM_REFRESH_INTERVAL_MS = 8_000;
 const DEFAULT_WARM_CACHE_FRESH_MS = 5_000;
 const DEFAULT_WARM_CACHE_TTL_MS = 30 * 60_000;
-const DEFAULT_WARM_FAILURE_RETRY_MS = 60_000;
 const MAX_WARM_SESSIONS = 4;
 const MAX_WARM_PATHS_PER_SESSION = 24;
 const MAX_WARM_PENDING_COMMANDS = 4;
 const MAX_WARM_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_WARM_SESSION_BYTES = 12 * 1024 * 1024;
-const GLOBAL_WARM_SESSION_KEY = "__device_warm_cache__";
 const MAX_PENDING_COMMANDS = 64;
 
 export type StartWeRelayRelayServerOptions = {
@@ -85,7 +92,6 @@ export type StartWeRelayRelayServerOptions = {
   commandTimeoutMs?: number;
   commandLeaseMs?: number;
   deviceOfflineMs?: number;
-  warmRefreshIntervalMs?: number;
   warmCacheFreshMs?: number;
   warmCacheTtlMs?: number;
   taskLinkStateFile?: string;
@@ -124,12 +130,10 @@ type WarmSession = {
   key: string;
   cookieHeader: string;
   expiresAtMs: number;
-  activeAdapter: string;
   paths: string[];
   entries: Map<string, WarmCacheEntry>;
   refreshing: Set<string>;
-  refreshCursor: number;
-  touchedAtMs: number;
+  lastUserActivityAtMs: number;
 };
 
 class RelayHttpError extends Error {
@@ -294,9 +298,6 @@ function isWarmCacheablePath(method: string, url: URL): boolean {
   if (pathname === "/api/auth/status" || pathname === "/api/adapters" ||
       pathname === "/api/task-board" || pathname === "/api/tasks") return true;
   if (/^\/api\/tasks\/[^/]+\/model$/.test(pathname)) return true;
-  if (/^\/api\/tasks\/[^/]+\/messages$/.test(pathname)) {
-    return !url.searchParams.has("before");
-  }
   return false;
 }
 
@@ -398,10 +399,6 @@ export async function startWeRelayRelayServer(
   const commandTimeoutMs = options.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
   const commandLeaseMs = options.commandLeaseMs ?? DEFAULT_COMMAND_LEASE_MS;
   const deviceOfflineMs = options.deviceOfflineMs ?? DEFAULT_DEVICE_OFFLINE_MS;
-  const warmRefreshIntervalMs = Math.max(
-    10,
-    options.warmRefreshIntervalMs ?? DEFAULT_WARM_REFRESH_INTERVAL_MS,
-  );
   const warmCacheFreshMs = Math.max(
     0,
     options.warmCacheFreshMs ?? DEFAULT_WARM_CACHE_FRESH_MS,
@@ -417,13 +414,13 @@ export async function startWeRelayRelayServer(
       ? { stateFile: options.taskLinkStateFile }
       : {}),
   });
+  const localPreviewStore = new EphemeralLocalPreviewStore({ now });
   const pendingCommands = new Map<string, PendingCommand>();
   const commandOrder: string[] = [];
   const warmSessions = new Map<string, WarmSession>();
   const warmSessionOrder: string[] = [];
   let waitingPoll: WaitingPoll | null = null;
   let lastDeviceSeenAtMs = 0;
-  let globalWarmRetryAtMs = 0;
 
   const cleanCommandOrder = () => {
     while (commandOrder.length > 0 && !pendingCommands.has(commandOrder[0] ?? "")) {
@@ -434,6 +431,7 @@ export async function startWeRelayRelayServer(
   const nextCommand = (): PendingCommand | null => {
     cleanCommandOrder();
     const currentMs = now();
+    let firstReadable: PendingCommand | null = null;
     for (const commandId of commandOrder) {
       const pending = pendingCommands.get(commandId);
       if (!pending) {
@@ -446,11 +444,14 @@ export async function startWeRelayRelayServer(
         continue;
       }
       if (pending.leaseExpiresAtMs <= currentMs) {
-        return pending;
+        if (pending.command.request.method !== "GET") {
+          return pending;
+        }
+        firstReadable ??= pending;
       }
     }
     cleanCommandOrder();
-    return null;
+    return firstReadable;
   };
 
   const deliverCommand = (response: ServerResponse): boolean => {
@@ -555,8 +556,7 @@ export async function startWeRelayRelayServer(
   };
 
   const touchWarmSession = (session: WarmSession) => {
-    session.touchedAtMs = now();
-    if (session.key === GLOBAL_WARM_SESSION_KEY) return;
+    session.lastUserActivityAtMs = now();
     const index = warmSessionOrder.indexOf(session.key);
     if (index >= 0) warmSessionOrder.splice(index, 1);
     warmSessionOrder.push(session.key);
@@ -597,38 +597,16 @@ export async function startWeRelayRelayServer(
       key,
       cookieHeader: `codex_mobile_session=${encodeURIComponent(token)}`,
       expiresAtMs: sessionTokenExpiryMs(token, now() + warmCacheTtlMs),
-      activeAdapter: "",
       paths: [],
       entries: new Map(),
       refreshing: new Set(),
-      refreshCursor: 0,
-      touchedAtMs: now(),
+      lastUserActivityAtMs: now(),
     };
-    for (const path of [
-      "/api/auth/status",
-      "/api/adapters",
-      "/api/task-board",
-      "/api/tasks",
-    ]) addWarmPath(session, path);
     warmSessions.set(key, session);
     touchWarmSession(session);
     return session;
   };
 
-  const globalWarmSession: WarmSession = {
-    key: GLOBAL_WARM_SESSION_KEY,
-    cookieHeader: "",
-    expiresAtMs: Number.MAX_SAFE_INTEGER,
-    activeAdapter: "",
-    paths: [],
-    entries: new Map(),
-    refreshing: new Set(),
-    refreshCursor: 0,
-    touchedAtMs: now(),
-  };
-  for (const path of ["/api/adapters", "/api/task-board", "/api/tasks"]) {
-    addWarmPath(globalWarmSession, path);
-  }
 
   const warmSessionFromRequest = (request: IncomingMessage): WarmSession | null => {
     const token = readCookieValue(request.headers.cookie, "codex_mobile_session");
@@ -636,55 +614,17 @@ export async function startWeRelayRelayServer(
     const key = warmSessionKey(token);
     const session = warmSessions.get(key) ?? null;
     if (!session) return null;
-    if (session.expiresAtMs <= now() || now() - session.touchedAtMs > warmCacheTtlMs) {
+    if (
+      session.expiresAtMs <= now() ||
+      now() - session.lastUserActivityAtMs > warmCacheTtlMs
+    ) {
       deleteWarmSession(key);
       return null;
     }
-    if (session.key === GLOBAL_WARM_SESSION_KEY) session.touchedAtMs = now();
-    else touchWarmSession(session);
+    touchWarmSession(session);
     return session;
   };
 
-  const learnWarmPaths = (
-    session: WarmSession,
-    path: string,
-    response: WeRelayRelayCommandResponse,
-  ) => {
-    const payload = responseJson(response);
-    if (!payload || typeof payload !== "object" || Array.isArray(payload)) return;
-    const record = payload as Record<string, unknown>;
-    const url = new URL(path, "http://werelay-relay.local");
-    if (url.pathname === "/api/adapters" && typeof record.activeAdapter === "string") {
-      session.activeAdapter = record.activeAdapter;
-      addWarmPath(
-        session,
-        `/api/tasks?adapter=${encodeURIComponent(record.activeAdapter)}`,
-      );
-    }
-    const isTaskList = url.pathname === "/api/tasks";
-    const isTaskBoard = url.pathname === "/api/task-board";
-    if ((!isTaskList && !isTaskBoard) || !Array.isArray(record.tasks)) return;
-    const fallbackAdapter = url.searchParams.get("adapter")?.trim() || session.activeAdapter;
-    for (const task of record.tasks.slice(0, 5)) {
-      if (!task || typeof task !== "object" || Array.isArray(task)) continue;
-      const taskRecord = task as Record<string, unknown>;
-      const threadId = taskRecord.threadId;
-      const adapter = isTaskBoard && typeof taskRecord.adapter === "string"
-        ? taskRecord.adapter.trim()
-        : fallbackAdapter;
-      if (typeof threadId !== "string" || !threadId || !adapter) continue;
-      addWarmPath(session, `/api/tasks?adapter=${encodeURIComponent(adapter)}`);
-      const base = `/api/tasks/${encodeURIComponent(threadId)}/messages`;
-      addWarmPath(
-        session,
-        `${base}?limit=40&history=1&adapter=${encodeURIComponent(adapter)}`,
-      );
-      addWarmPath(
-        session,
-        `${base}?limit=5&adapter=${encodeURIComponent(adapter)}`,
-      );
-    }
-  };
 
   const storeWarmResponse = (
     session: WarmSession,
@@ -714,8 +654,6 @@ export async function startWeRelayRelayServer(
       session.entries.delete(oldest[0]);
       totalBytes -= oldest[1].sizeBytes;
     }
-    learnWarmPaths(session, path, response);
-    touchWarmSession(session);
   };
 
   const responseAuthenticatesSession = (
@@ -735,12 +673,45 @@ export async function startWeRelayRelayServer(
   };
 
   const invalidateWarmResponses = () => {
-    globalWarmSession.entries.clear();
-    globalWarmSession.refreshCursor = 0;
     for (const warmSession of warmSessions.values()) {
       warmSession.entries.clear();
-      warmSession.refreshCursor = 0;
     }
+  };
+
+  const installLocalPreviewPackage = (
+    url: URL,
+    commandResponse: WeRelayRelayCommandResponse,
+  ): WeRelayRelayCommandResponse => {
+    if (
+      commandResponse.statusCode < 200 ||
+      commandResponse.statusCode >= 300 ||
+      !/^\/api\/previews\/jobs\/[^/]+$/.test(url.pathname)
+    ) return commandResponse;
+    const payload = responseJson(commandResponse);
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      return commandResponse;
+    }
+    const record = payload as Record<string, unknown>;
+    if (record.previewPackage === undefined) return commandResponse;
+    if (!isLocalPreviewPackage(record.previewPackage)) {
+      throw new RelayHttpError(502, "电脑返回的手机预览部署包无效。");
+    }
+    localPreviewStore.put(record.previewPackage);
+    const deploymentId = record.previewPackage.deploymentId;
+    delete record.previewPackage;
+    record.deploymentId = deploymentId;
+    record.entryPath = record.entryPath || localPreviewStore.entryPath(deploymentId);
+    record.readyUrl = `/preview/view/${encodeURIComponent(deploymentId)}`;
+    const headers = { ...commandResponse.headers };
+    for (const name of Object.keys(headers)) {
+      if (name.toLowerCase() === "content-length") delete headers[name];
+    }
+    headers["content-type"] = "application/json; charset=utf-8";
+    return {
+      ...commandResponse,
+      headers,
+      bodyBase64: Buffer.from(JSON.stringify(record)).toString("base64"),
+    };
   };
 
   const recordBrowserResponse = (
@@ -753,6 +724,12 @@ export async function startWeRelayRelayServer(
     let session = requestToken ? warmSessions.get(warmSessionKey(requestToken)) : undefined;
     if (requestToken && responseAuthenticatesSession(path, commandResponse)) {
       session = ensureWarmSession(requestToken);
+    } else if (
+      session &&
+      commandResponse.statusCode !== 401 &&
+      commandResponse.statusCode !== 403
+    ) {
+      touchWarmSession(session);
     }
     if (session && request.method === "GET" && isWarmCacheablePath("GET", url)) {
       storeWarmResponse(session, path, commandResponse);
@@ -766,29 +743,19 @@ export async function startWeRelayRelayServer(
     if (
       session.refreshing.has(path) ||
       session.expiresAtMs <= now() ||
-      pendingCommands.size >= MAX_WARM_PENDING_COMMANDS ||
-      (session.key === GLOBAL_WARM_SESSION_KEY && now() < globalWarmRetryAtMs)
+      pendingCommands.size >= MAX_WARM_PENDING_COMMANDS
     ) return;
     session.refreshing.add(path);
     try {
       const response = await enqueueRelayRequest({
         method: "GET",
         path,
-        headers: session.key === GLOBAL_WARM_SESSION_KEY
-          ? { "x-werelay-prewarm": "1" }
-          : { cookie: session.cookieHeader },
+        headers: { cookie: session.cookieHeader },
         clientAddress: "relay-cache",
         forwardedProto: "https",
       });
       if (response.statusCode === 401 || response.statusCode === 403) {
-        if (session.key === GLOBAL_WARM_SESSION_KEY) {
-          session.entries.clear();
-          session.refreshCursor = 0;
-          session.touchedAtMs = now();
-          globalWarmRetryAtMs = now() + DEFAULT_WARM_FAILURE_RETRY_MS;
-        } else {
-          deleteWarmSession(session.key);
-        }
+        deleteWarmSession(session.key);
         return;
       }
       const pathname = new URL(path, "http://werelay-relay.local").pathname;
@@ -798,7 +765,6 @@ export async function startWeRelayRelayServer(
       }
       if (responseAuthenticatesSession(path, response) ||
           !pathname.startsWith("/api/auth/")) {
-        if (session.key === GLOBAL_WARM_SESSION_KEY) globalWarmRetryAtMs = 0;
         storeWarmResponse(session, path, response);
       }
     } catch {
@@ -807,36 +773,6 @@ export async function startWeRelayRelayServer(
       session.refreshing.delete(path);
     }
   };
-
-  const scheduleWarmRefresh = () => {
-    if (!lastDeviceSeenAtMs || now() - lastDeviceSeenAtMs > deviceOfflineMs) return;
-    for (const session of [globalWarmSession, ...warmSessions.values()]) {
-      if (
-        session.key !== GLOBAL_WARM_SESSION_KEY &&
-        (session.expiresAtMs <= now() || now() - session.touchedAtMs > warmCacheTtlMs)
-      ) {
-        deleteWarmSession(session.key);
-        continue;
-      }
-      if (
-        !session.paths.length ||
-        (session.key === GLOBAL_WARM_SESSION_KEY && now() < globalWarmRetryAtMs)
-      ) continue;
-      for (let offset = 0; offset < session.paths.length; offset += 1) {
-        const index = (session.refreshCursor + offset) % session.paths.length;
-        const path = session.paths[index];
-        if (!path || session.refreshing.has(path)) continue;
-        const entry = session.entries.get(path);
-        if (entry && now() - entry.updatedAtMs < warmCacheFreshMs) continue;
-        session.refreshCursor = (index + 1) % session.paths.length;
-        void refreshWarmPath(session, path);
-        break;
-      }
-    }
-  };
-
-  const warmRefreshTimer = setInterval(scheduleWarmRefresh, warmRefreshIntervalMs);
-  warmRefreshTimer.unref?.();
 
   const activeSockets = new Set<import("node:net").Socket>();
   const server: Server = http.createServer((request, response) => {
@@ -879,6 +815,77 @@ export async function startWeRelayRelayServer(
       if (method === "GET" && url.pathname === "/favicon.ico") {
         response.writeHead(204, { "cache-control": "no-store" });
         response.end();
+        return;
+      }
+      if (method === "GET" && url.pathname === "/preview/open") {
+        const nonce = crypto.randomBytes(18).toString("base64");
+        sendText(
+          response,
+          200,
+          "text/html; charset=utf-8",
+          createLocalPreviewOpenHtml(nonce),
+          {
+            "content-security-policy": localPreviewOpenContentSecurityPolicy(nonce),
+            "referrer-policy": "no-referrer",
+          },
+        );
+        return;
+      }
+      const localPreviewViewRoute = url.pathname.match(/^\/preview\/view\/([^/]+)$/);
+      if (method === "GET" && localPreviewViewRoute?.[1]) {
+        if (!warmSessionFromRequest(request)) {
+          sendJson(response, 401, { error: "请先返回 WeRelay 任务页完成登录。" });
+          return;
+        }
+        const deploymentId = decodeURIComponent(localPreviewViewRoute[1]);
+        const entryPath = localPreviewStore.entryPath(deploymentId);
+        const label = localPreviewStore.sourceLabel(deploymentId);
+        if (!entryPath || !label) {
+          sendText(response, 404, "text/plain; charset=utf-8", "这次手机预览已经失效，请返回任务后重新打开链接。");
+          return;
+        }
+        const nonce = crypto.randomBytes(18).toString("base64");
+        sendText(
+          response,
+          200,
+          "text/html; charset=utf-8",
+          createLocalPreviewViewerHtml({
+            nonce,
+            deploymentId,
+            entryPath,
+            sourceLabel: label,
+          }),
+          {
+            "content-security-policy": localPreviewViewerContentSecurityPolicy(nonce),
+            "referrer-policy": "no-referrer",
+          },
+        );
+        return;
+      }
+      const localPreviewContentRoute = url.pathname.match(
+        /^\/preview\/content\/([^/]+)\/(.+)$/,
+      );
+      if (method === "GET" && localPreviewContentRoute?.[1] && localPreviewContentRoute[2]) {
+        if (!warmSessionFromRequest(request)) {
+          sendJson(response, 401, { error: "请先返回 WeRelay 任务页完成登录。" });
+          return;
+        }
+        const deploymentId = decodeURIComponent(localPreviewContentRoute[1]);
+        const content = localPreviewStore.read(deploymentId, localPreviewContentRoute[2]);
+        if (!content) {
+          sendText(response, 404, "text/plain; charset=utf-8", "预览内容不存在或已经失效。");
+          return;
+        }
+        response.writeHead(200, {
+          "content-type": content.contentType,
+          "content-length": String(content.body.length),
+          "cache-control": content.cacheControl,
+          "content-security-policy": content.contentSecurityPolicy,
+          "content-disposition": "inline",
+          "x-content-type-options": "nosniff",
+          "referrer-policy": "no-referrer",
+        });
+        response.end(content.body);
         return;
       }
       if (method === "GET" && url.pathname === WERELAY_RELAY_CLIENT_IP_PATH) {
@@ -997,7 +1004,6 @@ export async function startWeRelayRelayServer(
           clearTimeout(waitingPoll.timer);
           waitingPoll = null;
         });
-        scheduleWarmRefresh();
         return;
       }
 
@@ -1028,8 +1034,7 @@ export async function startWeRelayRelayServer(
           const path = `${url.pathname}${url.search}`;
           if (isWarmCacheablePath(method, url)) {
             const warmSession = warmSessionFromRequest(request);
-            const entry = warmSession?.entries.get(path) ??
-              (warmSession ? globalWarmSession.entries.get(path) : undefined);
+            const entry = warmSession?.entries.get(path);
             if (warmSession && entry && now() - entry.updatedAtMs <= warmCacheTtlMs) {
               writeForwardedResponse(response, entry.response, {
                 "x-werelay-cache": "warm",
@@ -1042,7 +1047,8 @@ export async function startWeRelayRelayServer(
               return;
             }
           }
-          const commandResponse = await enqueueBrowserRequest(request, url);
+          const rawCommandResponse = await enqueueBrowserRequest(request, url);
+          const commandResponse = installLocalPreviewPackage(url, rawCommandResponse);
           recordBrowserResponse(request, url, commandResponse);
           writeForwardedResponse(response, commandResponse);
         } catch (error) {
@@ -1094,7 +1100,6 @@ export async function startWeRelayRelayServer(
     port,
     baseUrl: `http://${host}:${port}`,
     close: async () => {
-      clearInterval(warmRefreshTimer);
       if (waitingPoll) {
         clearTimeout(waitingPoll.timer);
         if (!waitingPoll.response.headersSent) {

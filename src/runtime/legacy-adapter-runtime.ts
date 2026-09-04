@@ -17,6 +17,9 @@ export class LegacyAdapterRuntime implements RuntimeHost {
   readonly getSessionRunSummary: BridgeAdapter["getSessionRunSummary"];
   readonly getSessionModelState: BridgeAdapter["getSessionModelState"];
   readonly setSessionModel: BridgeAdapter["setSessionModel"];
+  readonly setSessionReasoningEffort: BridgeAdapter["setSessionReasoningEffort"];
+  readonly getSessionPermissionState: BridgeAdapter["getSessionPermissionState"];
+  readonly setSessionPermission: BridgeAdapter["setSessionPermission"];
   readonly getQueuedTaskInputs: BridgeAdapter["getQueuedTaskInputs"];
   readonly updateQueuedTaskInput: BridgeAdapter["updateQueuedTaskInput"];
   readonly deleteQueuedTaskInput: BridgeAdapter["deleteQueuedTaskInput"];
@@ -44,6 +47,9 @@ export class LegacyAdapterRuntime implements RuntimeHost {
     this.getSessionRunSummary = adapter.getSessionRunSummary?.bind(adapter);
     this.getSessionModelState = adapter.getSessionModelState?.bind(adapter);
     this.setSessionModel = adapter.setSessionModel?.bind(adapter);
+    this.setSessionReasoningEffort = adapter.setSessionReasoningEffort?.bind(adapter);
+    this.getSessionPermissionState = adapter.getSessionPermissionState?.bind(adapter);
+    this.setSessionPermission = adapter.setSessionPermission?.bind(adapter);
     this.getQueuedTaskInputs = adapter.getQueuedTaskInputs?.bind(adapter);
     this.updateQueuedTaskInput = adapter.updateQueuedTaskInput?.bind(adapter);
     this.deleteQueuedTaskInput = adapter.deleteQueuedTaskInput?.bind(adapter);

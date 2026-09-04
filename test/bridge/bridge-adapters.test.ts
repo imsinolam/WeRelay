@@ -176,6 +176,7 @@ describe("Codex desktop persisted runtime status", () => {
       cwd: process.cwd(),
       renderMode: "headless",
     }) as any;
+    adapter.isRpcSocketOpen = () => true;
     adapter.sendRpcRequest = async () => ({
       data: [
         {
@@ -248,6 +249,7 @@ describe("Codex desktop persisted runtime status", () => {
       cwd: process.cwd(),
       renderMode: "headless",
     }) as any;
+    adapter.isRpcSocketOpen = () => true;
     adapter.sendRpcRequest = async () => ({
       data: [{
         id: threadId,

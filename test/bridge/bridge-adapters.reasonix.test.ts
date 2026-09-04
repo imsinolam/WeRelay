@@ -152,6 +152,19 @@ describe("reasonix adapter", () => {
       model: "kimi-k3",
     });
 
+    const automaticTranscript = path.join(sessionDir, "automatic-session.jsonl");
+    fs.writeFileSync(automaticTranscript, [
+      JSON.stringify({ role: "user", content: "自动命名任务" }),
+      JSON.stringify({ role: "assistant", content: "自动命名任务已完成。" }),
+    ].join("\n"), "utf8");
+    writeJson(`${automaticTranscript}.meta`, {
+      id: "automatic-session",
+      workspace_root: path.join(stateHome, "automatic-project"),
+      topic_title: "自动标题",
+      updated_at: "2026-08-05T11:30:00Z",
+      turns: 1,
+    });
+
     const projectStateRoot = path.join(stateHome, "projects", "project-store");
     const projectSessionDir = path.join(projectStateRoot, "sessions");
     const projectCwd = path.join(stateHome, "project-workspace");
@@ -175,17 +188,25 @@ describe("reasonix adapter", () => {
     const sessions = await listReasonixSessions(currentCwd, 10);
     expect(sessions.map((session) => session.sessionId)).toEqual([
       "project-session",
+      "automatic-session",
       "acp-session",
       "native-session",
     ]);
     expect(sessions.map((session) => session.title)).toEqual([
       "项目范围任务",
+      "自动标题",
       "ACP 任务",
       "原生任务",
     ]);
+    expect(sessions.map((session) => session.projectName)).toEqual([
+      "project-workspace",
+      undefined,
+      undefined,
+      "native-project",
+    ]);
     expect(sessions[0]?.cwd).toBe(projectCwd);
-    expect(sessions[1]?.cwd).toBe(acpCwd);
-    expect(sessions[2]?.cwd).toBe(nativeCwd);
+    expect(sessions[2]?.cwd).toBe(acpCwd);
+    expect(sessions[3]?.cwd).toBe(nativeCwd);
     expect(resolveReasonixSessionStateRoot("project-session")).toBe(projectStateRoot);
     expect(resolveReasonixSessionCwd("native-session")).toBe(nativeCwd);
     expect(await readReasonixSessionMessages(currentCwd, "native-session")).toEqual([

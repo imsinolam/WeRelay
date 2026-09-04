@@ -137,9 +137,9 @@ describe("Claude stored sessions", () => {
     expect(sessions[0]).toMatchObject({
       title: "新标题",
       cwd: "/repo/new",
-      projectName: "new",
       transcriptPath: newer,
     });
+    expect(sessions[0]?.projectName).toBeUndefined();
     expect(readClaudeStoredSessionMessages(newer).at(-1)?.text).toBe("完成：新标题");
   });
 

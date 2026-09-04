@@ -274,14 +274,18 @@ export function normalizeAcpSessionCandidates(
       return [];
     }
     const sessionCwd = readString(entry.cwd) ?? cwd;
+    const customTitle = readString(entry.customTitle);
+    const projectName = customTitle
+      ? sessionCwd.split(/[\\/]/).filter(Boolean).at(-1)
+      : undefined;
     const lastUpdatedAt = readString(entry.updatedAt) ?? readString(entry.lastUpdatedAt) ?? nowIso();
     return [{
       sessionId,
       threadId: sessionId,
-      title: readString(entry.title) ?? `会话 ${sessionId.slice(0, 8)}`,
+      title: customTitle ?? readString(entry.title) ?? `会话 ${sessionId.slice(0, 8)}`,
       lastUpdatedAt,
       cwd: sessionCwd,
-      projectName: sessionCwd.split(/[\\/]/).filter(Boolean).at(-1),
+      ...(projectName ? { projectName } : {}),
     }];
   }).sort((left, right) =>
     Date.parse(right.lastUpdatedAt) - Date.parse(left.lastUpdatedAt)
@@ -505,7 +509,6 @@ export class AcpBridgeAdapter implements BridgeAdapter {
       title: `${this.config.kind} 当前会话`,
       lastUpdatedAt: this.state.lastOutputAt ?? this.state.startedAt ?? nowIso(),
       cwd: this.options.cwd,
-      projectName: this.options.cwd.split(/[\\/]/).filter(Boolean).at(-1),
     })];
   }
 

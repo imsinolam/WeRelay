@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   activateGlobalTaskCandidate,
   buildGlobalTaskSnapshot,
+  formatGlobalTaskDisplayTitle,
   formatGlobalTaskList,
   formatGlobalTaskSearchResults,
   globalTaskIdentityKey,
@@ -25,6 +26,27 @@ function candidate(
 }
 
 describe("global task index", () => {
+  test("keeps addresses and file names from becoming links in ClawBot task lists", () => {
+    const title = "你是第 6 批评审，请读取 https://example.com/reviews/quality-review.md、short-visual.md，以及 /Users/example/Documents/review.md 后继续处理";
+    const displayTitle = formatGlobalTaskDisplayTitle(title);
+
+    expect(displayTitle).not.toContain("https://");
+    expect(displayTitle).not.toContain("example.com");
+    expect(displayTitle).not.toContain("quality-review.md");
+    expect(displayTitle).not.toContain("short-visual.md");
+    expect(displayTitle).not.toContain("/Users/");
+    expect(displayTitle).toContain("quality-review．md");
+    expect(Array.from(displayTitle).length).toBeLessThanOrEqual(72);
+
+    const snapshot = buildGlobalTaskSnapshot([
+      candidate("codex", "linked", title, "2026-08-31T10:00:00.000Z"),
+    ]);
+    const output = formatGlobalTaskList({ snapshot, startIndex: 0, pageSize: 10 });
+    expect(output).toContain(displayTitle);
+    expect(output).not.toContain("https://");
+    expect(output).not.toContain(".md");
+  });
+
   test("limits the ClawBot aggregate to terminals that are connected or visibly running", () => {
     expect(selectRunningGlobalTaskAdapters({
       connectedAdapters: ["deepseek", "codex"],
@@ -90,8 +112,9 @@ describe("global task index", () => {
       "claude:claude-1",
     ]);
     const output = formatGlobalTaskList({ snapshot, startIndex: 0, pageSize: 10 });
-    expect(output).toContain("最近任务");
-    expect(output).toContain("全部终端 · 按更新时间排序");
+    expect(output.startsWith("全部任务\n")).toBe(true);
+    expect(output).not.toContain("最近任务");
+    expect(output).not.toContain("全部终端 · 按更新时间排序");
     expect(output).not.toContain("每个运行终端优先显示最近一条");
     expect(output).not.toContain("────────");
     expect(output).toContain("1. [Codex · DeskRelay] Codex 最新任务");
@@ -120,7 +143,7 @@ describe("global task index", () => {
     expect(output).toContain("1. [DSH · trade_highlow_v3] US中转服务器");
   });
 
-  test("uses a consistent text marker for a running task", () => {
+  test("uses a consistent green processing marker for a running task", () => {
     const running = candidate(
       "codex",
       "running-1",
@@ -135,8 +158,7 @@ describe("global task index", () => {
       pageSize: 10,
     });
 
-    expect(output).toContain("1. [Codex] 正在执行的任务 · 处理中");
-    expect(output).not.toContain("🟢");
+    expect(output).toContain("1. [Codex] 正在执行的任务 · 处理中 🟢");
   });
 
 

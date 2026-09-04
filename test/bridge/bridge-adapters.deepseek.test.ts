@@ -154,9 +154,86 @@ function createFakeClient(queue: AsyncEnvelopeQueue) {
   };
 }
 
+describe("DeepSeek Harness task permission scope", () => {
+  test("reads the permissions projection and switches through the native command", async () => {
+    const queue = new AsyncEnvelopeQueue();
+    const fake = createFakeClient(queue);
+    fake.client.readHistory = async () => ({
+      events: [],
+      hasMore: false,
+      projections: {
+        asOfSeq: 4,
+        values: {
+          permissions: {
+            currentValue: "workspace-write",
+            options: [
+              {
+                value: "workspace-write",
+                name: "Workspace write",
+                description: "Write inside the workspace.",
+              },
+              {
+                value: "danger-full-access",
+                name: "Full access",
+                description: "Full file access without approvals.",
+              },
+            ],
+          },
+        },
+      },
+    });
+    const adapter = new DeepSeekHarnessAdapter({
+      kind: "deepseek",
+      command: "dsh",
+      cwd: "/tmp/project",
+      renderMode: "headless",
+    }, {
+      createClient: () => fake.client,
+    }) as any;
+
+    expect(await adapter.getSessionPermissionState("session-1")).toMatchObject({
+      currentPermission: "workspace-write",
+      canChange: true,
+      options: [
+        { id: "workspace-write" },
+        { id: "danger-full-access", requiresConfirmation: true },
+      ],
+    });
+
+    const next = await adapter.setSessionPermission(
+      "session-1",
+      "danger-full-access",
+    );
+    expect(fake.prompts.at(-1)).toEqual({
+      sessionId: "session-1",
+      content: [{ type: "text", text: "/permission danger-full-access" }],
+    });
+    expect(next.currentPermission).toBe("danger-full-access");
+  });
+});
+
 async function nextTurn(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
+
+describe("DeepSeek Harness HTTP client", () => {
+  test("honors a shorter timeout for read-only catalog probes", async () => {
+    const client = new DeepSeekHarnessHttpClient(
+      "http://127.0.0.1:3080",
+      ((_input, init) => new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          reject(init.signal?.reason ?? new Error("aborted"));
+        }, { once: true });
+      })) as typeof fetch,
+      20,
+    );
+    const startedAt = Date.now();
+
+    await expect(client.listSessions()).rejects.toBeDefined();
+
+    expect(Date.now() - startedAt).toBeLessThan(500);
+  });
+});
 
 describe("DeepSeek Harness endpoint discovery", () => {
   test("prefers the live DSH Desktop Host over a separate dsh web Host", () => {
@@ -581,13 +658,14 @@ describe("DeepSeek Harness adapter", () => {
     expect(await adapter.getSessionModelState("session-1")).toEqual({
       currentModel: "tencent-intranet::shared-model",
       options: [
-        { id: "deepseek-official::deepseek-v4-flash", label: "DeepSeek · DeepSeek V4 Flash" },
-        { id: "deepseek-official::shared-model", label: "DeepSeek · 共享模型" },
-        { id: "tencent-intranet::hunyuan-t1", label: "Tencent · 混元 T1" },
-        { id: "tencent-intranet::shared-model", label: "Tencent · 共享模型" },
+        { id: "deepseek-official::deepseek-v4-flash", label: "DeepSeek V4 Flash", group: "DeepSeek" },
+        { id: "deepseek-official::shared-model", label: "共享模型", group: "DeepSeek" },
+        { id: "tencent-intranet::hunyuan-t1", label: "混元 T1", group: "Tencent" },
+        { id: "tencent-intranet::shared-model", label: "共享模型", group: "Tencent" },
         {
           id: "openrouter::anthropic/claude-sonnet",
-          label: "OpenRouter · Claude Sonnet",
+          label: "Claude Sonnet",
+          group: "OpenRouter",
           description: "经 OpenRouter 路由",
         },
       ],
@@ -631,6 +709,102 @@ describe("DeepSeek Harness adapter", () => {
     expect(selections.at(-1)).toEqual({
       sessionId: "session-1",
       selection: { provider: "tencent-intranet", model: "shared-model" },
+    });
+  });
+
+  test("reads and switches the Harness reasoning effort without allowing xhigh", async () => {
+    const queue = new AsyncEnvelopeQueue();
+    const { client, selections } = createFakeClient(queue);
+    const adapter = new DeepSeekHarnessAdapter({
+      kind: "deepseek",
+      command: "dsh",
+      cwd: "/tmp/project",
+    }, { createClient: () => client });
+
+    expect(await adapter.getSessionModelState("session-1")).toMatchObject({
+      currentModel: "deepseek-official::deepseek-v4-flash",
+      currentReasoningEffort: "high",
+      reasoningEffortOptions: [
+        { id: "low", label: "低" },
+        { id: "medium", label: "中" },
+        { id: "high", label: "高" },
+      ],
+      canChangeReasoningEffort: true,
+    });
+    expect(await adapter.setSessionReasoningEffort("session-1", "low"))
+      .toMatchObject({ canChangeReasoningEffort: true });
+    expect(selections.at(-1)).toEqual({
+      sessionId: "session-1",
+      selection: {
+        provider: "deepseek-official",
+        model: "deepseek-v4-flash",
+        reasoningEffort: "low",
+      },
+    });
+    await expect(adapter.setSessionReasoningEffort("session-1", "xhigh"))
+      .rejects.toThrow("当前不可用");
+  });
+
+  test("keeps the Harness session reasoning setting unset while switching models", async () => {
+    const queue = new AsyncEnvelopeQueue();
+    const { client, selections } = createFakeClient(queue);
+    client.readModels = async () => ({
+      current: {
+        provider: "deepseek-official",
+        model: "deepseek-v4-flash-vision-exp",
+      },
+      routable: true,
+      groups: [{
+        id: "deepseek-official",
+        name: "DeepSeek",
+        models: [
+          { id: "deepseek-v4-flash", name: "DeepSeek-V4-Flash" },
+          { id: "deepseek-v4-flash-vision-exp", name: "DeepSeek-V4-Flash-Vision-Exp" },
+        ],
+      }],
+      failures: [],
+    });
+    const adapter = new DeepSeekHarnessAdapter({
+      kind: "deepseek",
+      command: "dsh",
+      cwd: "/tmp/project",
+    }, { createClient: () => client });
+
+    await adapter.setSessionModel(
+      "session-1",
+      "deepseek-official::deepseek-v4-flash",
+    );
+    expect(selections.at(-1)).toEqual({
+      sessionId: "session-1",
+      selection: {
+        provider: "deepseek-official",
+        model: "deepseek-v4-flash",
+      },
+    });
+  });
+
+  test("uses the Harness cwd folder as the mobile project identity", async () => {
+    const queue = new AsyncEnvelopeQueue();
+    const { client, sessions } = createFakeClient(queue);
+    const adapter = new DeepSeekHarnessAdapter({
+      kind: "deepseek",
+      command: "dsh",
+      cwd: "/tmp/project",
+    }, { createClient: () => client });
+
+    const [candidate] = await adapter.listResumeSessions(10);
+    expect(candidate).toMatchObject({
+      title: "Harness 任务",
+      cwd: "/tmp/project",
+      projectId: "/tmp/project",
+      projectName: "project",
+    });
+
+    sessions[0] = session({ cwd: "C:\\work\\wechat_canvas\\" });
+    const [windowsCandidate] = await adapter.listResumeSessions(10);
+    expect(windowsCandidate).toMatchObject({
+      projectId: "C:\\work\\wechat_canvas",
+      projectName: "wechat_canvas",
     });
   });
 
@@ -1114,6 +1288,42 @@ describe("DeepSeek Harness adapter", () => {
       },
     ]);
     await adapter.dispose();
+  });
+
+  test("keeps model switching available when the current provider is no longer routable", async () => {
+    const queue = new AsyncEnvelopeQueue();
+    const { client } = createFakeClient(queue);
+    const originalReadModels = client.readModels;
+    client.readModels = async () => ({
+      current: { provider: "ox-alpha", model: "ox-alpha" },
+      routable: false,
+      groups: [{
+        id: "deepseek-official",
+        name: "DeepSeek",
+        models: [{ id: "deepseek-v4-flash", name: "DeepSeek-V4-Flash" }],
+      }],
+      failures: [{
+        id: "ox-alpha",
+        name: "OX Alpha",
+        message: "provider offline",
+      }],
+    });
+    const adapter = new DeepSeekHarnessAdapter({
+      kind: "deepseek",
+      command: "dsh",
+      cwd: "/tmp/project",
+    }, { createClient: () => client });
+
+    const state = await adapter.getSessionModelState!("session-1");
+    expect(state.currentModel).toBe("ox-alpha::ox-alpha");
+    expect(state.canChange).toBe(true);
+    expect(state.options).toEqual([{
+      id: "deepseek-official::deepseek-v4-flash",
+      label: "DeepSeek-V4-Flash",
+      group: "DeepSeek",
+    }]);
+    expect(state.unavailableReason).toBeUndefined();
+    client.readModels = originalReadModels;
   });
 });
 

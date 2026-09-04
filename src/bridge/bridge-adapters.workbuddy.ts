@@ -13,9 +13,12 @@ import type {
   BridgeResumeSessionCandidate,
   BridgeResumeSessionRuntimeStatus,
   BridgeSessionMessage,
+  BridgeSessionPermissionState,
   BridgeSessionRunSummary,
   BridgeSessionSendResult,
   BridgeTurnInputItem,
+  UserInputRequest,
+  UserInputRequestQuestion,
 } from "./bridge-types.ts";
 import type { AdapterOptions, EventSink } from "./bridge-adapters.shared.ts";
 import { describeUnknownError, isRecord } from "./bridge-adapter-common.ts";
@@ -41,6 +44,7 @@ type WorkBuddySessionRow = {
   updatedAt: number;
   lastActivityAt?: number | null;
   projectId?: string | null;
+  permissionMode?: string | null;
 };
 
 type WorkBuddySqliteStatement = {
@@ -71,6 +75,14 @@ type PendingWorkBuddyPermission = {
   request: ApprovalRequest;
 };
 
+type PendingWorkBuddyQuestion = {
+  sessionId: string;
+  requestId: string;
+  toolCallId: string;
+  request: UserInputRequest;
+  multiSelectQuestionIds: Set<string>;
+};
+
 type WorkBuddyAcpCallbacks = {
   onNotification(method: string, params: unknown): void;
   onRequest(id: WorkBuddyRpcId, method: string, params: unknown): void;
@@ -90,7 +102,9 @@ export type WorkBuddyAdapterDependencies = {
   readSession(sessionId: string): Promise<WorkBuddySessionRow | null>;
   readMessages(cwd: string, sessionId: string): Promise<BridgeSessionMessage[]>;
   readRunSummary(cwd: string, sessionId: string): Promise<BridgeSessionRunSummary | null>;
+  readSessionTitle?(cwd: string, sessionId: string): Promise<string | null>;
   readLocalImage(pathname: string): Promise<{ data: string; mimeType: string }>;
+  startupSessionRestoreTimeoutMs?: number;
 };
 
 type WorkBuddyAcpCredentials = {
@@ -110,6 +124,37 @@ export type WorkBuddySidecarSession = {
 
 const WORKBUDDY_HOST_SESSION_PREFIX = "__workbuddy_cli_host__";
 const WORKBUDDY_ACP_REQUEST_TIMEOUT_MS = 30_000;
+const WORKBUDDY_STARTUP_RESTORE_TIMEOUT_MS = 5_000;
+
+const WORKBUDDY_PERMISSION_OPTIONS: BridgeSessionPermissionState["options"] = [
+  {
+    id: "default",
+    label: "标准权限",
+    description: "按 WorkBuddy 默认规则请求必要审批。",
+  },
+  {
+    id: "acceptEdits",
+    label: "自动接受文件修改",
+    description: "文件修改可直接执行，其他高风险操作仍按规则确认。",
+  },
+  {
+    id: "fullAccess",
+    label: "完全访问",
+    description: "允许任务使用 WorkBuddy 提供的完整访问能力。",
+    requiresConfirmation: true,
+  },
+  {
+    id: "bypassPermissions",
+    label: "跳过审批",
+    description: "兼容旧任务的免审模式，不再逐项请求权限。",
+    requiresConfirmation: true,
+  },
+  {
+    id: "plan",
+    label: "规划模式",
+    description: "只做分析与计划，不直接修改文件。",
+  },
+];
 
 function readString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
@@ -486,6 +531,11 @@ async function openWorkBuddyDatabase(): Promise<WorkBuddySqliteDatabase> {
   return new sqlite.DatabaseSync(workBuddyDatabasePath(), { readOnly: true });
 }
 
+function shouldFallbackFromMissingWorkBuddyPermissionColumn(error: unknown): boolean {
+  const message = describeUnknownError(error).toLowerCase();
+  return message.includes("no such column") && message.includes("permission_mode");
+}
+
 function mapWorkBuddySessionRow(row: Record<string, unknown>): WorkBuddySessionRow | null {
   const id = readString(row.id);
   const cwd = readString(row.cwd);
@@ -506,6 +556,7 @@ function mapWorkBuddySessionRow(row: Record<string, unknown>): WorkBuddySessionR
     title: readString(row.title) ?? null,
     customTitle: readString(row.custom_title) ?? null,
     projectId: readString(row.project_id) ?? null,
+    permissionMode: readString(row.permission_mode) ?? null,
   };
 }
 
@@ -546,13 +597,25 @@ export async function readWorkBuddyDesktopSession(
 ): Promise<WorkBuddySessionRow | null> {
   const database = await openWorkBuddyDatabase();
   try {
-    const row = database.prepare(`
-      SELECT id, cwd, title, custom_title, status, created_at, updated_at,
-             last_activity_at, project_id
-      FROM sessions
-      WHERE deleted_at IS NULL AND id = ?
-      LIMIT 1
-    `).get(sessionId);
+    let row: unknown;
+    try {
+      row = database.prepare(`
+        SELECT id, cwd, title, custom_title, status, created_at, updated_at,
+               last_activity_at, project_id, permission_mode
+        FROM sessions
+        WHERE deleted_at IS NULL AND id = ?
+        LIMIT 1
+      `).get(sessionId);
+    } catch (error) {
+      if (!shouldFallbackFromMissingWorkBuddyPermissionColumn(error)) throw error;
+      row = database.prepare(`
+        SELECT id, cwd, title, custom_title, status, created_at, updated_at,
+               last_activity_at, project_id
+        FROM sessions
+        WHERE deleted_at IS NULL AND id = ?
+        LIMIT 1
+      `).get(sessionId);
+    }
     return row ? mapWorkBuddySessionRow(row as Record<string, unknown>) : null;
   } finally {
     database.close();
@@ -583,6 +646,48 @@ function findWorkBuddyTranscript(cwd: string, sessionId: string): string | null 
     return null;
   }
   return null;
+}
+
+export function parseWorkBuddyTranscriptTitle(text: string): string | null {
+  let generatedTitle: string | null = null;
+  let customTitle: string | null = null;
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let value: unknown;
+    try {
+      value = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!isRecord(value)) continue;
+    if (value.type === "custom-title") {
+      customTitle = readString(value.customTitle) ?? customTitle;
+    } else if (value.type === "ai-title") {
+      generatedTitle = readString(value.aiTitle) ?? generatedTitle;
+    }
+  }
+  return customTitle ?? generatedTitle;
+}
+
+async function readWorkBuddyDesktopSessionTitle(
+  cwd: string,
+  sessionId: string,
+): Promise<string | null> {
+  const transcriptPath = findWorkBuddyTranscript(cwd, sessionId);
+  if (!transcriptPath) return null;
+  let fileDescriptor: number | null = null;
+  try {
+    const stats = fs.statSync(transcriptPath);
+    const length = Math.min(stats.size, 256 * 1024);
+    const buffer = Buffer.alloc(length);
+    fileDescriptor = fs.openSync(transcriptPath, "r");
+    const bytesRead = fs.readSync(fileDescriptor, buffer, 0, length, 0);
+    return parseWorkBuddyTranscriptTitle(buffer.subarray(0, bytesRead).toString("utf8"));
+  } catch {
+    return null;
+  } finally {
+    if (fileDescriptor !== null) fs.closeSync(fileDescriptor);
+  }
 }
 
 function workBuddyContentText(value: unknown): string {
@@ -1070,7 +1175,10 @@ export class WorkBuddyHybridRpcClient implements WorkBuddyDesktopRpcClientLike {
       this.mode = "sidecar";
       return;
     } catch (sidecarError) {
-      if (await this.dependencies.desktopApplicationRunning()) {
+      if (
+        await this.dependencies.desktopApplicationRunning() &&
+        this.options.allowDesktopApplicationLaunch !== true
+      ) {
         throw new Error(
           "WorkBuddy 已打开，但桌面任务接口暂未就绪；WeRelay 不会自动重启应用。请稍后重试，或在 WorkBuddy 中重新打开目标任务。",
           { cause: sidecarError },
@@ -1110,6 +1218,8 @@ export class WorkBuddyHybridRpcClient implements WorkBuddyDesktopRpcClientLike {
         return await this.loadSidecarSession(args);
       case "session:sendMessage":
         return await this.sendSidecarMessage(args);
+      case "session:setMode":
+        return await this.setSidecarMode(args);
       case "session:cancel":
         await this.notifySidecarSession("session/cancel", args);
         return {};
@@ -1125,6 +1235,29 @@ export class WorkBuddyHybridRpcClient implements WorkBuddyDesktopRpcClientLike {
         );
       default:
         throw new Error(`WorkBuddy 桌面任务接口暂不支持：${channel}`);
+    }
+  }
+
+  async invokeWithTimeout(
+    channel: string,
+    timeoutMs: number,
+    ...args: unknown[]
+  ): Promise<unknown> {
+    if (this.mode === "desktop" && this.desktopClient?.invokeWithTimeout) {
+      return await this.desktopClient.invokeWithTimeout(channel, timeoutMs, ...args);
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        this.invoke(channel, ...args),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => {
+            reject(new Error(`WorkBuddy Desktop 请求超时：${channel}`));
+          }, timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
 
@@ -1271,6 +1404,29 @@ export class WorkBuddyHybridRpcClient implements WorkBuddyDesktopRpcClientLike {
     return {};
   }
 
+  private async setSidecarMode(args: unknown[]): Promise<unknown> {
+    const sessionId = readString(args[0]);
+    const payload = isRecord(args[1]) ? args[1] : {};
+    const modeId = readString(payload.modeId);
+    if (!sessionId) throw new Error("WorkBuddy 任务编号无效。");
+    if (!modeId) throw new Error("WorkBuddy 权限范围无效。");
+    if (!this.acpClient || this.activeSessionId !== sessionId) {
+      const row = await this.dependencies.readSession(sessionId);
+      if (!row) throw new Error("WorkBuddy 桌面端找不到该任务。");
+      await this.loadSidecarSession([sessionId, { cwd: row.cwd }]);
+      if (!this.acpClient || this.activeSessionId !== sessionId) {
+        const target = await this.waitForSidecarSession(sessionId);
+        await this.attachSidecarSession(sessionId, row.cwd, target);
+        this.pendingDesktopSession = null;
+      }
+    }
+    const client = this.acpClient;
+    if (!client || this.activeSessionId !== sessionId) {
+      throw new Error("WorkBuddy 指定任务尚未连接。");
+    }
+    return await client.request("session/set_mode", { sessionId, modeId });
+  }
+
   private async waitForDesktopPromptCompletion(
     sessionId: string,
     cwd: string,
@@ -1385,6 +1541,7 @@ function defaultDependencies(): WorkBuddyAdapterDependencies {
     readSession: readWorkBuddyDesktopSession,
     readMessages: readWorkBuddyDesktopMessages,
     readRunSummary: readWorkBuddyDesktopRunSummary,
+    readSessionTitle: readWorkBuddyDesktopSessionTitle,
     readLocalImage,
   };
 }
@@ -1406,12 +1563,15 @@ function runtimeStatusForWorkBuddyRow(
   return { type: "idle" };
 }
 
-function candidateForWorkBuddyRow(row: WorkBuddySessionRow): BridgeResumeSessionCandidate {
+function candidateForWorkBuddyRow(
+  row: WorkBuddySessionRow,
+  fallbackTitle?: string | null,
+): BridgeResumeSessionCandidate {
   const updatedAt = row.lastActivityAt ?? row.updatedAt;
   return {
     sessionId: row.id,
     threadId: row.id,
-    title: row.customTitle ?? row.title ?? `会话 ${row.id.slice(0, 8)}`,
+    title: row.customTitle ?? row.title ?? fallbackTitle ?? `会话 ${row.id.slice(0, 8)}`,
     lastUpdatedAt: new Date(updatedAt).toISOString(),
     cwd: row.cwd,
     projectId: row.projectId ?? undefined,
@@ -1423,7 +1583,94 @@ function candidateForWorkBuddyRow(row: WorkBuddySessionRow): BridgeResumeSession
 export async function listWorkBuddyDesktopSessionCandidates(
   limit = 10,
 ): Promise<BridgeResumeSessionCandidate[]> {
-  return (await listWorkBuddyDesktopSessions(undefined, limit)).map(candidateForWorkBuddyRow);
+  const rows = await listWorkBuddyDesktopSessions(undefined, limit);
+  return await Promise.all(rows.map(async (row) => candidateForWorkBuddyRow(
+    row,
+    row.customTitle || row.title
+      ? null
+      : await readWorkBuddyDesktopSessionTitle(row.cwd, row.id),
+  )));
+}
+
+function parseWorkBuddyRawInput(value: unknown): Record<string, unknown> {
+  if (isRecord(value)) return value;
+  if (typeof value !== "string") return {};
+  try {
+    const parsed = JSON.parse(value);
+    return isRecord(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function workBuddyToolName(
+  params: Record<string, unknown>,
+  toolCall: Record<string, unknown>,
+): string {
+  const meta = isRecord(toolCall._meta) ? toolCall._meta : {};
+  return readString(meta["codebuddy.ai/toolName"]) ??
+    readString(toolCall.name) ??
+    readString(toolCall.title) ??
+    readString(params.toolId) ??
+    "";
+}
+
+function buildWorkBuddyUserInputRequest(
+  sessionId: string,
+  params: Record<string, unknown>,
+): {
+  request: UserInputRequest;
+  toolCallId: string;
+  multiSelectQuestionIds: Set<string>;
+} | null {
+  const toolCall = isRecord(params.toolCall) ? params.toolCall : {};
+  const rawInput = parseWorkBuddyRawInput(toolCall.rawInput ?? toolCall.input);
+  const rawQuestions = Array.isArray(rawInput.questions) ? rawInput.questions : [];
+  const normalizedToolName = workBuddyToolName(params, toolCall)
+    .toLowerCase()
+    .replace(/[-_\s]/g, "");
+  if (normalizedToolName !== "askuserquestion" && rawQuestions.length === 0) {
+    return null;
+  }
+  const toolCallId = readString(toolCall.toolCallId) ?? readString(toolCall.id);
+  if (!toolCallId) return null;
+  const multiSelectQuestionIds = new Set<string>();
+  const questions = rawQuestions.flatMap((entry, index): UserInputRequestQuestion[] => {
+    if (!isRecord(entry)) return [];
+    const question = readString(entry.question);
+    if (!question) return [];
+    const id = readString(entry.id) ?? `q_${index}`;
+    const multiSelect = entry.multiSelect === true;
+    if (multiSelect) multiSelectQuestionIds.add(id);
+    const options = Array.isArray(entry.options)
+      ? entry.options.flatMap((option) => {
+          if (!isRecord(option)) return [];
+          const label = readString(option.label);
+          if (!label) return [];
+          return [{ label, description: readString(option.description) ?? "" }];
+        })
+      : [];
+    return [{
+      id,
+      header: readString(entry.header) ?? `问题 ${index + 1}`,
+      question,
+      isOther: entry.isOther === true,
+      isSecret: false,
+      multiSelect,
+      options,
+    }];
+  });
+  if (questions.length === 0) return null;
+  return {
+    toolCallId,
+    multiSelectQuestionIds,
+    request: {
+      summary: questions[0]?.question ?? "WorkBuddy 需要补充信息",
+      threadId: sessionId,
+      origin: "wechat",
+      questions,
+    },
+  };
 }
 
 function contentText(value: unknown): string {
@@ -1441,9 +1688,11 @@ export class WorkBuddyDesktopAdapter implements BridgeAdapter {
   private client: WorkBuddyDesktopRpcClientLike | null = null;
   private loadingSession = false;
   private pendingPermission: PendingWorkBuddyPermission | null = null;
+  private pendingQuestion: PendingWorkBuddyQuestion | null = null;
   private currentReply = "";
   private currentRunStartedAtMs: number | null = null;
   private readonly runSummaries = new Map<string, BridgeSessionRunSummary>();
+  private readonly permissionSelectionBySession = new Map<string, string>();
   private activePromptToken = 0;
 
   constructor(
@@ -1492,27 +1741,80 @@ export class WorkBuddyDesktopAdapter implements BridgeAdapter {
     this.state.startedAt = nowIso();
     try {
       await client.connect();
-      let sessionId = this.state.sharedSessionId;
-      if (!sessionId) {
-        sessionId = (await this.dependencies.listSessions(undefined, 1))[0]?.id;
+      await this.restoreStartupSession();
+      if (this.state.status === "starting") {
+        this.setStatus("idle");
       }
-      if (sessionId) {
-        await this.loadSession(sessionId, "restore", "startup_restore");
-      } else {
-        this.emit({
-          type: "notice",
-          level: "warning",
-          text: "当前项目还没有 WorkBuddy 任务，请先在 WorkBuddy 桌面端创建任务。",
-          timestamp: nowIso(),
-        });
-      }
-      this.setStatus("idle");
     } catch (error) {
       await client.close().catch(() => undefined);
       this.client = null;
       this.setStatus("error");
       throw error;
     }
+  }
+
+  private async restoreStartupSession(): Promise<void> {
+    const preferredSessionId = this.state.sharedSessionId;
+    if (preferredSessionId) {
+      try {
+        await this.loadSession(
+          preferredSessionId,
+          "restore",
+          "startup_restore",
+          this.dependencies.startupSessionRestoreTimeoutMs ??
+            WORKBUDDY_STARTUP_RESTORE_TIMEOUT_MS,
+        );
+      } catch (error) {
+        this.clearSelectedSession(preferredSessionId);
+        this.emit({
+          type: "notice",
+          level: "warning",
+          text: `WorkBuddy 原任务已失效，已保持终端连接；请从任务列表选择要继续的任务：${truncatePreview(describeUnknownError(error), 180)}`,
+          timestamp: nowIso(),
+        });
+      }
+      return;
+    }
+
+    let latest: WorkBuddySessionRow | undefined;
+    try {
+      latest = (await this.dependencies.listSessions(undefined, 1))[0];
+    } catch (error) {
+      this.emit({
+        type: "notice",
+        level: "warning",
+        text: `WorkBuddy 已连接，但暂时无法读取任务列表：${truncatePreview(describeUnknownError(error), 180)}`,
+        timestamp: nowIso(),
+      });
+      return;
+    }
+    if (!latest) {
+      this.clearSelectedSession();
+      return;
+    }
+    try {
+      await this.loadSession(
+        latest.id,
+        "restore",
+        "startup_restore",
+        this.dependencies.startupSessionRestoreTimeoutMs ??
+          WORKBUDDY_STARTUP_RESTORE_TIMEOUT_MS,
+      );
+    } catch (error) {
+      this.clearSelectedSession(latest.id);
+      this.emit({
+        type: "notice",
+        level: "warning",
+        text: `WorkBuddy 已连接，但最近任务暂时无法接入；请从任务列表选择其他任务：${truncatePreview(describeUnknownError(error), 180)}`,
+        timestamp: nowIso(),
+      });
+    }
+  }
+
+  private clearSelectedSession(expectedSessionId?: string): void {
+    if (expectedSessionId && this.state.sharedSessionId !== expectedSessionId) return;
+    this.state.sharedSessionId = undefined;
+    this.state.activeRuntimeSessionId = undefined;
   }
 
   async sendInput(text: string): Promise<void> {
@@ -1538,8 +1840,12 @@ export class WorkBuddyDesktopAdapter implements BridgeAdapter {
   }
 
   async listResumeSessions(limit = 10): Promise<BridgeResumeSessionCandidate[]> {
-    return (await this.dependencies.listSessions(undefined, limit)).map((row) => {
-      const candidate = candidateForWorkBuddyRow(row);
+    const rows = await this.dependencies.listSessions(undefined, limit);
+    return await Promise.all(rows.map(async (row) => {
+      const fallbackTitle = row.customTitle || row.title
+        ? null
+        : await this.dependencies.readSessionTitle?.(row.cwd, row.id) ?? null;
+      const candidate = candidateForWorkBuddyRow(row, fallbackTitle);
       if (row.id === this.state.sharedSessionId && this.state.status === "busy") {
         candidate.runtimeStatus = { type: "active", activeFlags: [] };
       } else if (
@@ -1550,13 +1856,25 @@ export class WorkBuddyDesktopAdapter implements BridgeAdapter {
           type: "active",
           activeFlags: ["waitingOnApproval"],
         };
+      } else if (
+        row.id === this.state.sharedSessionId &&
+        this.state.status === "awaiting_input"
+      ) {
+        candidate.runtimeStatus = {
+          type: "active",
+          activeFlags: ["waitingOnUserInput"],
+        };
       }
       return candidate;
-    });
+    }));
   }
 
   async resumeSession(sessionId: string): Promise<void> {
-    if (this.state.status === "busy" || this.state.status === "awaiting_approval") {
+    if (
+      this.state.status === "busy" ||
+      this.state.status === "awaiting_approval" ||
+      this.state.status === "awaiting_input"
+    ) {
       throw new Error("WorkBuddy 正在处理当前任务，请先等待完成或停止。");
     }
     await this.loadSession(sessionId, "wechat", "wechat_resume");
@@ -1601,9 +1919,71 @@ export class WorkBuddyDesktopAdapter implements BridgeAdapter {
     };
   }
 
+  async getSessionPermissionState(
+    sessionId: string,
+  ): Promise<BridgeSessionPermissionState> {
+    const normalizedSessionId = sessionId.trim();
+    if (!normalizedSessionId) throw new Error("请选择一个 WorkBuddy 任务。");
+    const row = await this.dependencies.readSession(normalizedSessionId);
+    if (!row) throw new Error("没有找到这个 WorkBuddy 任务。");
+    const projectedPermission = row.permissionMode?.trim() || "default";
+    const selectedPermission = this.permissionSelectionBySession.get(normalizedSessionId);
+    const currentPermission = selectedPermission &&
+        WORKBUDDY_PERMISSION_OPTIONS.some((option) => option.id === selectedPermission)
+      ? selectedPermission
+      : projectedPermission;
+    if (projectedPermission === selectedPermission) {
+      this.permissionSelectionBySession.delete(normalizedSessionId);
+    }
+    const taskRunning = runtimeStatusForWorkBuddyRow(row).type === "active" ||
+      (normalizedSessionId === this.state.sharedSessionId &&
+        (this.state.status === "busy" ||
+          this.state.status === "awaiting_approval" ||
+          this.state.status === "awaiting_input"));
+    return {
+      currentPermission,
+      options: WORKBUDDY_PERMISSION_OPTIONS.map((option) => ({ ...option })),
+      canChange: !taskRunning,
+      ...(taskRunning
+        ? { unavailableReason: "任务正在处理，完成或停止后再切换权限范围。" }
+        : {}),
+    };
+  }
+
+  async setSessionPermission(
+    sessionId: string,
+    permission: string,
+  ): Promise<BridgeSessionPermissionState> {
+    const normalizedSessionId = sessionId.trim();
+    const normalizedPermission = permission.trim();
+    if (!normalizedSessionId) throw new Error("请选择一个 WorkBuddy 任务。");
+    const state = await this.getSessionPermissionState(normalizedSessionId);
+    if (!state.canChange) {
+      throw new Error(state.unavailableReason || "当前任务暂时不能切换权限范围。");
+    }
+    if (!state.options.some((option) => option.id === normalizedPermission)) {
+      throw new Error("这个 WorkBuddy 权限范围当前不可用。");
+    }
+    await this.requireClient().invoke(
+      "session:setMode",
+      normalizedSessionId,
+      { modeId: normalizedPermission },
+    );
+    this.permissionSelectionBySession.set(normalizedSessionId, normalizedPermission);
+    return {
+      ...state,
+      currentPermission: normalizedPermission,
+    };
+  }
+
   async interrupt(): Promise<boolean> {
     const sessionId = this.state.sharedSessionId;
-    if (!sessionId || (this.state.status !== "busy" && this.state.status !== "awaiting_approval")) {
+    if (
+      !sessionId ||
+      (this.state.status !== "busy" &&
+        this.state.status !== "awaiting_approval" &&
+        this.state.status !== "awaiting_input")
+    ) {
       return false;
     }
     const client = this.requireClient();
@@ -1617,6 +1997,11 @@ export class WorkBuddyDesktopAdapter implements BridgeAdapter {
       ).catch(() => undefined);
       this.pendingPermission = null;
       this.state.pendingApproval = null;
+    }
+    if (this.pendingQuestion) {
+      this.pendingQuestion = null;
+      this.state.pendingUserInput = null;
+      this.state.pendingUserInputOrigin = undefined;
     }
     await client.invoke("session:cancel", sessionId);
     this.activePromptToken += 1;
@@ -1710,14 +2095,28 @@ export class WorkBuddyDesktopAdapter implements BridgeAdapter {
       : [];
   }
 
-  async submitUserInput(_answers: Record<string, string[]>): Promise<boolean> {
-    return false;
+  async submitUserInput(answers: Record<string, string[]>): Promise<boolean> {
+    const pending = this.pendingQuestion;
+    if (!pending) return false;
+    return await this.submitPendingQuestion(pending, answers);
+  }
+
+  async submitTaskUserInput(
+    threadId: string,
+    answers: Record<string, string[]>,
+  ): Promise<boolean> {
+    const pending = this.pendingQuestion;
+    if (!pending || pending.sessionId !== threadId) return false;
+    return await this.submitPendingQuestion(pending, answers);
   }
 
   async dispose(): Promise<void> {
     this.activePromptToken += 1;
     this.pendingPermission = null;
+    this.pendingQuestion = null;
     this.state.pendingApproval = null;
+    this.state.pendingUserInput = null;
+    this.state.pendingUserInputOrigin = undefined;
     const client = this.client;
     this.client = null;
     await client?.close().catch(() => undefined);
@@ -1734,6 +2133,7 @@ export class WorkBuddyDesktopAdapter implements BridgeAdapter {
       throw new Error("WorkBuddy 仍在处理，请等待当前回复或发送 /stop。");
     }
     if (this.pendingPermission) throw new Error("WorkBuddy 正在等待审批。");
+    if (this.pendingQuestion) throw new Error("WorkBuddy 正在等待补充信息。");
     const prompt: Record<string, unknown>[] = [];
     let preview = "";
     for (const item of items) {
@@ -1849,19 +2249,25 @@ export class WorkBuddyDesktopAdapter implements BridgeAdapter {
     sessionId: string,
     source: "wechat" | "restore",
     reason: "wechat_resume" | "startup_restore",
+    timeoutMs?: number,
   ): Promise<void> {
     const row = await this.dependencies.readSession(sessionId);
     if (!row) throw new Error("WorkBuddy 桌面端找不到该任务。");
     this.loadingSession = true;
     try {
-      await this.requireClient().invoke(
-        "session:load",
+      const client = this.requireClient();
+      const args = [
         sessionId,
         {
           cwd: row.cwd,
           forceRendererHistoryReplay: false,
         },
-      );
+      ] as const;
+      if (timeoutMs !== undefined && client.invokeWithTimeout) {
+        await client.invokeWithTimeout("session:load", timeoutMs, ...args);
+      } else {
+        await client.invoke("session:load", ...args);
+      }
       this.state.sharedSessionId = sessionId;
       this.state.activeRuntimeSessionId = sessionId;
       this.state.lastSessionSwitchAt = nowIso();
@@ -1896,14 +2302,26 @@ export class WorkBuddyDesktopAdapter implements BridgeAdapter {
       if (!requestId || requestId === this.pendingPermission?.requestId) {
         this.clearPendingPermission();
       }
+      if (!requestId || requestId === this.pendingQuestion?.requestId) {
+        this.clearPendingQuestion();
+      }
       return;
     }
 
     const update = isRecord(data.update) ? data.update : null;
     if (!update) return;
     const type = readString(update.sessionUpdate) ?? readString(update.type);
-    if (this.pendingPermission && this.isPermissionToolCallSettled(update)) {
+    if (
+      this.pendingPermission?.toolCallId &&
+      this.isToolCallSettled(update, this.pendingPermission.toolCallId)
+    ) {
       this.clearPendingPermission();
+    }
+    if (
+      this.pendingQuestion &&
+      this.isToolCallSettled(update, this.pendingQuestion.toolCallId)
+    ) {
+      this.clearPendingQuestion();
     }
     if (
       this.loadingSession ||
@@ -1928,6 +2346,29 @@ export class WorkBuddyDesktopAdapter implements BridgeAdapter {
     const requestId = readString(payload.requestId);
     const params = isRecord(payload.request) ? payload.request : null;
     if (!requestId || !params) return;
+    const question = buildWorkBuddyUserInputRequest(sessionId, params);
+    if (question) {
+      if (this.pendingQuestion?.requestId === requestId) return;
+      this.pendingQuestion = {
+        sessionId,
+        requestId,
+        toolCallId: question.toolCallId,
+        request: question.request,
+        multiSelectQuestionIds: question.multiSelectQuestionIds,
+      };
+      this.state.pendingApproval = null;
+      this.state.pendingUserInput = question.request;
+      this.state.pendingUserInputOrigin = "wechat";
+      this.setStatus("awaiting_input");
+      this.emit({
+        type: "user_input_required",
+        request: question.request,
+        timestamp: nowIso(),
+        threadId: sessionId,
+        origin: "wechat",
+      });
+      return;
+    }
     const options = Array.isArray(params.options)
       ? params.options.flatMap((entry): WorkBuddyPermissionOption[] => {
           if (!isRecord(entry)) return [];
@@ -1969,15 +2410,61 @@ export class WorkBuddyDesktopAdapter implements BridgeAdapter {
     });
   }
 
-  private isPermissionToolCallSettled(update: Record<string, unknown>): boolean {
-    const pending = this.pendingPermission;
-    if (!pending?.toolCallId) return false;
+  private isToolCallSettled(
+    update: Record<string, unknown>,
+    pendingToolCallId: string,
+  ): boolean {
     const type = readString(update.sessionUpdate) ?? readString(update.type);
     if (type !== "tool_call_update" && type !== "tool_call") return false;
     const toolCallId = readString(update.toolCallId);
-    if (toolCallId !== pending.toolCallId) return false;
+    if (toolCallId !== pendingToolCallId) return false;
     const status = readString(update.status)?.toLowerCase();
-    return Boolean(status && status !== "pending" && status !== "awaiting_approval");
+    return Boolean(
+      status &&
+      status !== "pending" &&
+      status !== "running" &&
+      status !== "awaiting_approval" &&
+      status !== "awaiting_input"
+    );
+  }
+
+  private clearPendingQuestion(): void {
+    if (!this.pendingQuestion) return;
+    this.pendingQuestion = null;
+    this.state.pendingUserInput = null;
+    this.state.pendingUserInputOrigin = undefined;
+    if (this.state.status === "awaiting_input") {
+      this.setStatus(this.currentRunStartedAtMs === null ? "idle" : "busy");
+    }
+  }
+
+  private async submitPendingQuestion(
+    pending: PendingWorkBuddyQuestion,
+    answers: Record<string, string[]>,
+  ): Promise<boolean> {
+    const encoded: Record<string, string | string[]> = {};
+    for (const question of pending.request.questions) {
+      const values = (answers[question.id] ?? [])
+        .map((value) => value.trim())
+        .filter(Boolean);
+      if (values.length === 0) continue;
+      encoded[question.id] = pending.multiSelectQuestionIds.has(question.id)
+        ? values
+        : values.length === 1
+          ? values[0]!
+          : values;
+    }
+    const result = await this.requireClient().invoke(
+      "session:answerQuestion",
+      pending.sessionId,
+      pending.toolCallId,
+      encoded,
+    );
+    if (result === false) return false;
+    if (this.pendingQuestion?.requestId === pending.requestId) {
+      this.clearPendingQuestion();
+    }
+    return true;
   }
 
   private clearPendingPermission(): void {

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -12,15 +13,18 @@ import {
   extractCodexDesktopThreadRunSummary,
   extractCodexThreadMessages,
   extractCodexThreadRunSummary,
+  formatCodexRunErrorMessage,
   mergeCodexSessionMessages,
   extractLatestCodexThreadMessage,
   mapCodexDesktopThreadListResponse,
   parseCodexSessionTaskBoundary,
   readCodexSessionMessagePageFromRollout,
+  readCodexStateDbSessionCatalog,
   readCodexSessionProgressFromRolloutTail,
   readCodexSessionRunSummaryFromRolloutTail,
   resolveCodexAppServerFailureAction,
   resolveCodexDesktopAppServerSpawnTarget,
+  resolveCodexDesktopProjectCreationTarget,
   resolveCodexDesktopPermissionSettings,
   resolveCodexTaskOutcome,
   shouldAttemptCodexDesktopApplicationLaunch,
@@ -33,6 +37,28 @@ import { getWorkspaceChannelPaths } from "../../src/wechat/channel-config.ts";
 
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Windows 上 SQLite 句柄在 close() 后可能长时间延迟释放（bun:sqlite 的
+// 只读映射不会立即解锁），立即递归删除临时目录会触发 EBUSY。先短暂重试；
+// 若目录仍被锁，说明只剩系统句柄延迟释放，此时目录位于操作系统临时目录、
+// 由运行环境回收，忽略删除失败以保持测试判定稳定。
+function removeTempDirectory(directory: string): void {
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    try {
+      fs.rmSync(directory, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "EBUSY" && code !== "ENOTEMPTY" && code !== "EPERM") throw error;
+      try {
+        fs.rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+        return;
+      } catch {
+        // 继续下一轮外层重试。
+      }
+    }
+  }
 }
 
 describe("Codex desktop permission alignment", () => {
@@ -93,10 +119,51 @@ describe("Codex desktop permission alignment", () => {
     });
   });
 
+  test("exposes and changes the selected task permission scope", async () => {
+    const adapter = new CodexPtyAdapter({
+      kind: "codex",
+      command: "codex",
+      cwd: process.cwd(),
+      renderMode: "headless",
+      codexTransport: "desktop",
+      inheritCodexDesktopPermissions: true,
+    }) as any;
+    adapter.readDesktopGlobalState = () => globalState;
+    adapter.getSessionRunSummary = async () => ({ status: "completed" });
+
+    expect(await adapter.getSessionPermissionState("thread_auto")).toMatchObject({
+      currentPermission: "workspace-write",
+      canChange: true,
+      options: [
+        { id: "read-only" },
+        { id: "workspace-write" },
+        { id: "danger-full-access", requiresConfirmation: true },
+      ],
+    });
+
+    const next = await adapter.setSessionPermission(
+      "thread_auto",
+      "danger-full-access",
+    );
+    expect(next.currentPermission).toBe("danger-full-access");
+    expect(adapter.resolveDesktopPermissionSettings("thread_auto")).toMatchObject({
+      approvalPolicy: "never",
+      sandbox: "danger-full-access",
+      sandboxPolicy: { type: "dangerFullAccess" },
+    });
+  });
+
   test("marks interrupted and failed turn completion explicitly", () => {
     expect(resolveCodexTaskOutcome("interrupted")).toBe("interrupted");
     expect(resolveCodexTaskOutcome("failed")).toBe("failed");
     expect(resolveCodexTaskOutcome("completed")).toBe("completed");
+  });
+
+  test("explains model capacity failures as retryable model congestion", () => {
+    expect(formatCodexRunErrorMessage({
+      message: "Selected model is at capacity. Please try a different model.",
+      codex_error_info: "server_overloaded",
+    })).toBe("当前模型暂时繁忙，未生成回复。请稍后重试，或切换模型后再试。");
   });
 
   test("emits interrupted outcome when Codex confirms an interrupted turn", () => {
@@ -193,6 +260,223 @@ describe("codex exit handling", () => {
 
 
 describe("Codex desktop thread listing", () => {
+  test("reads the Codex task catalog directly from the read-only state database", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-state-catalog-"));
+    const databasePath = path.join(directory, "state_5.sqlite");
+    const catalogDatabasePath = path.join(directory, "codex-dev.db");
+    const { Database } = await import("bun:sqlite");
+    const database = new Database(databasePath);
+    try {
+      database.exec(`
+        CREATE TABLE threads (
+          id TEXT PRIMARY KEY,
+          rollout_path TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          source TEXT NOT NULL,
+          cwd TEXT NOT NULL,
+          title TEXT NOT NULL,
+          first_user_message TEXT NOT NULL DEFAULT '',
+          preview TEXT NOT NULL DEFAULT '',
+          name TEXT,
+          archived INTEGER NOT NULL DEFAULT 0,
+          recency_at_ms INTEGER NOT NULL DEFAULT 0,
+          project_id TEXT
+        );
+      `);
+      const insert = database.prepare(`
+        INSERT INTO threads (
+          id, rollout_path, created_at, updated_at, source, cwd, title,
+          first_user_message, preview, name, archived, recency_at_ms, project_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      insert.run(
+        "thread-old", path.join(directory, "old.jsonl"), 100, 110, "vscode", "/tmp/old",
+        "标题回退", "第一条消息", "预览回退", null, 0, 1_000, "project-old",
+      );
+      insert.run(
+        "thread-new", path.join(directory, "new.jsonl"), 200, 220, "vscode", "/tmp/new",
+        "普通标题", "第一条消息", "预览内容", "用户命名", 0, 2_000, "project-new",
+      );
+      insert.run(
+        "thread-archived", path.join(directory, "archived.jsonl"), 300, 330, "vscode",
+        "/tmp/archived", "已归档", "", "", null, 1, 3_000, null,
+      );
+    } finally {
+      database.close();
+    }
+    const catalogDatabase = new Database(catalogDatabasePath);
+    try {
+      catalogDatabase.exec(`
+        CREATE TABLE local_thread_catalog (
+          host_id TEXT NOT NULL,
+          thread_id TEXT NOT NULL,
+          display_title TEXT NOT NULL,
+          observation_sequence INTEGER NOT NULL,
+          missing_candidate INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (host_id, thread_id)
+        );
+      `);
+      catalogDatabase.prepare(`
+        INSERT INTO local_thread_catalog (
+          host_id, thread_id, display_title, observation_sequence, missing_candidate
+        ) VALUES (?, ?, ?, ?, ?)
+      `).run("local", "thread-new", "本地目录命名", 9, 0);
+    } finally {
+      catalogDatabase.close();
+    }
+
+    try {
+      const catalog = await readCodexStateDbSessionCatalog({
+        databasePath,
+        catalogDatabasePath,
+        limit: 10,
+      });
+      expect(catalog?.candidates).toEqual([
+        {
+          sessionId: "thread-new",
+          threadId: "thread-new",
+          title: "本地目录命名",
+          lastUpdatedAt: new Date(2_000).toISOString(),
+          source: "vscode",
+          cwd: "/tmp/new",
+          projectId: "project-new",
+          runtimeStatus: { type: "notLoaded" },
+        },
+        {
+          sessionId: "thread-old",
+          threadId: "thread-old",
+          title: "标题回退",
+          lastUpdatedAt: new Date(1_000).toISOString(),
+          source: "vscode",
+          cwd: "/tmp/old",
+          projectId: "project-old",
+          runtimeStatus: { type: "notLoaded" },
+        },
+      ]);
+      expect(catalog?.rolloutPathByThreadId.get("thread-new"))
+        .toBe(path.join(directory, "new.jsonl"));
+    } finally {
+      removeTempDirectory(directory);
+    }
+  });
+
+  test("lists Codex state tasks without RPC and limits persisted status scans", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-state-list-"));
+    const databasePath = path.join(directory, "state_5.sqlite");
+    const previousCodexHome = process.env.CODEX_HOME;
+    const { Database } = await import("bun:sqlite");
+    const database = new Database(databasePath);
+    try {
+      database.exec(`
+        CREATE TABLE threads (
+          id TEXT PRIMARY KEY,
+          rollout_path TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          source TEXT NOT NULL,
+          cwd TEXT NOT NULL,
+          title TEXT NOT NULL,
+          first_user_message TEXT NOT NULL DEFAULT '',
+          preview TEXT NOT NULL DEFAULT '',
+          name TEXT,
+          archived INTEGER NOT NULL DEFAULT 0,
+          recency_at_ms INTEGER NOT NULL DEFAULT 0,
+          updated_at_ms INTEGER NOT NULL DEFAULT 0,
+          thread_source TEXT,
+          project_id TEXT
+        );
+      `);
+      const insert = database.prepare(`
+        INSERT INTO threads (
+          id, rollout_path, created_at, updated_at, source, cwd, title,
+          first_user_message, preview, name, archived, recency_at_ms,
+          updated_at_ms, thread_source, project_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (let index = 0; index < 14; index += 1) {
+        const threadId = `thread-${String(index).padStart(2, "0")}`;
+        const rolloutPath = path.join(directory, `${threadId}.jsonl`);
+        fs.writeFileSync(rolloutPath, JSON.stringify({
+          type: "event_msg",
+          payload: { type: "task_complete" },
+        }) + "\n", "utf8");
+        insert.run(
+          threadId, rolloutPath, index, index, "vscode", directory,
+          `任务 ${index}`, "", "", null, 0, 10_000 - index, 10_000 - index,
+          "vscode", null,
+        );
+      }
+    } finally {
+      database.close();
+    }
+
+    try {
+      process.env.CODEX_HOME = directory;
+      const adapter = new CodexPtyAdapter({
+        kind: "codex",
+        command: "codex",
+        cwd: directory,
+        renderMode: "headless",
+        codexTransport: "desktop",
+      }) as any;
+      let rpcRequests = 0;
+      adapter.sendRpcRequest = async () => {
+        rpcRequests += 1;
+        throw new Error("不应调用 app-server");
+      };
+
+      const candidates = await adapter.listResumeSessions(20);
+      expect(rpcRequests).toBe(0);
+      expect(candidates).toHaveLength(14);
+      expect(candidates.slice(0, 12).every(
+        (candidate: { runtimeStatus?: { type?: string } }) =>
+          candidate.runtimeStatus?.type === "idle",
+      )).toBe(true);
+      expect(candidates.slice(12).every(
+        (candidate: { runtimeStatus?: { type?: string } }) =>
+          candidate.runtimeStatus?.type === "notLoaded",
+      )).toBe(true);
+    } finally {
+      if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previousCodexHome;
+      removeTempDirectory(directory);
+    }
+  });
+
+  test("does not start a Codex metadata app-server when the state catalog is unavailable", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-state-missing-"));
+    const previousCodexHome = process.env.CODEX_HOME;
+    try {
+      process.env.CODEX_HOME = directory;
+      const adapter = new CodexPtyAdapter({
+        kind: "codex",
+        command: "codex",
+        cwd: directory,
+        renderMode: "headless",
+        codexTransport: "desktop",
+      }) as any;
+      let rpcRequests = 0;
+      adapter.sendRpcRequest = async () => {
+        rpcRequests += 1;
+        throw new Error("不应调用 app-server");
+      };
+      expect(await adapter.listResumeSessions(20)).toEqual([]);
+      expect(rpcRequests).toBe(0);
+    } finally {
+      if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previousCodexHome;
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("treats an unavailable Codex state database as a safe catalog miss", async () => {
+    expect(await readCodexStateDbSessionCatalog({
+      databasePath: path.join(os.tmpdir(), `missing-codex-state-${crypto.randomUUID()}.sqlite`),
+      limit: 10,
+    })).toBeNull();
+  });
+
   test("maps app-server thread/list results to desktop task candidates", () => {
     const candidates = mapCodexDesktopThreadListResponse(
       {
@@ -273,6 +557,100 @@ describe("Codex desktop thread listing", () => {
       projectThreadOrder: 0,
     });
   });
+
+describe("Codex desktop project inheritance", () => {
+  test("maps a canonical app-server project back to the desktop project name", () => {
+    const candidates = [{
+      sessionId: "thread_new",
+      threadId: "thread_new",
+      title: "网页新建任务",
+      lastUpdatedAt: new Date(0).toISOString(),
+      cwd: "/workspace/outside-project",
+      projectId: "app_project",
+    }];
+
+    applyCodexDesktopProjectMetadata(candidates, {
+      "local-projects": {
+        legacy_project: {
+          id: "legacy_project",
+          name: "DeskRelay",
+          rootPaths: ["/workspace/DeskRelay"],
+        },
+      },
+      "app-server-project-id-by-legacy-project-id-by-host": {
+        "local:/tmp/codex-home": {
+          legacy_project: "app_project",
+        },
+      },
+      "sidebar-project-thread-orders": {
+        legacy_project: { threadIds: ["thread_new"] },
+      },
+    });
+
+    expect(candidates[0]).toMatchObject({
+      projectId: "legacy_project",
+      projectName: "DeskRelay",
+      projectThreadOrder: 0,
+    });
+  });
+
+  test("resolves a legacy desktop assignment to the canonical app-server project", () => {
+    expect(resolveCodexDesktopProjectCreationTarget({
+      "thread-project-assignments": {
+        thread_source: {
+          projectKind: "local",
+          projectId: "legacy_project",
+        },
+      },
+      "app-server-project-id-by-legacy-project-id-by-host": {
+        "local:/tmp/codex-home": {
+          legacy_project: "app_project",
+        },
+      },
+    }, "thread_source", "/tmp/codex-home")).toEqual({
+      legacyProjectId: "legacy_project",
+      appServerProjectId: "app_project",
+    });
+  });
+
+  test("infers the canonical project from cwd when the desktop has no explicit assignment", () => {
+    expect(resolveCodexDesktopProjectCreationTarget({
+      "local-projects": {
+        legacy_project: {
+          id: "legacy_project",
+          name: "DeskRelay",
+          rootPaths: ["/workspace/DeskRelay"],
+        },
+      },
+      "app-server-project-id-by-legacy-project-id-by-host": {
+        "local:/tmp/codex-home": {
+          legacy_project: "app_project",
+        },
+      },
+    }, "thread_source", "/tmp/codex-home", "/workspace/DeskRelay/feature"))
+      .toEqual({
+        legacyProjectId: "legacy_project",
+        appServerProjectId: "app_project",
+      });
+  });
+
+  test("does not inherit a stale assignment for an explicitly projectless task", () => {
+    expect(resolveCodexDesktopProjectCreationTarget({
+      "thread-project-assignments": {
+        thread_source: {
+          projectKind: "local",
+          projectId: "legacy_project",
+        },
+      },
+      "projectless-thread-ids": ["thread_source"],
+      "app-server-project-id-by-legacy-project-id-by-host": {
+        "local:/tmp/codex-home": {
+          legacy_project: "app_project",
+        },
+      },
+    }, "thread_source", "/tmp/codex-home")).toBeNull();
+  });
+});
 
 
 
@@ -1120,6 +1498,56 @@ describe("Codex desktop live conversation messages", () => {
         expect(image.path).toStartWith(path.join(workspaceDir, "message-images", "codex"));
       }
     } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+      fs.rmSync(workspaceDir, { recursive: true, force: true });
+    }
+  });
+
+  test("bounds accelerated media lookup for very large Codex rollouts", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-rollout-media-bound-"));
+    const threadId = "thread-media-bound";
+    const filePath = path.join(directory, `rollout-${threadId}.jsonl`);
+    const workspaceDir = getWorkspaceChannelPaths(directory).workspaceDir;
+    const originalReadSync = fs.readSync;
+    let bytesRead = 0;
+    try {
+      const lines = [JSON.stringify({ type: "session_meta", payload: { id: threadId } })];
+      for (let index = 0; index < 2_500; index += 1) {
+        lines.push(JSON.stringify({
+          type: "response_item",
+          payload: {
+            type: "message",
+            id: `user-${index}`,
+            role: "user",
+            content: [{ type: "input_text", text: `历史消息 ${index} ${"x".repeat(8_192)}` }],
+          },
+        }));
+      }
+      fs.writeFileSync(filePath, lines.join("\n") + "\n", "utf8");
+      fs.readSync = ((...args: Parameters<typeof fs.readSync>) => {
+        const result = originalReadSync(...args as Parameters<typeof fs.readSync>);
+        if (typeof result === "number") bytesRead += result;
+        return result;
+      }) as typeof fs.readSync;
+
+      const adapter = new CodexPtyAdapter({
+        kind: "codex",
+        command: "codex",
+        cwd: directory,
+        renderMode: "headless",
+        codexTransport: "desktop",
+      }) as any;
+      adapter.resolveDesktopSessionFilePath = () => filePath;
+
+      const messages = await adapter.getSessionMessageMedia(threadId, {
+        historyOnly: true,
+        lightweight: true,
+        limit: 40,
+      }, [{ role: "user", text: "不存在于 rollout 的加速历史消息" }]);
+      expect(messages).toEqual([]);
+      expect(bytesRead).toBeLessThanOrEqual(9 * 1024 * 1024);
+    } finally {
+      fs.readSync = originalReadSync;
       fs.rmSync(directory, { recursive: true, force: true });
       fs.rmSync(workspaceDir, { recursive: true, force: true });
     }
@@ -2329,6 +2757,10 @@ describe("Codex parallel desktop task switching", () => {
     adapter.sharedThreadId = "thread_a";
     adapter.state.sharedSessionId = "thread_a";
     adapter.state.sharedThreadId = "thread_a";
+    adapter.desktopListedRuntimeStatusByThreadId.set("thread_a", {
+      type: "active",
+      activeFlags: [],
+    });
     adapter.state.status = "busy";
     adapter.activeTurn = {
       threadId: "thread_a",
@@ -2571,6 +3003,45 @@ describe("Codex desktop application launch policy", () => {
 });
 
 describe("Codex desktop IPC transport", () => {
+  test("keeps the desktop owner usable when the metadata helper times out during startup", async () => {
+    const adapter = new CodexPtyAdapter({
+      kind: "codex",
+      command: "codex",
+      cwd: process.cwd(),
+      renderMode: "headless",
+      codexTransport: "desktop",
+    }) as any;
+    const calls: string[] = [];
+    const recoveries: string[] = [];
+    adapter.startDesktopIpcClient = async () => {
+      calls.push("desktop");
+      adapter.desktopIpcClient = {};
+    };
+    adapter.startAppServer = async () => {
+      calls.push("metadata");
+      throw new Error("Timed out waiting for app-server on 127.0.0.1:52851.");
+    };
+    adapter.connectRpcClient = async () => {
+      calls.push("metadata-rpc");
+    };
+    adapter.restoreInitialSharedThreadIfNeeded = async () => {
+      calls.push("restore");
+    };
+    adapter.afterStart = () => undefined;
+    adapter.scheduleDesktopMetadataRecovery = (reason: string) => {
+      recoveries.push(reason);
+    };
+
+    await adapter.start();
+
+    expect(calls).toEqual(["desktop", "metadata", "restore"]);
+    expect(adapter.desktopTransportStarted).toBe(true);
+    expect(adapter.getState().status).toBe("idle");
+    expect(recoveries).toEqual([
+      "Timed out waiting for app-server on 127.0.0.1:52851.",
+    ]);
+  });
+
   test("recovers a runtime desktop metadata app-server exit without failing the desktop slot", () => {
     expect(resolveCodexAppServerFailureAction({
       expectedShutdown: false,
@@ -3018,7 +3489,7 @@ describe("Codex desktop IPC transport", () => {
     ).rejects.toThrow("禁止通过独立 app-server 执行写操作");
   });
 
-  test("reads the current desktop model, validates options, and applies the selected model to the next turn", async () => {
+  test("reads the current desktop model, validates options, and applies model plus reasoning effort to the next turn", async () => {
     const adapter = new CodexPtyAdapter({
       kind: "codex",
       command: "codex",
@@ -3026,7 +3497,12 @@ describe("Codex desktop IPC transport", () => {
       renderMode: "headless",
       codexTransport: "desktop",
     }) as any;
-    const starts: Array<{ threadId: string; text: string; model?: string }> = [];
+    const starts: Array<{
+      threadId: string;
+      text: string;
+      model?: string;
+      effort?: string;
+    }> = [];
     adapter.sendRpcRequest = async (method: string) => {
       if (method !== "model/list") throw new Error(`Unexpected RPC method: ${method}`);
       return {
@@ -3036,6 +3512,12 @@ describe("Codex desktop IPC transport", () => {
             model: "gpt-5.6-sol",
             displayName: "GPT-5.6 Sol",
             description: "均衡模型",
+            defaultReasoningEffort: "medium",
+            supportedReasoningEfforts: [
+              { reasoningEffort: "low", description: "更快" },
+              { reasoningEffort: "medium", description: "均衡" },
+              { reasoningEffort: "high", description: "更深入" },
+            ],
             hidden: false,
           },
           {
@@ -3043,6 +3525,11 @@ describe("Codex desktop IPC transport", () => {
             model: "gpt-5.6-terra",
             displayName: "GPT-5.6 Terra",
             description: "深度推理",
+            defaultReasoningEffort: "high",
+            supportedReasoningEfforts: [
+              { reasoningEffort: "high", description: "高" },
+              { reasoningEffort: "xhigh", description: "很高" },
+            ],
             hidden: false,
           },
         ],
@@ -3052,11 +3539,20 @@ describe("Codex desktop IPC transport", () => {
     adapter.desktopIpcClient = {
       getThreadStateView: () => ({
         latestModel: "gpt-5.6-sol",
-        latestThreadSettings: { model: "gpt-5.6-sol" },
+        latestThreadSettings: { model: "gpt-5.6-sol", effort: "medium" },
         threadRuntimeStatus: { type: "idle" },
       }),
-      startTurn: async (threadId: string, text: string, options?: { model?: string }) => {
-        starts.push({ threadId, text, model: options?.model });
+      startTurn: async (
+        threadId: string,
+        text: string,
+        options?: { model?: string; effort?: string },
+      ) => {
+        starts.push({
+          threadId,
+          text,
+          model: options?.model,
+          effort: options?.effort,
+        });
         return { id: "turn-model", status: "inProgress" };
       },
     };
@@ -3074,27 +3570,252 @@ describe("Codex desktop IPC transport", () => {
           id: "gpt-5.6-sol",
           label: "GPT-5.6 Sol",
           description: "均衡模型",
+          defaultReasoningEffort: "medium",
+          reasoningEffortOptions: [
+            { id: "low", description: "更快" },
+            { id: "medium", description: "均衡" },
+            { id: "high", description: "更深入" },
+          ],
         },
         {
           id: "gpt-5.6-terra",
           label: "GPT-5.6 Terra",
           description: "深度推理",
+          defaultReasoningEffort: "high",
+          reasoningEffortOptions: [
+            { id: "high", description: "高" },
+            { id: "xhigh", description: "很高" },
+          ],
         },
       ],
       canChange: true,
+      currentReasoningEffort: "medium",
+      reasoningEffortOptions: [
+        { id: "low", description: "更快" },
+        { id: "medium", description: "均衡" },
+        { id: "high", description: "更深入" },
+      ],
+      canChangeReasoningEffort: true,
     });
     await expect(
       adapter.setSessionModel("thread-model", "not-a-real-model"),
     ).rejects.toThrow("这个模型当前不可用");
     expect(await adapter.setSessionModel("thread-model", "gpt-5.6-terra"))
-      .toMatchObject({ currentModel: "gpt-5.6-terra", canChange: true });
+      .toMatchObject({
+        currentModel: "gpt-5.6-terra",
+        canChange: true,
+      });
+    expect((await adapter.getSessionModelState("thread-model")).currentReasoningEffort)
+      .toBeUndefined();
+    await expect(adapter.setSessionReasoningEffort("thread-model", "low"))
+      .rejects.toThrow("当前不可用");
+    expect(await adapter.setSessionReasoningEffort("thread-model", "xhigh"))
+      .toMatchObject({ currentReasoningEffort: "xhigh" });
 
     await adapter.sendInputToSession("thread-model", "使用新模型继续");
     expect(starts).toEqual([{
       threadId: "thread-model",
       text: "使用新模型继续",
       model: "gpt-5.6-terra",
+      effort: "xhigh",
     }]);
+  });
+
+  test("does not invent a model default when the desktop session has no reasoning effort", async () => {
+    const adapter = new CodexPtyAdapter({
+      kind: "codex",
+      command: "codex",
+      cwd: process.cwd(),
+      renderMode: "headless",
+      codexTransport: "desktop",
+    }) as any;
+    adapter.sendRpcRequest = async () => ({
+      data: [{
+        id: "model-sol",
+        model: "gpt-5.6-sol",
+        displayName: "GPT-5.6 Sol",
+        defaultReasoningEffort: "medium",
+        supportedReasoningEfforts: [
+          { reasoningEffort: "low", description: "更快" },
+          { reasoningEffort: "medium", description: "均衡" },
+        ],
+        hidden: false,
+      }],
+      nextCursor: null,
+    });
+    adapter.desktopIpcClient = {
+      getThreadStateView: () => ({
+        latestModel: "gpt-5.6-sol",
+        latestThreadSettings: { model: "gpt-5.6-sol" },
+        threadRuntimeStatus: { type: "idle" },
+      }),
+    };
+
+    const state = await adapter.getSessionModelState("thread-follow-session");
+    expect(state.currentModel).toBe("gpt-5.6-sol");
+    expect(state.currentReasoningEffort).toBeUndefined();
+    expect(state.reasoningEffortOptions).toEqual([
+      { id: "low", description: "更快" },
+      { id: "medium", description: "均衡" },
+    ]);
+  });
+
+  test("reconciles persisted completion before exposing model and permission controls", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-control-reconcile-"));
+    const rolloutFile = path.join(directory, "rollout.jsonl");
+    const threadId = "thread-finished";
+    const turnId = "turn-finished";
+    fs.writeFileSync(rolloutFile, [
+      JSON.stringify({ type: "session_meta", payload: { id: threadId } }),
+      JSON.stringify({
+        timestamp: "2026-09-02T01:00:05.000Z",
+        type: "event_msg",
+        payload: {
+          type: "task_complete",
+          turn_id: turnId,
+          completed_at: 1_788_312_005,
+          duration_ms: 5_000,
+        },
+      }),
+    ].join("\n") + "\n");
+    const adapter = new CodexPtyAdapter({
+      kind: "codex",
+      command: "codex",
+      cwd: process.cwd(),
+      renderMode: "headless",
+      codexTransport: "desktop",
+    }) as any;
+    adapter.sendRpcRequest = async () => ({
+      data: [{
+        id: "model-sol",
+        model: "gpt-5.6-sol",
+        displayName: "GPT-5.6 Sol",
+        supportedReasoningEfforts: [{ reasoningEffort: "high", description: "高" }],
+        hidden: false,
+      }],
+      nextCursor: null,
+    });
+    adapter.desktopIpcClient = {
+      getThreadStateView: () => ({
+        latestModel: "gpt-5.6-sol",
+        latestThreadSettings: { model: "gpt-5.6-sol", effort: "high" },
+        threadRuntimeStatus: { type: "active", activeFlags: [] },
+        turnHistory: {
+          history: {
+            entitiesByKey: {
+              "tail:0:local:finished": {
+                turnId,
+                status: "inProgress",
+                items: [{
+                  type: "userMessage",
+                  id: "user-finished",
+                  content: [{ type: "text", text: "已经完成的任务" }],
+                }],
+              },
+            },
+          },
+        },
+      }),
+    };
+    adapter.desktopThreadSessionFilePathById.set(threadId, rolloutFile);
+    adapter.desktopListedRuntimeStatusByThreadId.set(threadId, {
+      type: "active",
+      activeFlags: [],
+    });
+    adapter.pendingDesktopTurnThreadIds.add(threadId);
+    adapter.backgroundTurns.set(turnId, { threadId, turnId, origin: "local" });
+
+    try {
+      expect(await adapter.getSessionModelState(threadId)).toMatchObject({
+        canChange: true,
+        canChangeReasoningEffort: true,
+      });
+      expect(await adapter.getSessionPermissionState(threadId)).toMatchObject({
+        canChange: true,
+      });
+      expect(adapter.pendingDesktopTurnThreadIds.has(threadId)).toBe(false);
+      expect(adapter.backgroundTurns.has(turnId)).toBe(false);
+      expect(adapter.desktopListedRuntimeStatusByThreadId.get(threadId)).toEqual({
+        type: "idle",
+      });
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("keeps controls locked when a newer live turn has no turn id yet", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-control-new-live-"));
+    const rolloutFile = path.join(directory, "rollout.jsonl");
+    const threadId = "thread-new-live";
+    fs.writeFileSync(rolloutFile, [
+      JSON.stringify({ type: "session_meta", payload: { id: threadId } }),
+      JSON.stringify({
+        timestamp: "2026-09-02T01:00:05.000Z",
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: "turn-old", duration_ms: 5_000 },
+      }),
+    ].join("\n") + "\n");
+    const adapter = new CodexPtyAdapter({
+      kind: "codex",
+      command: "codex",
+      cwd: process.cwd(),
+      renderMode: "headless",
+      codexTransport: "desktop",
+    }) as any;
+    adapter.sendRpcRequest = async () => ({
+      data: [{ id: "model-sol", model: "gpt-5.6-sol", hidden: false }],
+      nextCursor: null,
+    });
+    adapter.desktopIpcClient = {
+      getThreadStateView: () => ({
+        latestModel: "gpt-5.6-sol",
+        threadRuntimeStatus: { type: "active", activeFlags: [] },
+      }),
+    };
+    adapter.desktopThreadSessionFilePathById.set(threadId, rolloutFile);
+    adapter.pendingDesktopTurnThreadIds.add(threadId);
+
+    try {
+      expect(await adapter.getSessionModelState(threadId)).toMatchObject({
+        canChange: false,
+        unavailableReason: "任务正在处理，完成或停止后再切换模型。",
+      });
+      expect(adapter.pendingDesktopTurnThreadIds.has(threadId)).toBe(true);
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("changes the lightweight content revision when rollout or desktop state advances", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-content-revision-"));
+    const rolloutFile = path.join(directory, "rollout.jsonl");
+    fs.writeFileSync(rolloutFile, "{\"type\":\"session_meta\"}\n");
+    const adapter = new CodexPtyAdapter({
+      kind: "codex",
+      command: "codex",
+      cwd: process.cwd(),
+      renderMode: "headless",
+      codexTransport: "desktop",
+    }) as any;
+    let desktopRevision = 1;
+    adapter.desktopIpcClient = {
+      getThreadRevision: () => desktopRevision,
+      getThreadStateView: () => null,
+    };
+    adapter.desktopThreadSessionFilePathById.set("thread-revision", rolloutFile);
+
+    try {
+      const initial = adapter.getSessionContentRevision("thread-revision");
+      fs.appendFileSync(rolloutFile, "{\"type\":\"event_msg\"}\n");
+      const afterRollout = adapter.getSessionContentRevision("thread-revision");
+      desktopRevision += 1;
+      const afterDesktop = adapter.getSessionContentRevision("thread-revision");
+      expect(initial).toBeTruthy();
+      expect(afterRollout).not.toBe(initial);
+      expect(afterDesktop).not.toBe(afterRollout);
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   test("does not allow changing a Codex model while that task is running", async () => {
@@ -3138,6 +3859,7 @@ describe("Codex desktop IPC transport", () => {
     const desktopCalls: Array<{ method: string; threadId: string; text?: string }> = [];
     const handoffEvents: string[] = [];
     let bootstrapWriterReleased = false;
+    adapter.resolveDesktopSessionFilePath = () => "/tmp/thread-new-rollout.jsonl";
     adapter.sendRpcRequest = async (method: string, params: unknown) => {
       rpcCalls.push({ method, params });
       if (method === "thread/start") {
@@ -3183,16 +3905,45 @@ describe("Codex desktop IPC transport", () => {
     ]);
   });
 
-  test("creates a new desktop task in the source task project directory", async () => {
+  test("creates a new desktop task in the source task's canonical desktop project", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-project-create-"));
+    const globalStateFile = path.join(directory, ".codex-global-state.json");
+    const sourceThreadId = "thread_source";
+    const legacyProjectId = "legacy_project_a";
+    const appServerProjectId = "app_project_a";
+    fs.writeFileSync(globalStateFile, JSON.stringify({
+      "local-projects": {
+        [legacyProjectId]: {
+          id: legacyProjectId,
+          name: "项目 A",
+          rootPaths: ["/workspace/project-a"],
+        },
+      },
+      "thread-project-assignments": {
+        [sourceThreadId]: {
+          projectKind: "local",
+          projectId: legacyProjectId,
+        },
+      },
+      "app-server-project-id-by-legacy-project-id-by-host": {
+        [`local:${directory}`]: {
+          [legacyProjectId]: appServerProjectId,
+        },
+      },
+    }));
     const adapter = new CodexPtyAdapter({
       kind: "codex",
       command: "codex",
       cwd: "/workspace/default",
       renderMode: "headless",
       codexTransport: "desktop",
+      codexDesktopGlobalStateFile: globalStateFile,
     }) as any;
     const rpcCalls: Array<{ method: string; params: Record<string, unknown> }> = [];
-    adapter.desktopThreadCwdById.set("thread_source", "/workspace/project-a");
+    // The task was manually placed in the project even though its actual cwd is
+    // outside the project's root. Project inheritance must therefore use the
+    // desktop assignment instead of guessing from cwd.
+    adapter.desktopThreadCwdById.set(sourceThreadId, "/workspace/outside-project");
     adapter.sendRpcRequest = async (method: string, params: Record<string, unknown>) => {
       rpcCalls.push({ method, params });
       if (method === "thread/start") return { thread: { id: "thread_project_new" } };
@@ -3203,16 +3954,58 @@ describe("Codex desktop IPC transport", () => {
       openAndFollowThread: async () => ({}),
     };
 
-    await adapter.createSessionInProject("thread_source");
+    try {
+      await adapter.createSessionInProject(sourceThreadId);
 
-    expect(rpcCalls[0]).toMatchObject({
-      method: "thread/start",
-      params: { cwd: "/workspace/project-a" },
-    });
-    expect(adapter.getState().sharedThreadId).toBe("thread_project_new");
+      expect(rpcCalls[0]).toMatchObject({
+        method: "thread/start",
+        params: {
+          cwd: "/workspace/outside-project",
+          projectId: appServerProjectId,
+        },
+      });
+      expect(adapter.getState().sharedThreadId).toBe("thread_project_new");
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
   });
 
-  test("keeps a newly created canonical task usable while the desktop is locked", async () => {
+  test("refuses project creation when the desktop project mapping is not ready", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-project-unmapped-"));
+    const globalStateFile = path.join(directory, ".codex-global-state.json");
+    fs.writeFileSync(globalStateFile, JSON.stringify({
+      "thread-project-assignments": {
+        thread_source: {
+          projectKind: "local",
+          projectId: "legacy_project",
+        },
+      },
+    }));
+    const adapter = new CodexPtyAdapter({
+      kind: "codex",
+      command: "codex",
+      cwd: "/workspace/default",
+      renderMode: "headless",
+      codexTransport: "desktop",
+      codexDesktopGlobalStateFile: globalStateFile,
+    }) as any;
+    const rpcCalls: string[] = [];
+    adapter.desktopThreadCwdById.set("thread_source", "/workspace/outside-project");
+    adapter.sendRpcRequest = async (method: string) => {
+      rpcCalls.push(method);
+      throw new Error(`Unexpected RPC method: ${method}`);
+    };
+
+    try {
+      await expect(adapter.createSessionInProject("thread_source"))
+        .rejects.toThrow("Codex 桌面端尚未完成这个项目的索引同步");
+      expect(rpcCalls).toEqual([]);
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("keeps an empty new task on the bootstrap owner and accepts the first image turn", async () => {
     const adapter = new CodexPtyAdapter({
       kind: "codex",
       command: "codex",
@@ -3226,47 +4019,124 @@ describe("Codex desktop IPC transport", () => {
       params: Record<string, unknown>,
     ) => {
       rpcCalls.push({ method, params });
-      if (method === "thread/start" || method === "thread/resume") {
-        return { thread: { id: "thread_locked" } };
-      }
-      if (method === "thread/unsubscribe") {
-        return {};
-      }
+      if (method === "thread/start") return { thread: { id: "thread_empty" } };
       if (method === "turn/start") {
-        return { turn: { id: "turn_locked" } };
+        return { turn: { id: "turn_image" } };
       }
       throw new Error(`Unexpected RPC method: ${method}`);
     };
+    adapter.resolveDesktopSessionFilePath = () => null;
     adapter.desktopIpcClient = {
       openAndFollowThread: async () => {
-        throw new Error("The Mac is locked");
+        throw new Error("空任务在首轮开始前不应交给桌面端");
       },
       startTurn: async () => {
-        throw new Error("锁屏时不应调用桌面 startTurn");
+        throw new Error("空任务首轮不应调用桌面 startTurn");
       },
     };
 
     await adapter.createSession();
-    await adapter.sendInput("锁屏后也要开始");
+    await adapter.sendInputItemsToSession("thread_empty", [
+      { type: "text", text: "研究广州实景地图" },
+      { type: "localImage", path: "/tmp/guangzhou-reference.jpg" },
+    ]);
 
-    expect(adapter.desktopBootstrapThreadIds.has("thread_locked")).toBe(true);
+    expect(adapter.desktopBootstrapThreadIds.has("thread_empty")).toBe(true);
     expect(rpcCalls.map((call) => call.method)).toEqual([
       "thread/start",
-      "thread/unsubscribe",
-      "thread/resume",
-      "thread/unsubscribe",
-      "thread/resume",
       "turn/start",
     ]);
     expect(rpcCalls.at(-1)?.params).toMatchObject({
-      threadId: "thread_locked",
-      input: [{ type: "text", text: "锁屏后也要开始" }],
+      threadId: "thread_empty",
+      input: [
+        { type: "text", text: "研究广州实景地图" },
+        { type: "localImage", path: "/tmp/guangzhou-reference.jpg" },
+      ],
     });
     expect(adapter.activeTurn).toEqual({
-      threadId: "thread_locked",
-      turnId: "turn_locked",
+      threadId: "thread_empty",
+      turnId: "turn_image",
       origin: "wechat",
     });
+  });
+
+  test("hands a bootstrap task to Desktop after the first turn creates its rollout", async () => {
+    const adapter = new CodexPtyAdapter({
+      kind: "codex",
+      command: "codex",
+      cwd: process.cwd(),
+      renderMode: "headless",
+      codexTransport: "desktop",
+    }) as any;
+    const events: string[] = [];
+    let rolloutReady = false;
+    adapter.desktopBootstrapHandoffDelayMs = 0;
+    adapter.resolveDesktopSessionFilePath = () => rolloutReady
+      ? "/tmp/thread-bootstrap-rollout.jsonl"
+      : null;
+    adapter.sendRpcRequest = async (method: string) => {
+      events.push(`rpc:${method}`);
+      if (method === "thread/start") return { thread: { id: "thread_bootstrap_new" } };
+      if (method === "turn/start") return { turn: { id: "turn_bootstrap_first" } };
+      if (method === "thread/unsubscribe") return {};
+      throw new Error(`Unexpected RPC method: ${method}`);
+    };
+    adapter.desktopIpcClient = {
+      openAndFollowThread: async (threadId: string) => {
+        events.push(`desktop:open:${threadId}`);
+        return {};
+      },
+    };
+
+    await adapter.createSession();
+    await adapter.sendInput("首轮先由 bootstrap owner 处理");
+    adapter.handleTurnCompleted(
+      { threadId: "thread_bootstrap_new", turnId: "turn_bootstrap_first", origin: "wechat" },
+      { turn: { id: "turn_bootstrap_first", status: "completed" } },
+    );
+    setTimeout(() => { rolloutReady = true; }, 20);
+    await wait(100);
+
+    expect(events).toEqual([
+      "rpc:thread/start",
+      "rpc:turn/start",
+      "rpc:thread/unsubscribe",
+      "desktop:open:thread_bootstrap_new",
+    ]);
+    expect(adapter.desktopBootstrapThreadIds.has("thread_bootstrap_new")).toBe(false);
+  });
+
+  test("retries desktop handoff after the bootstrap writer release settles", async () => {
+    const adapter = new CodexPtyAdapter({
+      kind: "codex",
+      command: "codex",
+      cwd: process.cwd(),
+      renderMode: "headless",
+      codexTransport: "desktop",
+    }) as any;
+    const calls: string[] = [];
+    let opens = 0;
+    adapter.desktopBootstrapHandoffDelayMs = 0;
+    adapter.desktopBootstrapThreadIds.add("thread_handoff_retry");
+    adapter.resolveDesktopSessionFilePath = () => "/tmp/thread-handoff-retry.jsonl";
+    adapter.sendRpcRequest = async (method: string) => {
+      calls.push(method);
+      if (method === "thread/unsubscribe") return {};
+      throw new Error(`Unexpected RPC method: ${method}`);
+    };
+    adapter.desktopIpcClient = {
+      openAndFollowThread: async () => {
+        opens += 1;
+        if (opens === 1) throw new Error("task still has an active writer");
+        return {};
+      },
+    };
+
+    expect(await adapter.tryHandoffDesktopBootstrapThread("thread_handoff_retry", 100))
+      .toBe(true);
+    expect(opens).toBe(2);
+    expect(calls).toEqual(["thread/unsubscribe"]);
+    expect(adapter.desktopBootstrapThreadIds.has("thread_handoff_retry")).toBe(false);
   });
 
   test("keeps bootstrap approvals, input requests, and interrupts on the canonical owner", async () => {
@@ -3432,16 +4302,26 @@ describe("Codex desktop IPC transport", () => {
       renderMode: "headless",
       codexTransport: "desktop",
     }) as any;
-    const calls: Array<{ threadId: string; input: unknown }> = [];
+    const calls: Array<{
+      threadId: string;
+      input: unknown;
+      options: Record<string, unknown>;
+    }> = [];
     adapter.desktopIpcClient = {
-      startTurn: async (threadId: string, input: unknown) => {
-        calls.push({ threadId, input });
+      startTurn: async (
+        threadId: string,
+        input: unknown,
+        options: Record<string, unknown>,
+      ) => {
+        calls.push({ threadId, input, options });
         return { id: "turn_image", status: "inProgress" };
       },
     };
     adapter.sharedThreadId = "thread_a";
     adapter.state.sharedSessionId = "thread_a";
     adapter.state.sharedThreadId = "thread_a";
+    adapter.getSessionRunSummary = async () => ({ status: "completed" });
+    await adapter.setSessionPermission("thread_a", "read-only");
 
     const result = await adapter.sendInputItemsToSession("thread_a", [
       { type: "text", text: "请分析这张图" },
@@ -3455,6 +4335,12 @@ describe("Codex desktop IPC transport", () => {
           { type: "text", text: "请分析这张图" },
           { type: "localImage", path: "/tmp/mobile-image.png" },
         ],
+        options: {
+          approvalPolicy: "on-request",
+          approvalsReviewer: "user",
+          sandbox: "read-only",
+          sandboxPolicy: { type: "readOnly" },
+        },
       },
     ]);
     expect(result).toEqual({ turnId: "turn_image", queued: false });
@@ -3817,6 +4703,85 @@ describe("Codex desktop IPC transport", () => {
     });
     expect(adapter.backgroundTurns.size).toBe(0);
     fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  test("starts the first native queued follow-up after the desktop task becomes idle", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-native-queue-drain-"));
+    const globalStateFile = path.join(directory, ".codex-global-state.json");
+    const queued = {
+      id: "queued-next",
+      text: "自动继续下一条",
+      context: {
+        prompt: "自动继续下一条",
+        imageAttachments: [],
+        workspaceRoots: [process.cwd()],
+      },
+      cwd: process.cwd(),
+      createdAt: 1_800_000_000_000,
+    };
+    fs.writeFileSync(globalStateFile, JSON.stringify({
+      "queued-follow-ups": { thread_a: [queued] },
+    }));
+    const adapter = new CodexPtyAdapter({
+      kind: "codex",
+      command: "codex",
+      cwd: process.cwd(),
+      renderMode: "headless",
+      codexTransport: "desktop",
+      codexDesktopGlobalStateFile: globalStateFile,
+    }) as any;
+    const starts: Array<{
+      threadId: string;
+      text: string;
+      options: Record<string, unknown>;
+    }> = [];
+    const queueWrites: Array<Record<string, unknown[]>> = [];
+    adapter.desktopIpcClient = {
+      getThreadStateView: () => ({ threadRuntimeStatus: { type: "idle" } }),
+      setQueuedFollowUpsState: async (
+        _threadId: string,
+        state: Record<string, unknown[]>,
+      ) => {
+        queueWrites.push(structuredClone(state));
+        fs.writeFileSync(globalStateFile, JSON.stringify({ "queued-follow-ups": state }));
+      },
+      startTurn: async (
+        threadId: string,
+        text: string,
+        options: Record<string, unknown>,
+      ) => {
+        starts.push({ threadId, text, options });
+        return { id: "turn-queued-next", status: "inProgress" };
+      },
+    };
+    adapter.sharedThreadId = "thread_a";
+    adapter.state.sharedSessionId = "thread_a";
+    adapter.state.sharedThreadId = "thread_a";
+    adapter.getSessionRunSummary = async () => ({ status: "completed" });
+    await adapter.setSessionPermission("thread_a", "danger-full-access");
+
+    try {
+      await adapter.drainDesktopQueuedFollowUp("thread_a");
+      expect(starts).toEqual([{
+        threadId: "thread_a",
+        text: "自动继续下一条",
+        options: {
+          approvalPolicy: "never",
+          approvalsReviewer: "user",
+          sandbox: "danger-full-access",
+          sandboxPolicy: { type: "dangerFullAccess" },
+        },
+      }]);
+      expect(queueWrites.at(-1)?.thread_a).toBeUndefined();
+      expect(adapter.getQueuedTaskInputs("thread_a")).toEqual([]);
+      expect(adapter.activeTurn).toEqual({
+        threadId: "thread_a",
+        turnId: "turn-queued-next",
+        origin: "wechat",
+      });
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   test("confirms a queued follow-up from desktop state after the reply times out", async () => {

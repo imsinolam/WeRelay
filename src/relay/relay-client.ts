@@ -16,6 +16,7 @@ import { writePrivateFileAtomic } from "../utils/private-files.ts";
 const DEFAULT_RETRY_DELAY_MS = 1_000;
 const MAX_RETRY_DELAY_MS = 15_000;
 const JOURNAL_MAX_ENTRIES = 64;
+const MAX_IN_FLIGHT_COMMANDS = 8;
 
 export type StartWeRelayRelayClientOptions = {
   relayUrl: string;
@@ -323,11 +324,65 @@ export function startWeRelayRelayClient(
   const baseRetryDelayMs = options.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
   const journal = new WeRelayRelayCommandJournal(options.journalFile);
   const abortController = new AbortController();
+  const inFlightCommands = new Set<Promise<void>>();
+  const inFlightCommandIds = new Set<string>();
+  let mutationChain = Promise.resolve();
+
+  const executeAndRespond = async (command: WeRelayRelayCommand): Promise<void> => {
+    let commandResponse = command.request.method === "GET"
+      ? null
+      : journal.get(command.id);
+    if (!commandResponse) {
+      commandResponse = await executeRelayCommand(command, {
+        localBaseUrl,
+        ...(options.localPrewarmToken
+          ? { localPrewarmToken: options.localPrewarmToken }
+          : {}),
+        fetchImpl,
+      });
+      if (command.request.method !== "GET") {
+        journal.save(commandResponse);
+      }
+    }
+    await postCommandResponse(commandResponse, {
+      relayUrl,
+      deviceId,
+      deviceToken,
+      fetchImpl,
+      signal: abortController.signal,
+    });
+  };
+
+  const scheduleCommand = (command: WeRelayRelayCommand): void => {
+    if (inFlightCommandIds.has(command.id)) return;
+    inFlightCommandIds.add(command.id);
+    const execution = command.request.method === "GET"
+      ? executeAndRespond(command)
+      : mutationChain.then(() => executeAndRespond(command));
+    if (command.request.method !== "GET") {
+      mutationChain = execution.catch(() => undefined);
+    }
+    const tracked = execution
+      .catch((error) => {
+        if (abortController.signal.aborted) return;
+        const message = error instanceof Error ? error.message : String(error);
+        logger(`WeRelay 命令响应异常：${message}`);
+      })
+      .finally(() => {
+        inFlightCommandIds.delete(command.id);
+        inFlightCommands.delete(tracked);
+      });
+    inFlightCommands.add(tracked);
+  };
 
   const done = (async () => {
     let consecutiveFailures = 0;
     while (!abortController.signal.aborted) {
       try {
+        if (inFlightCommands.size >= MAX_IN_FLIGHT_COMMANDS) {
+          await Promise.race(inFlightCommands);
+          continue;
+        }
         const pollResponse = await fetchImpl(
           `${relayUrl}${WERELAY_RELAY_POLL_PATH}`,
           {
@@ -355,29 +410,7 @@ export function startWeRelayRelayClient(
         if (!isRelayCommand(commandValue) || commandValue.deviceId !== deviceId) {
           throw new Error("Relay 返回了无法识别的请求。");
         }
-        const command = commandValue;
-        let commandResponse = command.request.method === "GET"
-          ? null
-          : journal.get(command.id);
-        if (!commandResponse) {
-          commandResponse = await executeRelayCommand(command, {
-            localBaseUrl,
-            ...(options.localPrewarmToken
-              ? { localPrewarmToken: options.localPrewarmToken }
-              : {}),
-            fetchImpl,
-          });
-          if (command.request.method !== "GET") {
-            journal.save(commandResponse);
-          }
-        }
-        await postCommandResponse(commandResponse, {
-          relayUrl,
-          deviceId,
-          deviceToken,
-          fetchImpl,
-          signal: abortController.signal,
-        });
+        scheduleCommand(commandValue);
         if (consecutiveFailures > 0) {
           logger("WeRelay 公网连接已恢复。");
         }
@@ -403,6 +436,7 @@ export function startWeRelayRelayClient(
     close: async () => {
       abortController.abort();
       await done;
+      await Promise.allSettled([...inFlightCommands]);
     },
   };
 }

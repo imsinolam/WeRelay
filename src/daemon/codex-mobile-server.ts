@@ -7,15 +7,25 @@ import http, {
 } from "node:http";
 import { isIP } from "node:net";
 import os, { type NetworkInterfaceInfo } from "node:os";
+import path from "node:path";
 import { BoundedTtlMap } from "../utils/bounded-ttl-cache.ts";
 import {
   createImmutableTextAsset,
   sendImmutableTextAsset,
 } from "../utils/http-static-asset.ts";
+import { EphemeralLocalPreviewStore } from "../preview/local-preview.ts";
+import { LocalPreviewJobManager } from "../preview/local-preview-jobs.ts";
+import {
+  createLocalPreviewOpenHtml,
+  createLocalPreviewViewerHtml,
+  localPreviewOpenContentSecurityPolicy,
+  localPreviewViewerContentSecurityPolicy,
+} from "../preview/local-preview-web.ts";
 
 import type {
   BridgeSessionMessage,
   BridgeSessionModelState,
+  BridgeSessionPermissionState,
   BridgeSessionProgressItem,
   BridgeSessionRunSummary,
 } from "../bridge/bridge-types.ts";
@@ -372,6 +382,7 @@ export type StartCodexMobileServerOptions = {
   maxPortAttempts?: number;
   lanAddress?: string;
   publicBaseUrl?: string;
+  previewRoot?: string;
   buildPublicTaskUrl?: (
     threadId: string,
     adapter: string,
@@ -408,9 +419,18 @@ export type StartCodexMobileServerOptions = {
   ) => Promise<BridgeSessionModelState>;
   setTaskModel?: (
     threadId: string,
-    model: string,
+    update: { model?: string; reasoningEffort?: string },
     adapter?: string,
   ) => Promise<BridgeSessionModelState>;
+  readTaskPermission?: (
+    threadId: string,
+    adapter?: string,
+  ) => Promise<BridgeSessionPermissionState>;
+  setTaskPermission?: (
+    threadId: string,
+    permission: string,
+    adapter?: string,
+  ) => Promise<BridgeSessionPermissionState>;
   readContentRevision?: (
     threadId: string,
     adapter?: string,
@@ -987,6 +1007,11 @@ function createRequestHandler(
   const loginAttempts = new Map<string, LoginAttempt>();
   const lanHandoffs = new Map<string, LanHandoff>();
   const lanSessions = new Map<string, LanSession>();
+  const localPreviewStore = new EphemeralLocalPreviewStore();
+  const localPreviewJobs = new LocalPreviewJobManager({
+    workspaceRoot: path.resolve(options.previewRoot ?? process.cwd()),
+    store: localPreviewStore,
+  });
   const outputImages = new BoundedTtlMap<string, {
     threadId: string;
     adapter?: string;
@@ -997,6 +1022,13 @@ function createRequestHandler(
   });
   const messageDeliveries = new BoundedTtlMap<string, CodexMobileMessageDelivery>({
     maxSize: 1_024,
+    ttlMs: 15 * 60_000,
+  });
+  const taskCreationRequests = new BoundedTtlMap<
+    string,
+    Promise<CodexMobileTask>
+  >({
+    maxSize: 128,
     ttlMs: 15 * 60_000,
   });
   const messageDeliveryKey = (
@@ -1195,6 +1227,69 @@ function createRequestHandler(
         response.end();
         return;
       }
+      if (method === "GET" && url.pathname === "/preview/open") {
+        const nonce = crypto.randomBytes(18).toString("base64");
+        sendText(
+          response,
+          200,
+          "text/html; charset=utf-8",
+          createLocalPreviewOpenHtml(nonce),
+          {
+            "content-security-policy": localPreviewOpenContentSecurityPolicy(nonce),
+            "referrer-policy": "no-referrer",
+          },
+        );
+        return;
+      }
+      const localPreviewViewRoute = url.pathname.match(/^\/preview\/view\/([^/]+)$/);
+      if (method === "GET" && localPreviewViewRoute?.[1]) {
+        const deploymentId = decodeURIComponent(localPreviewViewRoute[1]);
+        const entryPath = localPreviewStore.entryPath(deploymentId);
+        const label = localPreviewStore.sourceLabel(deploymentId);
+        if (!entryPath || !label) {
+          sendText(response, 404, "text/plain; charset=utf-8", "这次手机预览已经失效，请返回任务后重新打开链接。");
+          return;
+        }
+        const nonce = crypto.randomBytes(18).toString("base64");
+        sendText(
+          response,
+          200,
+          "text/html; charset=utf-8",
+          createLocalPreviewViewerHtml({
+            nonce,
+            deploymentId,
+            entryPath,
+            sourceLabel: label,
+          }),
+          {
+            "content-security-policy": localPreviewViewerContentSecurityPolicy(nonce),
+            "referrer-policy": "no-referrer",
+          },
+        );
+        return;
+      }
+      const localPreviewContentRoute = url.pathname.match(
+        /^\/preview\/content\/([^/]+)\/(.+)$/,
+      );
+      if (method === "GET" && localPreviewContentRoute?.[1] && localPreviewContentRoute[2]) {
+        const deploymentId = decodeURIComponent(localPreviewContentRoute[1]);
+        const content = localPreviewStore.read(deploymentId, localPreviewContentRoute[2]);
+        if (!content) {
+          sendText(response, 404, "text/plain; charset=utf-8", "预览内容不存在或已经失效。");
+          return;
+        }
+        response.writeHead(200, {
+          "content-type": content.contentType,
+          "content-length": String(content.body.length),
+          "cache-control": content.cacheControl,
+          "content-security-policy": content.contentSecurityPolicy,
+          "content-disposition": "inline",
+          "x-content-type-options": "nosniff",
+          "referrer-policy": "no-referrer",
+        });
+        response.end(content.body);
+        return;
+      }
       if (method === "GET" && url.pathname === "/health") {
         sendJson(response, 200, { ok: true });
         return;
@@ -1364,6 +1459,34 @@ function createRequestHandler(
         throw new HttpError(401, "移动版链接已失效，请从微信重新打开。");
       }
 
+      if (method === "POST" && url.pathname === "/api/previews/jobs") {
+        const body = await readJsonBody(request, 8_192);
+        const target = typeof body.target === "string" ? body.target.trim() : "";
+        if (!target || target.length > 4_096) {
+          throw new HttpError(400, "本地页面或文件地址无效。");
+        }
+        sendJson(response, 202, localPreviewJobs.create(target));
+        return;
+      }
+
+      const localPreviewJobRoute = url.pathname.match(
+        /^\/api\/previews\/jobs\/([^/]+)$/,
+      );
+      if (method === "GET" && localPreviewJobRoute?.[1]) {
+        const job = localPreviewJobs.read(
+          decodeURIComponent(localPreviewJobRoute[1]),
+          {
+            includePackage: isTrustedReverseProxyRequest(request) &&
+              request.headers["x-werelay-relay"] === "1",
+          },
+        );
+        if (!job) {
+          throw new HttpError(404, "这次预览部署已经失效，请重新打开链接。");
+        }
+        sendJson(response, 200, job);
+        return;
+      }
+
       if (method === "GET" && url.pathname === "/api/network-route") {
         const publicRequest = isTrustedReverseProxyRequest(request);
         sendJson(response, 200, {
@@ -1526,10 +1649,40 @@ function createRequestHandler(
         }
         try {
           const sourceThreadId = url.searchParams.get("sourceTask")?.trim() || undefined;
+          const contentLength = Number(request.headers["content-length"] ?? 0);
+          const body = contentLength > 0 || request.headers["transfer-encoding"]
+            ? await readJsonBody(request, 4_096)
+            : {};
+          const requestId = typeof body.requestId === "string"
+            ? body.requestId.trim()
+            : "";
+          if (Array.from(requestId).length > 200) {
+            throw new HttpError(413, "新建任务请求标识过长。");
+          }
+          const creationKey = requestId
+            ? `${requestedAdapter ?? "codex"}\0${requestId}`
+            : "";
+          let creation = creationKey
+            ? taskCreationRequests.get(creationKey)
+            : undefined;
+          if (!creation) {
+            creation = options.createTask(requestedAdapter, { sourceThreadId });
+            if (creationKey) taskCreationRequests.set(creationKey, creation);
+          }
+          let task: CodexMobileTask;
+          try {
+            task = await creation;
+          } catch (error) {
+            if (creationKey && taskCreationRequests.get(creationKey) === creation) {
+              taskCreationRequests.delete(creationKey);
+            }
+            throw error;
+          }
           sendJson(response, 201, {
-            task: await options.createTask(requestedAdapter, { sourceThreadId }),
+            task,
           });
         } catch (error) {
+          if (error instanceof HttpError) throw error;
           throw new HttpError(409, error instanceof Error ? error.message : "新建任务失败。");
         }
         return;
@@ -1584,20 +1737,72 @@ function createRequestHandler(
         }
         const body = await readJsonBody(request, 4_096);
         const model = typeof body.model === "string" ? body.model.trim() : "";
-        if (!model) throw new HttpError(400, "请选择一个模型。");
-        if (Array.from(model).length > 200) {
+        const reasoningEffort = typeof body.reasoningEffort === "string"
+          ? body.reasoningEffort.trim()
+          : "";
+        if (!model && !reasoningEffort) {
+          throw new HttpError(400, "请选择模型或推理强度。");
+        }
+        if (model && Array.from(model).length > 200) {
           throw new HttpError(413, "模型名称过长。");
+        }
+        if (reasoningEffort && Array.from(reasoningEffort).length > 80) {
+          throw new HttpError(413, "推理强度名称过长。");
         }
         try {
           sendJson(
             response,
             200,
-            await options.setTaskModel(task.threadId, model, requestedAdapter),
+            await options.setTaskModel(task.threadId, {
+              ...(model ? { model } : {}),
+              ...(reasoningEffort ? { reasoningEffort } : {}),
+            }, requestedAdapter),
           );
         } catch (error) {
           throw new HttpError(
             409,
             error instanceof Error ? error.message : "模型切换失败。",
+          );
+        }
+        return;
+      }
+
+      const permissionRoute = url.pathname.match(/^\/api\/tasks\/([^/]+)\/permission$/);
+      if (permissionRoute?.[1] && (method === "GET" || method === "PUT")) {
+        const tasks = await options.listTasks(requestedAdapter);
+        const task = resolveTaskBySelector(tasks, decodeURIComponent(permissionRoute[1]));
+        if (method === "GET") {
+          if (!options.readTaskPermission) {
+            throw new HttpError(409, "当前连接暂不支持读取权限范围。");
+          }
+          sendJson(
+            response,
+            200,
+            await options.readTaskPermission(task.threadId, requestedAdapter),
+          );
+          return;
+        }
+        if (!options.setTaskPermission) {
+          throw new HttpError(409, "当前连接暂不支持切换权限范围。");
+        }
+        const body = await readJsonBody(request, 4_096);
+        const permission = typeof body.permission === "string" ? body.permission.trim() : "";
+        if (!permission) {
+          throw new HttpError(400, "请选择权限范围。");
+        }
+        if (Array.from(permission).length > 120) {
+          throw new HttpError(413, "权限范围名称过长。");
+        }
+        try {
+          sendJson(
+            response,
+            200,
+            await options.setTaskPermission(task.threadId, permission, requestedAdapter),
+          );
+        } catch (error) {
+          throw new HttpError(
+            409,
+            error instanceof Error ? error.message : "权限范围切换失败。",
           );
         }
         return;

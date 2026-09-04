@@ -49,6 +49,7 @@ import {
   formatDuration,
   formatCodexDesktopTaskLatestMessage,
   formatCodexDesktopTaskSelection,
+  formatClawBotWechatHelp,
   formatCodexWechatHelp,
   formatMirroredUserInputMessage,
   formatSessionSwitchMessage,
@@ -1708,7 +1709,7 @@ async function handleInboundMessage(params: {
         message.senderId,
         options.adapter === "codex"
           ? formatCodexWechatHelp()
-          : "发送 /status 查看状态，发送 /stop 停止当前任务。",
+          : formatClawBotWechatHelp(options.adapter),
       );
       return null;
     case "status":

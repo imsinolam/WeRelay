@@ -16,9 +16,12 @@ const DEFAULT_CONNECT_POLL_INTERVAL_MS = 250;
 const DEFAULT_EXISTING_PROCESS_GRACE_MS = 1_500;
 const DEFAULT_QUIT_TIMEOUT_MS = 10_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
+const DEFAULT_LONG_RUNNING_REQUEST_TIMEOUT_MS = 24 * 60 * 60 * 1_000;
+const DEFAULT_READY_TIMEOUT_MS = 500;
 const WORKBUDDY_APP_EXECUTABLE = "/Applications/WorkBuddy.app/Contents/MacOS/Electron";
 const WORKBUDDY_APP_ASAR = "/Applications/WorkBuddy.app/Contents/Resources/app.asar";
 export const WORKBUDDY_BUNDLE_ID = "com.tencent.workbuddy.mac";
+export const WORKBUDDY_DESKTOP_RPC_PROTOCOL_VERSION = 3;
 
 export type WorkBuddyDesktopRpcCallbacks = {
   onEvent(channel: string, data: unknown): void;
@@ -32,6 +35,7 @@ export type WorkBuddyDesktopRpcClientOptions = WorkBuddyDesktopRpcCallbacks & {
 export interface WorkBuddyDesktopRpcClientLike {
   connect(): Promise<void>;
   invoke(channel: string, ...args: unknown[]): Promise<unknown>;
+  invokeWithTimeout?(channel: string, timeoutMs: number, ...args: unknown[]): Promise<unknown>;
   close(): Promise<void>;
 }
 
@@ -64,6 +68,7 @@ type WorkBuddyDesktopRpcFrame = {
   type?: unknown;
   id?: unknown;
   channel?: unknown;
+  protocolVersion?: unknown;
   result?: unknown;
   error?: unknown;
   message?: unknown;
@@ -166,7 +171,11 @@ if (socketPath && process.type === "browser" && !globalThis.__deskRelayWorkBuddy
       });
       client.on("close", () => clients.delete(client));
       client.on("error", () => clients.delete(client));
-      send(client, { type: "bridge-ready", pid: process.pid });
+      send(client, {
+        type: "bridge-ready",
+        pid: process.pid,
+        protocolVersion: ${WORKBUDDY_DESKTOP_RPC_PROTOCOL_VERSION},
+      });
     });
     server.listen(socketPath, () => {
       try {
@@ -438,6 +447,7 @@ export class WorkBuddyDesktopRpcClient implements WorkBuddyDesktopRpcClientLike 
   private readonly connectPollIntervalMs: number;
   private readonly existingProcessGraceMs: number;
   private readonly requestTimeoutMs: number;
+  private readonly longRunningRequestTimeoutMs: number;
   private readonly lifecycle: WorkBuddyDesktopLifecycle;
   private readonly allowDesktopApplicationLaunch: boolean;
   private socket: net.Socket | null = null;
@@ -454,6 +464,7 @@ export class WorkBuddyDesktopRpcClient implements WorkBuddyDesktopRpcClientLike 
     connectPollIntervalMs?: number;
     existingProcessGraceMs?: number;
     requestTimeoutMs?: number;
+    longRunningRequestTimeoutMs?: number;
     lifecycle?: WorkBuddyDesktopLifecycle;
   }) {
     this.socketPath = options.socketPath ?? resolveWorkBuddyDesktopSocketPath();
@@ -465,23 +476,27 @@ export class WorkBuddyDesktopRpcClient implements WorkBuddyDesktopRpcClientLike 
     this.connectPollIntervalMs = options.connectPollIntervalMs ?? DEFAULT_CONNECT_POLL_INTERVAL_MS;
     this.existingProcessGraceMs = options.existingProcessGraceMs ?? DEFAULT_EXISTING_PROCESS_GRACE_MS;
     this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    this.longRunningRequestTimeoutMs =
+      options.longRunningRequestTimeoutMs ?? DEFAULT_LONG_RUNNING_REQUEST_TIMEOUT_MS;
     this.lifecycle = options.lifecycle ?? defaultWorkBuddyDesktopLifecycle();
   }
 
   async connect(): Promise<void> {
     if (this.socket && !this.socket.destroyed) return;
     this.closed = false;
+    const deadline = Date.now() + this.connectTimeoutMs;
     const direct = await this.tryConnect();
     if (direct) {
+      await this.waitForDaemonReady(deadline);
       await this.lifecycle.cleanup?.();
       return;
     }
 
-    const deadline = Date.now() + this.connectTimeoutMs;
     const wasRunning = await this.lifecycle.isRunning();
     if (wasRunning && this.existingProcessGraceMs > 0) {
       const graceDeadline = Math.min(deadline, Date.now() + this.existingProcessGraceMs);
       if (await this.waitForConnection(graceDeadline)) {
+        await this.waitForDaemonReady(deadline);
         await this.lifecycle.cleanup?.();
         return;
       }
@@ -509,6 +524,7 @@ export class WorkBuddyDesktopRpcClient implements WorkBuddyDesktopRpcClientLike 
       );
     }
     if (await this.waitForConnection(deadline)) {
+      await this.waitForDaemonReady(deadline);
       await this.lifecycle.cleanup?.();
       return;
     }
@@ -516,6 +532,25 @@ export class WorkBuddyDesktopRpcClient implements WorkBuddyDesktopRpcClientLike 
   }
 
   async invoke(channel: string, ...args: unknown[]): Promise<unknown> {
+    const timeoutMs = channel === "session:sendMessage"
+      ? this.longRunningRequestTimeoutMs
+      : this.requestTimeoutMs;
+    return await this.invokeRequest(channel, args, timeoutMs);
+  }
+
+  async invokeWithTimeout(
+    channel: string,
+    timeoutMs: number,
+    ...args: unknown[]
+  ): Promise<unknown> {
+    return await this.invokeRequest(channel, args, timeoutMs);
+  }
+
+  private async invokeRequest(
+    channel: string,
+    args: unknown[],
+    timeoutMs: number,
+  ): Promise<unknown> {
     const socket = this.socket;
     if (!socket || socket.destroyed) {
       throw new Error("WorkBuddy Desktop 连接已断开，请重新切换到 WorkBuddy。");
@@ -525,7 +560,7 @@ export class WorkBuddyDesktopRpcClient implements WorkBuddyDesktopRpcClientLike 
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`WorkBuddy Desktop 请求超时：${channel}`));
-      }, this.requestTimeoutMs);
+      }, timeoutMs);
       this.pending.set(id, { channel, resolve, reject, timer });
       socket.write(`${JSON.stringify({ type: "rpc-request", id, channel, args })}\n`, (error) => {
         if (!error) return;
@@ -536,6 +571,34 @@ export class WorkBuddyDesktopRpcClient implements WorkBuddyDesktopRpcClientLike 
         pending.reject(error);
       });
     });
+  }
+
+  private async waitForDaemonReady(deadline: number): Promise<void> {
+    while (Date.now() < deadline) {
+      const remainingMs = deadline - Date.now();
+      try {
+        await this.invokeRequest(
+          "daemon:ping",
+          [],
+          Math.max(1, Math.min(500, remainingMs)),
+        );
+        return;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (
+          !/No handler for "daemon:ping"/.test(message) &&
+          !/WorkBuddy Desktop 请求超时：daemon:ping/.test(message)
+        ) {
+          throw error;
+        }
+      }
+      if (Date.now() >= deadline) break;
+      await new Promise((resolve) => setTimeout(
+        resolve,
+        Math.min(this.connectPollIntervalMs, Math.max(1, deadline - Date.now())),
+      ));
+    }
+    throw new Error("WorkBuddy app-server 启动超时，请稍后重试。");
   }
 
   async close(): Promise<void> {
@@ -569,11 +632,66 @@ export class WorkBuddyDesktopRpcClient implements WorkBuddyDesktopRpcClientLike 
           resolve(candidate);
         });
       });
-      this.attachSocket(socket);
+      const buffered = await this.waitForCompatibleBridge(socket);
+      if (buffered === null) {
+        socket.destroy();
+        return false;
+      }
+      this.attachSocket(socket, buffered);
       return true;
     } catch {
       return false;
     }
+  }
+
+  private async waitForCompatibleBridge(socket: net.Socket): Promise<string | null> {
+    return await new Promise<string | null>((resolve) => {
+      let buffer = "";
+      let preserved = "";
+      let settled = false;
+      const finish = (value: string | null) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        socket.off("data", onData);
+        socket.off("error", onFailure);
+        socket.off("close", onFailure);
+        resolve(value);
+      };
+      const onFailure = () => finish(null);
+      const onData = (chunk: string) => {
+        buffer += chunk;
+        while (true) {
+          const newline = buffer.indexOf("\n");
+          if (newline < 0) return;
+          const line = buffer.slice(0, newline).trim();
+          buffer = buffer.slice(newline + 1);
+          if (!line) continue;
+          let frame: WorkBuddyDesktopRpcFrame;
+          try {
+            frame = JSON.parse(line) as WorkBuddyDesktopRpcFrame;
+          } catch {
+            preserved += `${line}\n`;
+            continue;
+          }
+          if (frame.type !== "bridge-ready") {
+            preserved += `${line}\n`;
+            continue;
+          }
+          finish(
+            frame.protocolVersion === WORKBUDDY_DESKTOP_RPC_PROTOCOL_VERSION
+              ? preserved + buffer
+              : null,
+          );
+          return;
+        }
+      };
+      const timer = setTimeout(() => finish(null), DEFAULT_READY_TIMEOUT_MS);
+      socket.setEncoding("utf8");
+      socket.on("data", onData);
+      socket.once("error", onFailure);
+      socket.once("close", onFailure);
+    });
   }
 
   private async waitForConnection(deadline: number): Promise<boolean> {
@@ -584,7 +702,7 @@ export class WorkBuddyDesktopRpcClient implements WorkBuddyDesktopRpcClientLike 
     return false;
   }
 
-  private attachSocket(socket: net.Socket): void {
+  private attachSocket(socket: net.Socket, initialBuffer = ""): void {
     this.socket?.destroy();
     this.socket = socket;
     this.buffer = "";
@@ -592,6 +710,7 @@ export class WorkBuddyDesktopRpcClient implements WorkBuddyDesktopRpcClientLike 
     socket.on("data", (chunk: string) => this.handleData(chunk));
     socket.on("error", (error) => this.handleDisconnect(error));
     socket.on("close", () => this.handleDisconnect());
+    if (initialBuffer) this.handleData(initialBuffer);
   }
 
   private handleData(chunk: string): void {

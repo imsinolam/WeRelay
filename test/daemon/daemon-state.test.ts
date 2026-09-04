@@ -10,6 +10,32 @@ import {
 } from "../../src/daemon/daemon-state.ts";
 
 describe("daemon workspace state", () => {
+  test("persists the latest ClawBot task target across daemon restarts", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "werelay-daemon-state-"));
+    const stateFile = path.join(directory, "daemon-state.json");
+    const cwd = path.join(directory, "workspace");
+
+    try {
+      const store = new DaemonWorkspaceStateStore(cwd, { stateFile });
+      store.setLatestWechatTaskTarget({
+        adapter: "workbuddy",
+        sessionId: "session-b",
+        title: "整理服务器列表",
+        lastUpdatedAt: "2026-08-30T01:02:03.000Z",
+      });
+
+      const restored = new DaemonWorkspaceStateStore(cwd, { stateFile });
+      expect(restored.getLatestWechatTaskTarget()).toEqual({
+        adapter: "workbuddy",
+        sessionId: "session-b",
+        title: "整理服务器列表",
+        lastUpdatedAt: "2026-08-30T01:02:03.000Z",
+      });
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   test("persists task-scoped auto-approval across daemon restarts", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "werelay-daemon-state-"));
     const stateFile = path.join(directory, "daemon-state.json");

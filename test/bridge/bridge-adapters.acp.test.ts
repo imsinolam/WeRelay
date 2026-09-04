@@ -192,14 +192,34 @@ describe("ACP bridge helpers", () => {
     expect(selectAcpPermissionOption(options, "deny")?.optionId).toBe("reject-once");
   });
 
-  test("keeps ACP sessions across projects and sorts newest first", () => {
-    expect(normalizeAcpSessionCandidates({
+  test("keeps ACP sessions across projects without treating cwd folders as project names", () => {
+    const sessions = normalizeAcpSessionCandidates({
       sessions: [
         { sessionId: "older", cwd: "/repo", title: "旧任务", updatedAt: "2026-08-02T10:00:00Z" },
         { sessionId: "other", cwd: "/other", title: "其他项目", updatedAt: "2026-08-03T12:00:00Z" },
         { sessionId: "newer", cwd: "/repo/", title: "新任务", updatedAt: "2026-08-03T11:00:00Z" },
+        {
+          sessionId: "renamed",
+          cwd: "/renamed-project",
+          title: "自动标题",
+          customTitle: "用户重命名",
+          updatedAt: "2026-08-04T11:00:00Z",
+        },
       ],
-    }, "/repo", 10).map((session) => session.sessionId)).toEqual(["other", "newer", "older"]);
+    }, "/repo", 10);
+
+    expect(sessions.map((session) => session.sessionId)).toEqual([
+      "renamed",
+      "other",
+      "newer",
+      "older",
+    ]);
+    expect(sessions.find((session) => session.sessionId === "other")?.projectName)
+      .toBeUndefined();
+    expect(sessions[0]).toMatchObject({
+      title: "用户重命名",
+      projectName: "renamed-project",
+    });
   });
 
   test("restarts the shared-owner transport in the selected task directory before loading it", async () => {
@@ -367,7 +387,14 @@ describe("ACP bridge helpers", () => {
     const olderId = "11111111-1111-4111-8111-111111111111";
     const newerId = "22222222-2222-4222-8222-222222222222";
     const otherId = "33333333-3333-4333-8333-333333333333";
-    const writeTranscript = async (file: string, sessionId: string, transcriptCwd: string, timestamp: number, text: string) => {
+    const writeTranscript = async (
+      file: string,
+      sessionId: string,
+      transcriptCwd: string,
+      timestamp: number,
+      text: string,
+      customTitle?: string,
+    ) => {
       await fs.promises.writeFile(file, [
         JSON.stringify({
           id: `${sessionId}-user`,
@@ -378,6 +405,20 @@ describe("ACP bridge helpers", () => {
           sessionId,
           cwd: transcriptCwd,
         }),
+        JSON.stringify({
+          timestamp: timestamp + 10,
+          type: "ai-title",
+          aiTitle: `自动：${text}`,
+          sessionId,
+          cwd: transcriptCwd,
+        }),
+        ...(customTitle ? [JSON.stringify({
+          timestamp: timestamp + 20,
+          type: "custom-title",
+          customTitle,
+          sessionId,
+          cwd: transcriptCwd,
+        })] : []),
         JSON.stringify({
           id: `${sessionId}-assistant`,
           timestamp: timestamp + 100,
@@ -390,7 +431,14 @@ describe("ACP bridge helpers", () => {
         }),
       ].join("\n"));
     };
-    await writeTranscript(path.join(projectDir, `${olderId}.jsonl`), olderId, cwd, 1_700_000_000_000, "旧任务");
+    await writeTranscript(
+      path.join(projectDir, `${olderId}.jsonl`),
+      olderId,
+      cwd,
+      1_700_000_000_000,
+      "旧任务",
+      "用户命名旧任务",
+    );
     await writeTranscript(path.join(projectDir, `${newerId}.jsonl`), newerId, cwd, 1_800_000_000_000, "新任务");
     await writeTranscript(
       path.join(configDir, "projects", `${otherId}.jsonl`),
@@ -430,9 +478,14 @@ describe("ACP bridge helpers", () => {
         olderId,
       ]);
       expect(sessions.map((session) => session.title)).toEqual([
-        "其他项目",
-        "新任务",
-        "旧任务",
+        "自动：其他项目",
+        "自动：新任务",
+        "用户命名旧任务",
+      ]);
+      expect(sessions.map((session) => session.projectName)).toEqual([
+        undefined,
+        undefined,
+        "demo-project",
       ]);
       expect(sessions[0]?.cwd).toBe(path.join(configDir, "other-project"));
       expect(await readCodeBuddySessionMessages(cwd, newerId)).toEqual([

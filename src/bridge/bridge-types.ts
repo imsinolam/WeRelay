@@ -61,6 +61,7 @@ export type UserInputRequestQuestion = {
   question: string;
   isOther: boolean;
   isSecret: boolean;
+  multiSelect?: boolean;
   options?: UserInputRequestOption[] | null;
 };
 
@@ -117,11 +118,40 @@ export type BridgeSessionModelOption = {
   id: string;
   label?: string;
   description?: string;
+  /** Provider/source group this model belongs to, rendered as a section heading. */
+  group?: string;
+  defaultReasoningEffort?: string;
+  reasoningEffortOptions?: BridgeSessionReasoningEffortOption[];
+};
+
+export type BridgeSessionReasoningEffortOption = {
+  id: string;
+  label?: string;
+  description?: string;
 };
 
 export type BridgeSessionModelState = {
   currentModel?: string;
   options: BridgeSessionModelOption[];
+  canChange: boolean;
+  unavailableReason?: string;
+  currentReasoningEffort?: string;
+  reasoningEffortOptions?: BridgeSessionReasoningEffortOption[];
+  canChangeReasoningEffort?: boolean;
+  reasoningEffortUnavailableReason?: string;
+};
+
+export type BridgeSessionPermissionOption = {
+  id: string;
+  label?: string;
+  description?: string;
+  /** High-risk choices such as unrestricted filesystem access need an explicit UI confirmation. */
+  requiresConfirmation?: boolean;
+};
+
+export type BridgeSessionPermissionState = {
+  currentPermission?: string;
+  options: BridgeSessionPermissionOption[];
   canChange: boolean;
   unavailableReason?: string;
 };
@@ -381,6 +411,8 @@ export interface BridgeAdapter {
   unfollowSession?(sessionId: string): Promise<void>;
   getLatestSessionMessage?(sessionId: string): Promise<BridgeSessionMessage | null>;
   getSessionMessages?(sessionId: string): Promise<BridgeSessionMessage[]>;
+  /** Return a cheap opaque revision for persisted or already-cached live conversation changes. */
+  getSessionContentRevision?(sessionId: string): string | null;
   /** Read local/native message metadata used to enrich accelerated history without replacing it. */
   getSessionMessageMedia?(
     sessionId: string,
@@ -404,6 +436,15 @@ export interface BridgeAdapter {
     sessionId: string,
     model: string,
   ): Promise<BridgeSessionModelState>;
+  setSessionReasoningEffort?(
+    sessionId: string,
+    reasoningEffort: string,
+  ): Promise<BridgeSessionModelState>;
+  getSessionPermissionState?(sessionId: string): Promise<BridgeSessionPermissionState>;
+  setSessionPermission?(
+    sessionId: string,
+    permission: string,
+  ): Promise<BridgeSessionPermissionState>;
   getQueuedTaskInputs?(sessionId: string): BridgeQueuedTaskInput[];
   updateQueuedTaskInput?(
     sessionId: string,

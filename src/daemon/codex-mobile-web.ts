@@ -175,12 +175,28 @@ export const CODEX_MOBILE_HTML = `<!doctype html>
           <button class="composer-image-button" id="composer-image-button" type="button" aria-label="添加图片">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
           </button>
-          <div class="composer-model-control" id="composer-model-control" hidden>
-            <button class="composer-model-button" id="composer-model-button" type="button" aria-haspopup="menu" aria-expanded="false">
-              <span id="composer-model-label">模型</span>
-              <svg class="composer-model-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4.5 6 3.5 3.5L11.5 6"/></svg>
-            </button>
-            <div class="composer-model-menu" id="composer-model-menu" role="menu" hidden></div>
+          <div class="composer-settings-controls" id="composer-settings-controls" hidden>
+            <div class="composer-model-control" id="composer-model-control" hidden>
+              <button class="composer-model-button" id="composer-model-button" type="button" aria-haspopup="menu" aria-expanded="false">
+                <span id="composer-model-label">模型</span>
+                <svg class="composer-model-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4.5 6 3.5 3.5L11.5 6"/></svg>
+              </button>
+              <div class="composer-model-menu" id="composer-model-menu" role="menu" hidden></div>
+            </div>
+            <div class="composer-model-control" id="composer-reasoning-control" hidden>
+              <button class="composer-model-button" id="composer-reasoning-button" type="button" aria-haspopup="menu" aria-expanded="false">
+                <span id="composer-reasoning-label">推理</span>
+                <svg class="composer-model-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4.5 6 3.5 3.5L11.5 6"/></svg>
+              </button>
+              <div class="composer-model-menu composer-reasoning-menu" id="composer-reasoning-menu" role="menu" hidden></div>
+            </div>
+            <div class="composer-model-control" id="composer-permission-control" hidden>
+              <button class="composer-model-button" id="composer-permission-button" type="button" aria-haspopup="menu" aria-expanded="false">
+                <span id="composer-permission-label">权限范围</span>
+                <svg class="composer-model-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4.5 6 3.5 3.5L11.5 6"/></svg>
+              </button>
+              <div class="composer-model-menu composer-permission-menu" id="composer-permission-menu" role="menu" hidden></div>
+            </div>
           </div>
           <button class="send-button" id="send-button" type="submit" aria-label="发送">
             <svg class="send-arrow-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 18V6M7.5 10.5L12 6l4.5 4.5"/></svg>
@@ -644,8 +660,8 @@ svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.75; stro
 }
 .task-group-more:hover, .task-list-more:hover { color: var(--muted-strong); background: var(--surface-hover); }
 .task-list-more { margin: 3px 0 10px; }
-.task-item,
-.task-item * {
+.task-list,
+.task-list * {
   -webkit-touch-callout: none;
   -webkit-user-select: none;
   user-select: none;
@@ -681,7 +697,7 @@ svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.75; stro
   50% { opacity: 1; transform: scale(1.12); box-shadow: 0 0 0 4px rgba(16, 163, 127, .14); }
 }
 @media (prefers-reduced-motion: reduce) {
-  .task-dot.running { animation: none; opacity: 1; transform: none; box-shadow: none; }
+  .task-dot.running, .adapter-menu-running-dot { animation: none; opacity: 1; transform: none; box-shadow: none; }
 }
 .task-title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 430; line-height: 1.5; }
 .task-project { display: block; margin-top: 1px; overflow: hidden; color: var(--muted); font-size: 11px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
@@ -717,6 +733,8 @@ svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.75; stro
 .adapter-menu { display: block; }
 .adapter-menu-item { width: 100%; min-height: 36px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 10px; border: 0; border-radius: 8px; background: transparent; color: var(--text); font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
 .adapter-menu-item > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.adapter-menu-label { display: inline-flex; align-items: center; gap: 7px; }
+.adapter-menu-running-dot { width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: var(--green); animation: task-dot-breathe 1.6s ease-in-out infinite; }
 .adapter-menu-item:hover { background: var(--surface-hover); }
 .adapter-menu-item.is-active { font-weight: 620; }
 .adapter-menu-state { flex: 0 0 auto; white-space: nowrap; color: var(--muted); font-size: 11px; font-weight: 430; }
@@ -1056,14 +1074,18 @@ body.image-viewer-open { overflow: hidden; }
 .composer-model-button span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .composer-model-chevron { width: 14px; height: 14px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.6; }
 .composer-model-button.is-readonly .composer-model-chevron { display: none; }
-.composer-model-menu { position: absolute; left: 0; bottom: calc(100% + 8px); width: min(320px, calc(100vw - 96px)); max-height: min(360px, 52vh); overflow: auto; padding: 5px; border: 1px solid var(--border); border-radius: 13px; background: var(--page); box-shadow: var(--shadow); z-index: 30; }
+.composer-model-menu { position: absolute; left: 0; bottom: calc(100% + 8px); width: fit-content; max-width: min(420px, calc(100vw - 48px)); min-width: 148px; max-height: min(360px, 52vh); overflow: auto; padding: 5px; border: 1px solid var(--border); border-radius: 13px; background: var(--page); box-shadow: var(--shadow); z-index: 30; }
+.composer-reasoning-menu { left: auto; right: 0; width: fit-content; max-width: min(280px, calc(100vw - 48px)); min-width: 96px; }
+.composer-permission-menu { left: auto; right: 0; width: fit-content; max-width: min(360px, calc(100vw - 48px)); min-width: 96px; }
 .composer-model-menu[hidden] { display: none; }
+.composer-model-group { padding: 7px 9px 3px; color: var(--muted); font-size: 11px; font-weight: 560; letter-spacing: .02em; white-space: nowrap; user-select: none; -webkit-user-select: none; pointer-events: none; }
+.composer-model-group:not(:first-child) { margin-top: 3px; border-top: 1px solid var(--border); }
 .composer-model-option { width: 100%; min-height: 44px; display: grid; grid-template-columns: minmax(0, 1fr) 18px; gap: 10px; align-items: center; padding: 7px 9px; border: 0; border-radius: 9px; background: transparent; color: var(--text); font: inherit; text-align: left; cursor: pointer; }
 .composer-model-option:hover { background: var(--surface); }
 .composer-model-option:disabled { opacity: .48; cursor: wait; }
 .composer-model-option-copy { min-width: 0; }
-.composer-model-option-label { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 560; }
-.composer-model-option-description { display: block; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 11px; font-weight: 430; }
+.composer-model-option-label { display: block; overflow-wrap: anywhere; white-space: normal; font-size: 13px; font-weight: 560; }
+.composer-model-option-description { display: block; margin-top: 2px; overflow-wrap: anywhere; white-space: normal; color: var(--muted); font-size: 11px; font-weight: 430; }
 .composer-model-option-check { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
 .queued-followup { min-width: 0; background: var(--page); }
 .queued-followup + .queued-followup { border-top: 1px solid var(--border); }
@@ -1097,7 +1119,9 @@ body.image-viewer-open { overflow: hidden; }
 .composer:focus-within { box-shadow: 0 0 0 1px rgba(0,0,0,.08), 0 2px 10px rgba(0,0,0,.055), 0 8px 80px 10px rgba(0,0,0,.03); }
 .composer-image-button, .send-button { width: 36px; height: 36px; flex: 0 0 auto; display: grid; place-items: center; margin: 0; padding: 0; border: 0; border-radius: 50%; cursor: pointer; }
 .composer-image-button { grid-column: 1; background: transparent; color: var(--text); }
-.composer-model-control { grid-column: 2; }
+.composer-settings-controls { grid-column: 2; min-width: 0; display: flex; align-items: center; gap: 6px; }
+.composer-settings-controls[hidden], .composer-model-control[hidden] { display: none; }
+.composer-model-control { position: relative; min-width: 0; }
 .composer-image-button:hover { background: var(--surface); }
 .composer-image-button svg { width: 19px; height: 19px; stroke-width: 1.7; }
 .composer textarea { grid-column: 1 / -1; min-width: 0; min-height: 36px; max-height: 164px; resize: none; border: 0; outline: 0; padding: 6px 8px; background: transparent; color: var(--text); font-size: 16px; line-height: 24px; }
@@ -1126,7 +1150,7 @@ body.image-viewer-open { overflow: hidden; }
 }
 .task-context-menu button {
   width: 100%;
-  min-height: 38px;
+  min-height: 44px;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -1448,9 +1472,18 @@ export const CODEX_MOBILE_JS = String.raw`
   var composerImageButton = document.getElementById("composer-image-button");
   var composerMedia = document.getElementById("composer-media");
   var composerModelControl = document.getElementById("composer-model-control");
+  var composerSettingsControls = document.getElementById("composer-settings-controls");
   var composerModelButton = document.getElementById("composer-model-button");
   var composerModelLabel = document.getElementById("composer-model-label");
   var composerModelMenu = document.getElementById("composer-model-menu");
+  var composerReasoningControl = document.getElementById("composer-reasoning-control");
+  var composerReasoningButton = document.getElementById("composer-reasoning-button");
+  var composerReasoningLabel = document.getElementById("composer-reasoning-label");
+  var composerReasoningMenu = document.getElementById("composer-reasoning-menu");
+  var composerPermissionControl = document.getElementById("composer-permission-control");
+  var composerPermissionButton = document.getElementById("composer-permission-button");
+  var composerPermissionLabel = document.getElementById("composer-permission-label");
+  var composerPermissionMenu = document.getElementById("composer-permission-menu");
   var sendButton = document.getElementById("send-button");
   var messageNavigation = document.getElementById("message-navigation");
   var previousUserMessage = document.getElementById("previous-user-message");
@@ -1507,6 +1540,12 @@ export const CODEX_MOBILE_JS = String.raw`
     modelRequestId: 0,
     modelChanging: false,
     modelMenuOpen: false,
+    reasoningChanging: false,
+    reasoningMenuOpen: false,
+    taskPermissions: Object.create(null),
+    permissionRequestId: 0,
+    permissionChanging: false,
+    permissionMenuOpen: false,
     serverMessages: [],
     historyMessages: [],
     latestMessages: [],
@@ -1521,6 +1560,7 @@ export const CODEX_MOBILE_JS = String.raw`
     pendingMessages: [],
     transcriptSignature: "",
     contentRevision: "",
+    lastLiveMessageRefreshAtMs: 0,
     cacheSyncState: "idle",
     cacheSyncResetTimer: null,
     queueSignature: "",
@@ -1832,11 +1872,68 @@ export const CODEX_MOBILE_JS = String.raw`
     var sanitized = {};
     [
       "adapter", "adapterLabel", "threadId", "title", "status", "lastUpdatedAt",
-      "startedAtMs", "completedAt", "completedAtMs", "durationMs", "activeTurnId"
+      "startedAtMs", "completedAt", "completedAtMs", "durationMs", "activeTurnId",
+      "projectId", "projectName"
     ].forEach(function (key) {
       if (item[key] !== undefined) sanitized[key] = item[key];
     });
     return sanitized;
+  }
+
+  function hasTaskBoardCachedContent(tasks, recentCompleted, lastLoadedAtMs) {
+    return Boolean(
+      Math.max(0, Number(lastLoadedAtMs) || 0) ||
+      Array.isArray(tasks) && tasks.length ||
+      Array.isArray(recentCompleted) && recentCompleted.length
+    );
+  }
+
+  function buildCachedTaskBoardFallback(taskSnapshots, taskSnapshotOrder, adapters) {
+    function sortCachedTasks(items) {
+      return items.slice().sort(function (left, right) {
+        var leftMs = Date.parse(left && left.lastUpdatedAt || "");
+        var rightMs = Date.parse(right && right.lastUpdatedAt || "");
+        return (Number.isFinite(rightMs) ? rightMs : 0) -
+          (Number.isFinite(leftMs) ? leftMs : 0);
+      });
+    }
+    var adapterLabels = Object.create(null);
+    (Array.isArray(adapters) ? adapters : []).forEach(function (adapter) {
+      if (adapter && adapter.id) adapterLabels[adapter.id] = adapter.label || adapter.id;
+    });
+    var source = taskSnapshots && typeof taskSnapshots === "object"
+      ? taskSnapshots
+      : Object.create(null);
+    var adapterIds = [];
+    (Array.isArray(taskSnapshotOrder) ? taskSnapshotOrder : []).concat(Object.keys(source))
+      .forEach(function (adapterId) {
+        if (typeof adapterId === "string" && adapterId && !adapterIds.includes(adapterId)) {
+          adapterIds.push(adapterId);
+        }
+      });
+    var seen = new Set();
+    var active = [];
+    var completed = [];
+    adapterIds.forEach(function (adapterId) {
+      var snapshot = source[adapterId];
+      (snapshot && Array.isArray(snapshot.tasks) ? snapshot.tasks : []).forEach(function (task) {
+        if (!task || typeof task.threadId !== "string" || !task.threadId) return;
+        var key = adapterId + "\u0000" + task.threadId;
+        if (seen.has(key)) return;
+        seen.add(key);
+        var item = sanitizePersistentTaskBoardItem(Object.assign({}, task, {
+          adapter: adapterId,
+          adapterLabel: adapterLabels[adapterId] || adapterId,
+        }));
+        if (!item) return;
+        if (item.completedAt || item.completedAtMs) completed.push(item);
+        else active.push(item);
+      });
+    });
+    return {
+      tasks: sortCachedTasks(active).slice(0, 240),
+      recentCompleted: sortCachedTasks(completed).slice(0, 80),
+    };
   }
 
   function sanitizePersistentAdapter(adapter) {
@@ -2154,10 +2251,29 @@ export const CODEX_MOBILE_JS = String.raw`
     state.boardLastLoadedAtMs = taskBoard
       ? Math.max(0, Number(taskBoard.lastLoadedAtMs) || 0)
       : 0;
-
     var adapterId = String(requestedAdapter || payload.currentAdapter || state.currentAdapter || "codex");
+    var restoredAdapterState = restoreCachedAdapterState(adapterId, requestedThreadId);
+    if (!restoredAdapterState && requestedThreadId) {
+      state.boardTasks = [];
+      state.boardRecentCompleted = [];
+      state.boardLastLoadedAtMs = 0;
+      return false;
+    }
+    if (!hasTaskBoardCachedContent(
+      state.boardTasks,
+      state.boardRecentCompleted,
+      state.boardLastLoadedAtMs
+    ) && restoredAdapterState) {
+      var boardFallback = buildCachedTaskBoardFallback(
+        state.taskSnapshots,
+        state.taskSnapshotOrder,
+        state.adapters
+      );
+      state.boardTasks = boardFallback.tasks;
+      state.boardRecentCompleted = boardFallback.recentCompleted;
+    }
     return Boolean(
-      restoreCachedAdapterState(adapterId, requestedThreadId) ||
+      restoredAdapterState ||
       state.boardTasks.length ||
       state.boardRecentCompleted.length
     );
@@ -2211,6 +2327,15 @@ export const CODEX_MOBILE_JS = String.raw`
     return Boolean(task && (
       task.localCreationState === "creating" || task.localCreationState === "failed"
     ));
+  }
+
+  function taskCreationErrorText(task) {
+    var text = String(task && task.localCreationError || "").trim();
+    if (!text) return "";
+    var characters = Array.from(text);
+    return characters.length > 120
+      ? characters.slice(0, 120).join("") + "…"
+      : text;
   }
 
   function findReusableLocalTask(tasks) {
@@ -2428,12 +2553,51 @@ export const CODEX_MOBILE_JS = String.raw`
       .replace(/'/g, "&#039;");
   }
 
+  function isLocalPreviewTarget(value) {
+    var target = String(value || "").trim();
+    if (
+      /^file:\/\//i.test(target) ||
+      /^\/(?!\/)/.test(target) ||
+      /^[A-Za-z]:[\\/]/.test(target)
+    ) return true;
+    try {
+      var url = new URL(target);
+      var hostname = url.hostname.toLowerCase();
+      return (url.protocol === "http:" || url.protocol === "https:") &&
+        (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]" || hostname === "::1");
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function renderMessageLink(target, label) {
+    var localPreview = isLocalPreviewTarget(target);
+    var href = localPreview
+      ? "/preview/open?target=" + encodeURIComponent(target)
+      : target;
+    return '<a href="' + escapeHtml(href) + '" target="_blank" rel="noreferrer"' +
+      (localPreview ? ' data-local-preview="true"' : "") + '>' + escapeHtml(label) + "</a>";
+  }
+
   function renderInline(value) {
-    var escaped = escapeHtml(value);
+    var source = String(value || "");
+    var links = [];
+    function preserveLink(target, label) {
+      var token = "@@DESKRELAY_LINK_" + links.length + "@@";
+      links.push(renderMessageLink(target, label));
+      return token;
+    }
+    source = source.replace(/\[([^\]]+)\]\(((?:(?:https?|file):\/\/|\/(?!\/)|[A-Za-z]:[\\/])[^)\s]+)\)/gi, function (_, label, target) {
+      return preserveLink(target, label);
+    });
+    source = source.replace(/(^|\s)((?:https?|file):\/\/[^\s<]+)/gi, function (_, prefix, target) {
+      return prefix + preserveLink(target, target);
+    });
+    var escaped = escapeHtml(source);
     escaped = escaped.replace(/\x60([^\x60]+)\x60/g, "<code>$1</code>");
     escaped = escaped.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-    escaped = escaped.replace(/(^|\s)(https?:\/\/[^\s<]+)/g, function (_, prefix, url) {
-      return prefix + '<a href="' + url + '" target="_blank" rel="noreferrer">' + url + "</a>";
+    links.forEach(function (link, index) {
+      escaped = escaped.replace("@@DESKRELAY_LINK_" + index + "@@", link);
     });
     return escaped;
   }
@@ -2822,7 +2986,7 @@ export const CODEX_MOBILE_JS = String.raw`
       codebuddy: "CodeBuddy",
       reasonix: "reasonix",
       workbuddy: "WorkBuddy",
-      deepseek: "DSH",
+      deepseek: "DeepSeek Harness",
       opencode: "OpenCode",
       shell: "Shell"
     };
@@ -2870,6 +3034,26 @@ export const CODEX_MOBILE_JS = String.raw`
     return "";
   }
 
+  function syncCurrentAdapterStatusFromTasks() {
+    var adapter = currentAdapterEntry();
+    if (!adapter) return;
+    if (state.tasks.some(function (task) { return task.status === "approval"; })) {
+      adapter.status = "awaiting_approval";
+      return;
+    }
+    if (state.tasks.some(function (task) { return task.status === "input"; })) {
+      adapter.status = "awaiting_input";
+      return;
+    }
+    if (state.tasks.some(function (task) { return task.status === "running"; })) {
+      adapter.status = "busy";
+      return;
+    }
+    if (["busy", "awaiting_approval", "awaiting_input"].includes(adapter.status)) {
+      adapter.status = "idle";
+    }
+  }
+
   function renderAdapterMenu() {
     activeAdapterLabel.textContent = state.switchingAdapter
       ? switchingAdapterName()
@@ -2888,7 +3072,15 @@ export const CODEX_MOBILE_JS = String.raw`
       button.disabled = state.switchingAdapter || state.creatingTask;
       button.setAttribute("role", "menuitem");
       var label = document.createElement("span");
-      label.textContent = adapter.label;
+      label.className = "adapter-menu-label";
+      var runningDot = document.createElement("span");
+      runningDot.className = "adapter-menu-running-dot";
+      runningDot.setAttribute("aria-hidden", "true");
+      runningDot.hidden = adapter.status !== "busy";
+      var labelText = document.createElement("span");
+      labelText.textContent = adapter.label;
+      label.appendChild(runningDot);
+      label.appendChild(labelText);
       var status = document.createElement("span");
       status.className = "adapter-menu-state";
       var adapterStatus = adapterStateLabel(adapter.status);
@@ -2925,10 +3117,227 @@ export const CODEX_MOBILE_JS = String.raw`
     return state.currentThreadId ? state.taskModels[currentTaskModelKey()] || null : null;
   }
 
+  function currentTaskPermissionKey() {
+    return state.currentAdapter + "\u0000" + state.currentThreadId;
+  }
+
+  function currentTaskPermissionState() {
+    return state.currentThreadId
+      ? state.taskPermissions[currentTaskPermissionKey()] || null
+      : null;
+  }
+
   function closeModelMenu() {
     state.modelMenuOpen = false;
     composerModelMenu.hidden = true;
     composerModelButton.setAttribute("aria-expanded", "false");
+  }
+
+  function closeReasoningMenu() {
+    state.reasoningMenuOpen = false;
+    composerReasoningMenu.hidden = true;
+    composerReasoningButton.setAttribute("aria-expanded", "false");
+  }
+
+  function closePermissionMenu() {
+    state.permissionMenuOpen = false;
+    composerPermissionMenu.hidden = true;
+    composerPermissionButton.setAttribute("aria-expanded", "false");
+  }
+
+  function syncComposerSettingsVisibility() {
+    composerSettingsControls.hidden = composerModelControl.hidden &&
+      composerReasoningControl.hidden && composerPermissionControl.hidden;
+  }
+
+  function permissionLabel(value) {
+    if (value === "read-only") return "只读";
+    if (value === "workspace-write") return "项目内读写";
+    if (value === "danger-full-access") return "完全访问";
+    if (value === "default") return "标准权限";
+    if (value === "acceptEdits") return "自动接受文件修改";
+    if (value === "fullAccess") return "完全访问";
+    if (value === "bypassPermissions") return "跳过审批";
+    if (value === "plan") return "规划模式";
+    if (value === "custom") return "自定义权限";
+    return value || "权限范围";
+  }
+
+  function renderPermissionControl() {
+    var permissionState = currentTaskPermissionState();
+    var currentPermission = permissionState && permissionState.currentPermission || "";
+    var options = permissionState && Array.isArray(permissionState.options)
+      ? permissionState.options
+      : [];
+    if (!state.currentThreadId) {
+      composerPermissionControl.hidden = true;
+      closePermissionMenu();
+      syncComposerSettingsVisibility();
+      return;
+    }
+    composerPermissionControl.hidden = false;
+    var currentOption = options.find(function (option) {
+      return option.id === currentPermission;
+    });
+    composerPermissionLabel.textContent = state.permissionChanging
+      ? "正在切换…"
+      : !permissionState
+        ? "获取中"
+        : currentPermission
+          ? (
+              currentOption && currentOption.label || permissionLabel(currentPermission)
+            )
+          : "暂不可用";
+    var canChange = Boolean(
+      permissionState && permissionState.canChange && options.length > 0
+    );
+    composerPermissionButton.classList.toggle("is-readonly", !canChange);
+    composerPermissionButton.classList.toggle("is-loading", state.permissionChanging);
+    composerPermissionButton.setAttribute(
+      "aria-disabled",
+      canChange && !state.permissionChanging ? "false" : "true"
+    );
+    composerPermissionButton.title = !canChange
+      ? permissionState && permissionState.unavailableReason ||
+        (!permissionState ? "正在读取当前任务权限范围。" : "当前任务暂时不能切换权限范围。")
+      : "切换当前任务权限范围";
+    composerPermissionMenu.innerHTML = "";
+    if (!canChange) {
+      closePermissionMenu();
+      syncComposerSettingsVisibility();
+      return;
+    }
+    options.forEach(function (option) {
+      var button = document.createElement("button");
+      button.type = "button";
+      button.className = "composer-model-option";
+      button.setAttribute("role", "menuitemradio");
+      button.setAttribute("aria-checked", option.id === currentPermission ? "true" : "false");
+      button.disabled = state.permissionChanging;
+      var copy = document.createElement("span");
+      copy.className = "composer-model-option-copy";
+      var label = document.createElement("span");
+      label.className = "composer-model-option-label";
+      label.textContent = option.label || permissionLabel(option.id);
+      copy.appendChild(label);
+      if (option.description) {
+        var description = document.createElement("span");
+        description.className = "composer-model-option-description";
+        description.textContent = option.description;
+        copy.appendChild(description);
+      }
+      var check = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      check.setAttribute("viewBox", "0 0 16 16");
+      check.setAttribute("aria-hidden", "true");
+      check.setAttribute("class", "composer-model-option-check");
+      if (option.id === currentPermission) {
+        var path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        path.setAttribute("d", "m3.5 8.2 2.7 2.7 6.3-6.3");
+        check.appendChild(path);
+      }
+      button.appendChild(copy);
+      button.appendChild(check);
+      button.addEventListener("click", function () {
+        void selectCurrentTaskPermission(option.id);
+      });
+      composerPermissionMenu.appendChild(button);
+    });
+    composerPermissionMenu.hidden = !state.permissionMenuOpen;
+    composerPermissionButton.setAttribute(
+      "aria-expanded",
+      state.permissionMenuOpen ? "true" : "false"
+    );
+    syncComposerSettingsVisibility();
+  }
+
+  function reasoningEffortLabel(value) {
+    if (value === "none") return "关闭推理";
+    if (value === "minimal") return "极低";
+    if (value === "low") return "低";
+    if (value === "medium") return "中";
+    if (value === "high") return "高";
+    if (value === "xhigh") return "很高";
+    if (value === "max") return "最高";
+    if (value === "ultra") return "超高";
+    return value || "推理";
+  }
+
+  function renderReasoningControl() {
+    var modelState = currentTaskModelState();
+    var currentEffort = modelState && modelState.currentReasoningEffort || "";
+    var options = modelState && Array.isArray(modelState.reasoningEffortOptions)
+      ? modelState.reasoningEffortOptions
+      : [];
+    if (!state.currentThreadId || (!currentEffort && options.length === 0 && !state.reasoningChanging)) {
+      composerReasoningControl.hidden = true;
+      closeReasoningMenu();
+      syncComposerSettingsVisibility();
+      return;
+    }
+    composerReasoningControl.hidden = false;
+    var currentOption = options.find(function (option) { return option.id === currentEffort; });
+    composerReasoningLabel.textContent = state.reasoningChanging
+      ? "正在切换…"
+      : (
+          currentOption && currentOption.label ||
+          (currentEffort ? reasoningEffortLabel(currentEffort) : "跟随会话")
+        );
+    var canChange = Boolean(
+      modelState && modelState.canChangeReasoningEffort && options.length > 0
+    );
+    composerReasoningButton.classList.toggle("is-readonly", !canChange);
+    composerReasoningButton.classList.toggle("is-loading", state.reasoningChanging);
+    composerReasoningButton.setAttribute(
+      "aria-disabled",
+      canChange && !state.reasoningChanging ? "false" : "true"
+    );
+    composerReasoningButton.title = !canChange
+      ? modelState && modelState.reasoningEffortUnavailableReason || "当前模型没有可选推理强度。"
+      : "切换当前任务推理强度";
+    composerReasoningMenu.innerHTML = "";
+    if (!canChange) {
+      closeReasoningMenu();
+      syncComposerSettingsVisibility();
+      return;
+    }
+    options.forEach(function (option) {
+      var button = document.createElement("button");
+      button.type = "button";
+      button.className = "composer-model-option";
+      button.setAttribute("role", "menuitemradio");
+      button.setAttribute("aria-checked", option.id === currentEffort ? "true" : "false");
+      button.disabled = state.reasoningChanging;
+      var copy = document.createElement("span");
+      copy.className = "composer-model-option-copy";
+      var label = document.createElement("span");
+      label.className = "composer-model-option-label";
+      label.textContent = option.label || reasoningEffortLabel(option.id);
+      copy.appendChild(label);
+      if (option.description) {
+        var description = document.createElement("span");
+        description.className = "composer-model-option-description";
+        description.textContent = option.description;
+        copy.appendChild(description);
+      }
+      var check = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      check.setAttribute("viewBox", "0 0 16 16");
+      check.setAttribute("aria-hidden", "true");
+      check.setAttribute("class", "composer-model-option-check");
+      if (option.id === currentEffort) {
+        var path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        path.setAttribute("d", "m3.5 8.2 2.7 2.7 6.3-6.3");
+        check.appendChild(path);
+      }
+      button.appendChild(copy);
+      button.appendChild(check);
+      button.addEventListener("click", function () {
+        void selectCurrentTaskReasoningEffort(option.id);
+      });
+      composerReasoningMenu.appendChild(button);
+    });
+    composerReasoningMenu.hidden = !state.reasoningMenuOpen;
+    composerReasoningButton.setAttribute("aria-expanded", state.reasoningMenuOpen ? "true" : "false");
+    syncComposerSettingsVisibility();
   }
 
   function renderModelControl() {
@@ -2938,32 +3347,40 @@ export const CODEX_MOBILE_JS = String.raw`
     if (!state.currentThreadId || (!currentModel && options.length === 0 && !state.modelChanging)) {
       composerModelControl.hidden = true;
       closeModelMenu();
+      renderReasoningControl();
+      renderPermissionControl();
       return;
     }
     composerModelControl.hidden = false;
     var currentOption = options.find(function (option) { return option.id === currentModel; });
     composerModelLabel.textContent = currentOption && currentOption.label ||
       currentModel || (state.modelChanging ? "正在切换…" : "模型");
-    var runSummary = effectiveRunSummary();
-    var taskRunning = isTaskActivelyRunning(currentTask()) ||
-      Boolean(runSummary && runSummary.status === "running");
     var canChange = Boolean(
-      modelState && modelState.canChange && options.length > 0 && !taskRunning
+      modelState && modelState.canChange && options.length > 0
     );
     composerModelButton.classList.toggle("is-readonly", !canChange);
     composerModelButton.classList.toggle("is-loading", state.modelChanging);
     composerModelButton.setAttribute("aria-disabled", canChange && !state.modelChanging ? "false" : "true");
     composerModelButton.title = !canChange
-      ? taskRunning
-        ? "任务正在处理，完成或停止后再切换模型。"
-        : modelState && modelState.unavailableReason || "当前任务暂时不能切换模型。"
+      ? modelState && modelState.unavailableReason || "当前任务暂时不能切换模型。"
       : currentModel ? "切换当前任务模型" : "查看模型";
     composerModelMenu.innerHTML = "";
     if (!canChange) {
       closeModelMenu();
+      renderReasoningControl();
+      renderPermissionControl();
       return;
     }
+    var lastModelGroup;
     options.forEach(function (option) {
+      var groupName = typeof option.group === "string" ? option.group.trim() : "";
+      if (groupName && groupName !== lastModelGroup) {
+        lastModelGroup = groupName;
+        var heading = document.createElement("div");
+        heading.className = "composer-model-group";
+        heading.textContent = groupName;
+        composerModelMenu.appendChild(heading);
+      }
       var button = document.createElement("button");
       button.type = "button";
       button.className = "composer-model-option";
@@ -3000,6 +3417,8 @@ export const CODEX_MOBILE_JS = String.raw`
     });
     composerModelMenu.hidden = !state.modelMenuOpen;
     composerModelButton.setAttribute("aria-expanded", state.modelMenuOpen ? "true" : "false");
+    renderReasoningControl();
+    renderPermissionControl();
   }
 
   async function loadCurrentTaskModel(force) {
@@ -3036,8 +3455,12 @@ export const CODEX_MOBILE_JS = String.raw`
         state.taskModels[key] = {
           currentModel: cached && cached.currentModel || "",
           options: cached && cached.options || [],
+          currentReasoningEffort: cached && cached.currentReasoningEffort || "",
+          reasoningEffortOptions: cached && cached.reasoningEffortOptions || [],
           canChange: false,
+          canChangeReasoningEffort: false,
           unavailableReason: error.message || "暂时无法读取模型。",
+          reasoningEffortUnavailableReason: error.message || "暂时无法读取推理强度。",
           loadedAtMs: Date.now()
         };
         renderModelControl();
@@ -3046,15 +3469,120 @@ export const CODEX_MOBILE_JS = String.raw`
     }
   }
 
+  async function loadCurrentTaskPermission(force) {
+    if (!state.currentThreadId) {
+      renderPermissionControl();
+      return null;
+    }
+    var key = currentTaskPermissionKey();
+    var cached = state.taskPermissions[key];
+    renderPermissionControl();
+    if (!force && cached && Date.now() - Number(cached.loadedAtMs || 0) < 10000) {
+      return cached;
+    }
+    var requestId = ++state.permissionRequestId;
+    var requestedAdapter = state.currentAdapter;
+    var requestedThreadId = state.currentThreadId;
+    try {
+      var path = adapterApiPath(
+        "/api/tasks/" + encodeURIComponent(state.currentThreadId) + "/permission"
+      );
+      var payload = await api(path, { cache: "no-store" });
+      if (
+        requestId !== state.permissionRequestId ||
+        requestedAdapter !== state.currentAdapter ||
+        requestedThreadId !== state.currentThreadId
+      ) return null;
+      state.taskPermissions[key] = Object.assign({}, payload, { loadedAtMs: Date.now() });
+      renderPermissionControl();
+      return state.taskPermissions[key];
+    } catch (error) {
+      if (
+        requestId === state.permissionRequestId &&
+        requestedAdapter === state.currentAdapter &&
+        requestedThreadId === state.currentThreadId
+      ) {
+        state.taskPermissions[key] = {
+          currentPermission: cached && cached.currentPermission || "",
+          options: cached && cached.options || [],
+          canChange: false,
+          unavailableReason: error.message || "暂时无法读取权限范围。",
+          loadedAtMs: Date.now()
+        };
+        renderPermissionControl();
+      }
+      return null;
+    }
+  }
+
+  async function selectCurrentTaskPermission(permission) {
+    var permissionState = currentTaskPermissionState();
+    if (!permissionState || !permissionState.canChange) {
+      showToast(permissionState && permissionState.unavailableReason || "当前任务暂时不能切换权限范围");
+      return;
+    }
+    if (state.permissionChanging || permission === permissionState.currentPermission) {
+      closePermissionMenu();
+      renderPermissionControl();
+      return;
+    }
+    var option = (permissionState.options || []).find(function (candidate) {
+      return candidate.id === permission;
+    });
+    if (!option) {
+      showToast("这个权限范围当前不可用");
+      return;
+    }
+    if (option.requiresConfirmation) {
+      var confirmed = window.confirm(
+        "确认切换为“" + (option.label || permissionLabel(option.id)) + "”吗？\n\n" +
+        (option.description || "这个权限范围会减少审批并扩大任务可访问的范围。")
+      );
+      if (!confirmed) {
+        closePermissionMenu();
+        renderPermissionControl();
+        return;
+      }
+    }
+    var key = currentTaskPermissionKey();
+    var requestId = ++state.permissionRequestId;
+    var requestedAdapter = state.currentAdapter;
+    var requestedThreadId = state.currentThreadId;
+    state.permissionChanging = true;
+    closePermissionMenu();
+    renderPermissionControl();
+    try {
+      var path = adapterApiPath(
+        "/api/tasks/" + encodeURIComponent(state.currentThreadId) + "/permission"
+      );
+      var payload = await api(path, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ permission: permission })
+      });
+      if (
+        requestId !== state.permissionRequestId ||
+        requestedAdapter !== state.currentAdapter ||
+        requestedThreadId !== state.currentThreadId
+      ) return;
+      state.taskPermissions[key] = Object.assign({}, payload, { loadedAtMs: Date.now() });
+      showToast("权限范围已切换为" + permissionLabel(payload.currentPermission || permission));
+    } catch (error) {
+      if (
+        requestId === state.permissionRequestId &&
+        requestedAdapter === state.currentAdapter &&
+        requestedThreadId === state.currentThreadId
+      ) showToast(error.message || "权限范围切换失败，请重试");
+    } finally {
+      if (requestId === state.permissionRequestId) state.permissionChanging = false;
+      renderPermissionControl();
+    }
+  }
+
   async function selectCurrentTaskModel(model) {
     var modelState = currentTaskModelState();
-    var runSummary = effectiveRunSummary();
-    var taskRunning = isTaskActivelyRunning(currentTask()) ||
-      Boolean(runSummary && runSummary.status === "running");
-    if (!modelState || !modelState.canChange || taskRunning) {
-      showToast(taskRunning
-        ? "任务正在处理，完成或停止后再切换模型"
-        : modelState && modelState.unavailableReason || "当前任务暂时不能切换模型");
+    if (!modelState || !modelState.canChange) {
+      showToast(modelState && modelState.unavailableReason || "当前任务暂时不能切换模型");
       return;
     }
     if (state.modelChanging || model === modelState.currentModel) {
@@ -3095,6 +3623,50 @@ export const CODEX_MOBILE_JS = String.raw`
     }
   }
 
+  async function selectCurrentTaskReasoningEffort(reasoningEffort) {
+    var modelState = currentTaskModelState();
+    if (!modelState || !modelState.canChangeReasoningEffort) {
+      showToast(modelState && modelState.reasoningEffortUnavailableReason || "当前模型没有可选推理强度");
+      return;
+    }
+    if (state.reasoningChanging || reasoningEffort === modelState.currentReasoningEffort) {
+      closeReasoningMenu();
+      renderReasoningControl();
+      return;
+    }
+    var key = currentTaskModelKey();
+    var requestId = ++state.modelRequestId;
+    var requestedAdapter = state.currentAdapter;
+    var requestedThreadId = state.currentThreadId;
+    state.reasoningChanging = true;
+    closeReasoningMenu();
+    renderReasoningControl();
+    try {
+      var path = adapterApiPath("/api/tasks/" + encodeURIComponent(state.currentThreadId) + "/model");
+      var payload = await api(path, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ reasoningEffort: reasoningEffort })
+      });
+      if (
+        requestId !== state.modelRequestId ||
+        requestedAdapter !== state.currentAdapter ||
+        requestedThreadId !== state.currentThreadId
+      ) return;
+      state.taskModels[key] = Object.assign({}, payload, { loadedAtMs: Date.now() });
+      showToast("推理强度已切换为" + reasoningEffortLabel(payload.currentReasoningEffort || reasoningEffort));
+    } catch (error) {
+      if (
+        requestId === state.modelRequestId &&
+        requestedAdapter === state.currentAdapter &&
+        requestedThreadId === state.currentThreadId
+      ) showToast(error.message || "推理强度切换失败，请重试");
+    } finally {
+      if (requestId === state.modelRequestId) state.reasoningChanging = false;
+      renderModelControl();
+    }
+  }
+
   function resetTaskStateForAdapterSwitch() {
     state.taskRequestId += 1;
     state.messageRequestId += 1;
@@ -3106,7 +3678,12 @@ export const CODEX_MOBILE_JS = String.raw`
     state.currentThreadId = "";
     state.modelRequestId += 1;
     state.modelChanging = false;
+    state.reasoningChanging = false;
+    state.permissionRequestId += 1;
+    state.permissionChanging = false;
     closeModelMenu();
+    closeReasoningMenu();
+    closePermissionMenu();
     renderModelControl();
     state.serverMessages = [];
     state.historyMessages = [];
@@ -3432,7 +4009,7 @@ export const CODEX_MOBILE_JS = String.raw`
   }
 
   function currentVisibleRunSummary() {
-    var messages = state.serverMessages.concat(visiblePendingMessages().map(function (pending) {
+    var messages = filterVisibleConversationMessages(state.serverMessages).concat(visiblePendingMessages().map(function (pending) {
       return Object.assign({ role: "user", pending: true }, pending);
     }));
     return resolveVisibleRunSummary(
@@ -3442,6 +4019,20 @@ export const CODEX_MOBILE_JS = String.raw`
       Date.now(),
       state.progressItems
     );
+  }
+
+  function shouldQueueComposerSubmission(
+    task,
+    runSummary,
+    queuedMessages,
+    pendingApproval,
+    waitingForTaskCreation
+  ) {
+    if (waitingForTaskCreation) return false;
+    return isTaskActivelyRunning(task) ||
+      Boolean(runSummary && runSummary.status === "running") ||
+      Boolean(queuedMessages && queuedMessages.length > 0) ||
+      Boolean(pendingApproval);
   }
 
   function updateHeader() {
@@ -3731,6 +4322,37 @@ export const CODEX_MOBILE_JS = String.raw`
   function clearActiveTextSelection() {
     var selection = window.getSelection && window.getSelection();
     if (selection && typeof selection.removeAllRanges === "function") selection.removeAllRanges();
+    activeMessageSelectionScope = null;
+  }
+
+  function selectionNodeWithin(container, node) {
+    return Boolean(container && node && (node === container || container.contains(node)));
+  }
+
+  function selectionEscapesMessageContent(selection, content) {
+    if (!selection || selection.isCollapsed || !content) return false;
+    return !selectionNodeWithin(content, selection.anchorNode) ||
+      !selectionNodeWithin(content, selection.focusNode);
+  }
+
+  function clampSelectionToMessageContent(selection, content) {
+    if (!selectionEscapesMessageContent(selection, content)) return false;
+    var range = document.createRange();
+    range.selectNodeContents(content);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    return true;
+  }
+
+  var activeMessageSelectionScope = null;
+  var clampingMessageSelection = false;
+
+  function rememberMessageSelectionScope(event) {
+    var target = event && event.target;
+    var content = target && typeof target.closest === "function"
+      ? target.closest(".message-content")
+      : null;
+    activeMessageSelectionScope = content && messagesEl.contains(content) ? content : null;
   }
 
   function isTaskContextMenuTriggerAllowed(button, clientX, clientY) {
@@ -3755,12 +4377,34 @@ export const CODEX_MOBILE_JS = String.raw`
     var longPressStartX = 0;
     var longPressStartY = 0;
     var longPressActive = false;
+    var longPressTriggered = false;
+    var longPressResetTimer = null;
 
     function cancelLongPress() {
       if (longPressTimer) clearTimeout(longPressTimer);
       longPressTimer = null;
       longPressPointerId = null;
       longPressActive = false;
+    }
+
+    function markLongPressTriggered() {
+      longPressTriggered = true;
+      if (longPressResetTimer) clearTimeout(longPressResetTimer);
+      longPressResetTimer = setTimeout(function () {
+        longPressTriggered = false;
+        longPressResetTimer = null;
+      }, 10000);
+    }
+
+    function finishLongPress() {
+      var triggered = longPressTriggered;
+      cancelLongPress();
+      if (!triggered) return;
+      if (longPressResetTimer) clearTimeout(longPressResetTimer);
+      longPressResetTimer = setTimeout(function () {
+        longPressTriggered = false;
+        longPressResetTimer = null;
+      }, 1200);
     }
 
     button.type = "button";
@@ -3771,6 +4415,16 @@ export const CODEX_MOBILE_JS = String.raw`
       '<span class="task-copy"><span class="task-title"></span><span class="task-project"></span></span>' +
       '<span class="task-indicator"><span class="task-dot"></span><span class="task-status-badge"></span></span>';
     button.addEventListener("click", function (event) {
+      if (longPressTriggered) {
+        longPressTriggered = false;
+        if (longPressResetTimer) clearTimeout(longPressResetTimer);
+        longPressResetTimer = null;
+        state.suppressTaskClickThreadId = "";
+        state.suppressTaskClickUntil = 0;
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
       if (
         state.suppressTaskClickThreadId === threadId &&
         Date.now() < state.suppressTaskClickUntil
@@ -3793,7 +4447,11 @@ export const CODEX_MOBILE_JS = String.raw`
         cancelLongPress();
         return;
       }
+      var touchGeneratedContextMenu = event.pointerType === "touch" || Boolean(
+        event.sourceCapabilities && event.sourceCapabilities.firesTouchEvents
+      );
       cancelLongPress();
+      if (touchGeneratedContextMenu) markLongPressTriggered();
       state.suppressTaskClickThreadId = threadId;
       state.suppressTaskClickUntil = Date.now() + 700;
       openTaskContextMenu(threadId, event.clientX, event.clientY, button);
@@ -3823,6 +4481,7 @@ export const CODEX_MOBILE_JS = String.raw`
         }
         longPressPointerId = null;
         longPressActive = false;
+        markLongPressTriggered();
         state.suppressTaskClickThreadId = threadId;
         state.suppressTaskClickUntil = Date.now() + 700;
         openTaskContextMenu(threadId, longPressStartX, longPressStartY, button);
@@ -3835,10 +4494,10 @@ export const CODEX_MOBILE_JS = String.raw`
         Math.abs(event.clientY - longPressStartY) > TASK_LONG_PRESS_MOVE_PX
       ) cancelLongPress();
     });
-    button.addEventListener("pointerup", cancelLongPress);
-    button.addEventListener("pointercancel", cancelLongPress);
-    button.addEventListener("pointerleave", cancelLongPress);
-    button.addEventListener("lostpointercapture", cancelLongPress);
+    button.addEventListener("pointerup", finishLongPress);
+    button.addEventListener("pointercancel", finishLongPress);
+    button.addEventListener("pointerleave", finishLongPress);
+    button.addEventListener("lostpointercapture", finishLongPress);
     button.addEventListener("keydown", function (event) {
       if (event.key === "ContextMenu" || event.shiftKey && event.key === "F10") {
         event.preventDefault();
@@ -4362,11 +5021,19 @@ export const CODEX_MOBILE_JS = String.raw`
     updateTaskBoardControls();
     if (!state.boardOpen) return;
     taskBoardBody.innerHTML = "";
-    if (state.boardLoading && !state.boardLastLoadedAtMs) {
+    if (state.boardLoading && !hasTaskBoardCachedContent(
+      state.boardTasks,
+      state.boardRecentCompleted,
+      state.boardLastLoadedAtMs
+    )) {
       taskBoardBody.appendChild(renderTaskBoardSkeleton());
       return;
     }
-    if (state.boardError && !state.boardLastLoadedAtMs) {
+    if (state.boardError && !hasTaskBoardCachedContent(
+      state.boardTasks,
+      state.boardRecentCompleted,
+      state.boardLastLoadedAtMs
+    )) {
       taskBoardBody.appendChild(renderTaskBoardEmpty(
         "任务看板暂时不可用",
         state.boardError + " 请稍后刷新重试。"
@@ -4392,10 +5059,10 @@ export const CODEX_MOBILE_JS = String.raw`
   async function loadTaskBoard(force) {
     if (!state.authenticated || state.boardLoading) return;
     var requestId = ++state.boardRequestId;
-    var hasCachedBoard = Boolean(
-      state.boardLastLoadedAtMs ||
-      state.boardTasks.length ||
-      state.boardRecentCompleted.length
+    var hasCachedBoard = hasTaskBoardCachedContent(
+      state.boardTasks,
+      state.boardRecentCompleted,
+      state.boardLastLoadedAtMs
     );
     state.boardLoading = true;
     state.boardError = "";
@@ -4549,6 +5216,7 @@ export const CODEX_MOBILE_JS = String.raw`
     toggleWorkspaceMenu(false);
     closeTaskContextMenu();
     closeModelMenu();
+    closeReasoningMenu();
     if (updateUrl) {
       var url = new URL(window.location.href);
       if (state.settingsOpen) {
@@ -4841,6 +5509,7 @@ export const CODEX_MOBILE_JS = String.raw`
         previousCurrentTask &&
         !state.tasks.some(function (task) { return task.threadId === previousCurrentTask.threadId; })
       ) state.tasks.push(previousCurrentTask);
+      syncCurrentAdapterStatusFromTasks();
       var url = new URL(window.location.href);
       var requested = initial ? (url.searchParams.get("task") || "") : "";
       var chosen = null;
@@ -5374,6 +6043,14 @@ export const CODEX_MOBILE_JS = String.raw`
     ));
   }
 
+  function shouldForceLiveMessageRefresh(nowMs) {
+    var summary = effectiveRunSummary();
+    var taskRunning = isTaskActivelyRunning(currentTask()) ||
+      Boolean(summary && summary.status === "running");
+    return taskRunning &&
+      Number(nowMs) - Number(state.lastLiveMessageRefreshAtMs || 0) >= 5000;
+  }
+
   function filterProgressItemsForCurrentTurn(progressItems, task, summary) {
     var items = Array.isArray(progressItems) ? progressItems : [];
     var currentTurnId = task && task.activeTurnId || summary && summary.turnId;
@@ -5530,13 +6207,19 @@ export const CODEX_MOBILE_JS = String.raw`
     return detail || "任务执行失败，未生成 AI 回复。请重试。";
   }
 
+  function runFailureTitle(summary) {
+    var detail = runFailureText(summary);
+    return /模型.*繁忙/.test(detail) ? "模型暂时繁忙" : "未生成 AI 回复";
+  }
+
   function renderRunFailure(summary) {
     var detail = runFailureText(summary);
     if (!detail) return null;
     var row = document.createElement("div");
     row.className = "run-failure";
     row.setAttribute("role", "alert");
-    row.innerHTML = '<div class="run-failure-title">未生成 AI 回复</div>' +
+    row.innerHTML = '<div class="run-failure-title">' +
+      escapeHtml(runFailureTitle(summary)) + '</div>' +
       '<div class="run-failure-detail">' + escapeHtml(detail) + "</div>";
     return row;
   }
@@ -5834,7 +6517,7 @@ export const CODEX_MOBILE_JS = String.raw`
       if (deliveryLabel) deliveryLabel.textContent = deliveryHeaderLabel(delivery);
     }
     var header = document.getElementById("run-header");
-    var messages = state.serverMessages.concat(visiblePendingMessages().map(function (pending) {
+    var messages = filterVisibleConversationMessages(state.serverMessages).concat(visiblePendingMessages().map(function (pending) {
       return Object.assign({ role: "user", pending: true }, pending);
     }));
     var summary = resolveVisibleRunSummary(
@@ -5844,6 +6527,7 @@ export const CODEX_MOBILE_JS = String.raw`
       Date.now(),
       state.progressItems
     );
+    renderPermissionControl();
     if (!header || !summary) return;
     var label = header.querySelector(".run-header-label");
     if (label) {
@@ -5937,6 +6621,20 @@ export const CODEX_MOBILE_JS = String.raw`
       if (messages[index].role === "user") return index + 1;
     }
     return messages.length;
+  }
+
+  function isVisibleConversationMessage(message) {
+    if (!message) return false;
+    var text = String(message.text || "").trim().toLowerCase();
+    if (
+      message.role === "assistant" &&
+      /^\[(?:tool_use|tool_result)\]$/.test(text)
+    ) return false;
+    return true;
+  }
+
+  function filterVisibleConversationMessages(messages) {
+    return (messages || []).filter(isVisibleConversationMessage);
   }
 
   function visibleMessageText(message) {
@@ -6148,10 +6846,15 @@ export const CODEX_MOBILE_JS = String.raw`
         : "message-auto-" + stableMessageNodeHash(nodeKey || String(index));
     var deliveryHtml = "";
     if (message.pending) {
+      var creationError = message.status === "waiting_task_retry"
+        ? taskCreationErrorText(taskById(message.threadId))
+        : "";
       var statusText = message.status === "creating_task"
         ? "正在创建任务，创建后自动发送…"
         : message.status === "waiting_task_retry"
-          ? "任务创建失败，点击重试后自动发送"
+          ? creationError
+            ? "任务创建失败：" + taskCreationErrorText(taskById(message.threadId))
+            : "任务创建失败，点击重试后自动发送"
           : message.status === "waiting_to_send"
             ? "任务已创建，正在发送…"
             : message.status === "contacting_computer"
@@ -6175,7 +6878,7 @@ export const CODEX_MOBILE_JS = String.raw`
         : "";
       deliveryHtml = '<div class="message-delivery ' + (
         message.status === "failed" || message.status === "waiting_task_retry" ? "failed" : ""
-      ) + '"><span>' + statusText + "</span>" + retry + "</div>";
+      ) + '"><span>' + escapeHtml(statusText) + "</span>" + retry + "</div>";
     }
     var imagesHtml = renderMessageImages(message);
     var visibleText = visibleMessageText(message);
@@ -6251,7 +6954,7 @@ export const CODEX_MOBILE_JS = String.raw`
     var shouldStick = forceBottom || isNearBottom();
     var previousScrollTop = messagesEl.scrollTop;
     var openFoldState = captureOpenFoldState();
-    var messages = state.serverMessages.concat(visiblePendingMessages().map(function (pending) {
+    var messages = filterVisibleConversationMessages(state.serverMessages).concat(visiblePendingMessages().map(function (pending) {
       return Object.assign({ role: "user", pending: true }, pending);
     }));
     var summary = resolveVisibleRunSummary(
@@ -6267,6 +6970,7 @@ export const CODEX_MOBILE_JS = String.raw`
       state.messageNodes = Object.create(null);
       var emptyTask = currentTask();
       if (isTemporaryTask(emptyTask)) {
+        var emptyCreationError = taskCreationErrorText(emptyTask);
         messagesEl.innerHTML = '<div class="empty-state"><div class="empty-wordmark">WeRelay</div><h1>' +
           (emptyTask.localCreationState === "failed"
             ? '任务创建失败'
@@ -6275,7 +6979,10 @@ export const CODEX_MOBILE_JS = String.raw`
               : '正在后台创建任务') +
           '</h1><p>' +
           (emptyTask.localCreationState === "failed"
-            ? '输入内容和图片都已保留，重试后会继续创建。'
+            ? '输入内容和图片都已保留；再次点“新建任务”会自动重试。' +
+              (emptyCreationError
+                ? '<br>失败原因：' + escapeHtml(taskCreationErrorText(emptyTask))
+                : '')
             : emptyTask.localCreationState === "ready"
               ? '尚未发送的内容会一直保留；发送第一条消息后才开始执行。'
               : '现在就可以输入；提交后会在任务创建成功时自动发送。') +
@@ -6398,8 +7105,16 @@ export const CODEX_MOBILE_JS = String.raw`
     }
   }
 
-  function updateRunSummary(summary, task) {
+  function updateRunSummary(summary, task, messages) {
     var taskRunning = isTaskActivelyRunning(task);
+    var latestUserIndex = -1;
+    var latestAssistantIndex = -1;
+    (Array.isArray(messages) ? messages : []).forEach(function (message, index) {
+      if (!message) return;
+      if (message.role === "user") latestUserIndex = index;
+      if (message.role === "assistant") latestAssistantIndex = index;
+    });
+    var assistantReplySettled = latestUserIndex >= 0 && latestAssistantIndex > latestUserIndex;
     var previous = state.runSummary;
     var next = summary ? Object.assign({}, summary, { receivedAtMs: Date.now() }) : null;
     if (taskRunning && next && next.status !== "running") {
@@ -6409,7 +7124,7 @@ export const CODEX_MOBILE_JS = String.raw`
         state.localRunSummary.status === "running" &&
         (!state.localRunSummary.turnId || !next.turnId ||
           state.localRunSummary.turnId === next.turnId);
-      if (!localRunning) {
+      if (assistantReplySettled || !localRunning) {
         if (previous && previous.turnId === next.turnId && previous.status !== "running") {
           next = previous;
         } else {
@@ -6441,8 +7156,21 @@ export const CODEX_MOBILE_JS = String.raw`
         next.status !== "unknown"
       );
       var localAgeMs = Date.now() - Number(state.localRunSummary.startedAtMs || Date.now());
-      if (localTurnConfirmed || taskRunning && next && next.status === "running") {
+      var remoteSettledForLocal = Boolean(
+        next &&
+        next.status !== "running" &&
+        state.localRunSummary.turnId &&
+        next.turnId &&
+        state.localRunSummary.turnId === next.turnId
+      );
+      var settledEvidence = remoteSettledForLocal || assistantReplySettled;
+      if (
+        localTurnConfirmed ||
+        settledEvidence ||
+        taskRunning && next && next.status === "running"
+      ) {
         state.localRunSummary = null;
+        if (settledEvidence) state.optimisticProgressTurnId = null;
       } else if (!taskRunning && !state.pendingMessages.some(function (message) {
         return message.inFlight;
       }) && localAgeMs > 120000) {
@@ -6575,14 +7303,14 @@ export const CODEX_MOBILE_JS = String.raw`
   }
 
   function rebuildServerMessages() {
-    state.serverMessages = mergeMessagePages(
+    state.serverMessages = filterVisibleConversationMessages(mergeMessagePages(
       state.historyMessages,
       state.latestMessages
-    );
+    ));
   }
 
   function applyLatestMessagePage(payload, historyOnly) {
-    var messages = payload.messages || [];
+    var messages = filterVisibleConversationMessages(payload.messages || []);
     var page = normalizeMessagePage(payload, messages);
     if (historyOnly || !state.latestMessages.length) {
       state.historyMessages = [];
@@ -6625,7 +7353,7 @@ export const CODEX_MOBILE_JS = String.raw`
         requestedThreadId !== state.currentThreadId ||
         payload.threadId !== requestedThreadId
       ) return;
-      var messages = payload.messages || [];
+      var messages = filterVisibleConversationMessages(payload.messages || []);
       var page = normalizeMessagePage(payload, messages);
       state.historyMessages = mergeMessagePages(messages, state.historyMessages);
       state.oldestMessageCursor = page.nextBefore;
@@ -6692,8 +7420,11 @@ export const CODEX_MOBILE_JS = String.raw`
         payload.threadId !== requestedThreadId
       ) return;
       applyLatestMessagePage(payload, historyOnly);
-      if (!historyOnly && typeof payload.revision === "string" && payload.revision) {
-        state.contentRevision = payload.revision;
+      if (!historyOnly) {
+        state.lastLiveMessageRefreshAtMs = Date.now();
+        if (typeof payload.revision === "string" && payload.revision) {
+          state.contentRevision = payload.revision;
+        }
       }
       var messages = state.serverMessages;
       reconcilePendingMessages(payload.messages || []);
@@ -6716,7 +7447,7 @@ export const CODEX_MOBILE_JS = String.raw`
             payload.runSummary || null
           );
         }
-        updateRunSummary(payload.runSummary || null, payload.task || null);
+        updateRunSummary(payload.runSummary || null, payload.task || null, messages);
         state.progressItems = filterProgressItemsForOptimisticTurn(
           filterProgressItemsForCurrentTurn(
             payload.progressItems || [],
@@ -6806,6 +7537,10 @@ export const CODEX_MOBILE_JS = String.raw`
         if (typeof payload.revision === "string" && payload.revision) {
           state.contentRevision = payload.revision;
         }
+        if (shouldForceLiveMessageRefresh(Date.now())) {
+          setCacheSyncState("updating");
+          return await loadMessages(forceBottom, false, false);
+        }
         if (announceCheck) setCacheSyncState("current");
         else setCacheSyncState("idle");
         saveCurrentConversationSnapshot();
@@ -6891,16 +7626,42 @@ export const CODEX_MOBILE_JS = String.raw`
     }
   }
 
+  function shouldRetryTaskCreationRequest(error, attempt) {
+    return attempt === 0 && Boolean(
+      error && (error.network || error.status === 504)
+    );
+  }
+
+  async function requestTaskCreation(createPath, requestId) {
+    for (var attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        return await api(createPath, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ requestId: requestId })
+        });
+      } catch (error) {
+        if (!shouldRetryTaskCreationRequest(error, attempt)) throw error;
+        await waitForMobileFetchRetry();
+      }
+    }
+    throw new Error("电脑响应超时，请稍后重试。");
+  }
+
   async function createTask(sourceThreadId, projectName, existingTemporaryTask) {
     if (state.creatingTask || state.switchingAdapter) return;
     var reusableTask = currentLocalTaskDraft();
     if (!existingTemporaryTask && reusableTask) {
       await selectTask(reusableTask.threadId, true);
       requestAnimationFrame(function () { composerInput.focus(); });
-      showToast(reusableTask.localCreationState === "failed"
-        ? "输入内容已保留，可以继续填写或重试"
-        : "已回到未完成的新任务");
-      return;
+      if (reusableTask.localCreationState === "failed") {
+        sourceThreadId = reusableTask.localSourceThreadId || "";
+        projectName = reusableTask.projectName || projectName || "";
+        existingTemporaryTask = reusableTask;
+      } else {
+        showToast("已回到未完成的新任务");
+        return;
+      }
     }
     var temporaryTask = existingTemporaryTask || createTemporaryTask(sourceThreadId, projectName);
     state.creatingTask = true;
@@ -6926,7 +7687,7 @@ export const CODEX_MOBILE_JS = String.raw`
         createUrl.searchParams.set("sourceTask", sourceThreadId);
         createPath = createUrl.pathname + createUrl.search;
       }
-      var payload = await api(createPath, { method: "POST" });
+      var payload = await requestTaskCreation(createPath, temporaryTask.threadId);
       var task = payload && payload.task;
       if (!task || !task.threadId) throw new Error("电脑端没有返回新任务。");
       task = Object.assign({}, task, {
@@ -7012,7 +7773,13 @@ export const CODEX_MOBILE_JS = String.raw`
       closeSidebar();
       renderTasks();
       updateHeader();
-      if (!isTemporaryTask(currentTask())) void refreshMessagesIfChanged(false, true);
+      if (!isTemporaryTask(currentTask())) {
+        void Promise.all([
+          refreshMessagesIfChanged(false, true),
+          loadCurrentTaskModel(false),
+          loadCurrentTaskPermission(false)
+        ]);
+      }
       return;
     }
     saveCurrentConversationSnapshot();
@@ -7023,7 +7790,12 @@ export const CODEX_MOBILE_JS = String.raw`
     state.currentThreadId = threadId;
     state.modelRequestId += 1;
     state.modelChanging = false;
+    state.reasoningChanging = false;
+    state.permissionRequestId += 1;
+    state.permissionChanging = false;
     closeModelMenu();
+    closeReasoningMenu();
+    closePermissionMenu();
     renderModelControl();
     state.loadingOlderMessages = false;
     state.historyRequestId += 1;
@@ -7080,6 +7852,7 @@ export const CODEX_MOBILE_JS = String.raw`
       return;
     }
     void loadCurrentTaskModel(false);
+    void loadCurrentTaskPermission(false);
     if (restored) {
       void refreshMessagesIfChanged(false, true);
       return;
@@ -7503,15 +8276,21 @@ export const CODEX_MOBILE_JS = String.raw`
     }
     var task = currentTask();
     var hasContent = Boolean(text.trim() || images.length > 0);
-    if (shouldUseStopComposerAction(task, currentVisibleRunSummary(), hasContent)) {
+    var visibleRunSummary = currentVisibleRunSummary();
+    if (shouldUseStopComposerAction(task, visibleRunSummary, hasContent)) {
       stopCurrentTask();
       return;
     }
     if (!hasContent || !state.currentThreadId) return;
     var pending = makePendingMessage(text, images);
     var waitingForTaskCreation = taskNeedsCreation(task);
-    var likelyQueued = !waitingForTaskCreation && (isTaskActivelyRunning(task) ||
-      state.queuedMessages.length > 0 || Boolean(state.pendingApproval));
+    var likelyQueued = shouldQueueComposerSubmission(
+      task,
+      visibleRunSummary,
+      state.queuedMessages,
+      state.pendingApproval,
+      waitingForTaskCreation
+    );
     pending.displayInTranscript = !likelyQueued;
     if (waitingForTaskCreation) {
       pending.waitingForTaskCreation = true;
@@ -7562,17 +8341,38 @@ export const CODEX_MOBILE_JS = String.raw`
 
   composerModelButton.addEventListener("click", function () {
     var modelState = currentTaskModelState();
-    var runSummary = effectiveRunSummary();
-    var taskRunning = isTaskActivelyRunning(currentTask()) ||
-      Boolean(runSummary && runSummary.status === "running");
-    if (!modelState || !modelState.canChange || taskRunning) {
-      showToast(taskRunning
-        ? "任务正在处理，完成或停止后再切换模型"
-        : modelState && modelState.unavailableReason || "当前任务暂时不能切换模型");
+    if (!modelState || !modelState.canChange) {
+      showToast(modelState && modelState.unavailableReason || "当前任务暂时不能切换模型");
       return;
     }
     state.modelMenuOpen = !state.modelMenuOpen;
+    closeReasoningMenu();
+    closePermissionMenu();
     renderModelControl();
+  });
+
+  composerReasoningButton.addEventListener("click", function () {
+    var modelState = currentTaskModelState();
+    if (!modelState || !modelState.canChangeReasoningEffort) {
+      showToast(modelState && modelState.reasoningEffortUnavailableReason || "当前模型没有可选推理强度");
+      return;
+    }
+    state.reasoningMenuOpen = !state.reasoningMenuOpen;
+    closeModelMenu();
+    closePermissionMenu();
+    renderReasoningControl();
+  });
+
+  composerPermissionButton.addEventListener("click", function () {
+    var permissionState = currentTaskPermissionState();
+    if (!permissionState || !permissionState.canChange) {
+      showToast(permissionState && permissionState.unavailableReason || "当前任务暂时不能切换权限范围");
+      return;
+    }
+    state.permissionMenuOpen = !state.permissionMenuOpen;
+    closeModelMenu();
+    closeReasoningMenu();
+    renderPermissionControl();
   });
 
   composerImageButton.addEventListener("click", function () {
@@ -7742,27 +8542,45 @@ export const CODEX_MOBILE_JS = String.raw`
   });
   taskBoardSearch.addEventListener("input", renderTaskBoard);
   newTaskButton.addEventListener("click", function () {
-    var task = currentTask();
-    if (task && task.localCreationState === "failed") {
-      void selectTask(task.threadId, true);
-      requestAnimationFrame(function () { composerInput.focus(); });
-      return;
-    }
     void createTask("", "");
   });
   taskList.addEventListener("selectstart", function (event) {
     event.preventDefault();
   });
-  messagesEl.addEventListener("selectstart", closeTaskContextMenu);
-  messagesEl.addEventListener("contextmenu", closeTaskContextMenu);
+  messagesEl.addEventListener("selectstart", function (event) {
+    rememberMessageSelectionScope(event);
+    closeTaskContextMenu();
+  });
+  messagesEl.addEventListener("contextmenu", function (event) {
+    rememberMessageSelectionScope(event);
+    closeTaskContextMenu();
+  });
   messagesEl.addEventListener("pointerdown", closeTaskContextMenu);
+  document.addEventListener("pointerdown", rememberMessageSelectionScope, true);
+  document.addEventListener("touchstart", rememberMessageSelectionScope, {
+    capture: true,
+    passive: true
+  });
   document.addEventListener("selectionchange", function () {
     if (!hasActiveTextSelection()) return;
-    if (!taskContextMenu.hidden && app.classList.contains("sidebar-open")) {
+    if (!taskContextMenu.hidden) {
       clearActiveTextSelection();
       return;
     }
-    closeTaskContextMenu();
+    if (
+      clampingMessageSelection ||
+      !activeMessageSelectionScope ||
+      !activeMessageSelectionScope.isConnected
+    ) return;
+    clampingMessageSelection = true;
+    try {
+      clampSelectionToMessageContent(
+        window.getSelection && window.getSelection(),
+        activeMessageSelectionScope
+      );
+    } finally {
+      clampingMessageSelection = false;
+    }
   });
   document.addEventListener("click", function (event) {
     if (!workspaceMenu.hidden && !workspaceMenu.contains(event.target) && !workspaceSwitcher.contains(event.target)) {
@@ -7773,6 +8591,16 @@ export const CODEX_MOBILE_JS = String.raw`
       !composerModelMenu.contains(event.target) &&
       !composerModelButton.contains(event.target)
     ) closeModelMenu();
+    if (
+      state.reasoningMenuOpen &&
+      !composerReasoningMenu.contains(event.target) &&
+      !composerReasoningButton.contains(event.target)
+    ) closeReasoningMenu();
+    if (
+      state.permissionMenuOpen &&
+      !composerPermissionMenu.contains(event.target) &&
+      !composerPermissionButton.contains(event.target)
+    ) closePermissionMenu();
     if (!taskContextMenu.hidden && !taskContextMenu.contains(event.target)) {
       closeTaskContextMenu();
     }
@@ -7791,6 +8619,8 @@ export const CODEX_MOBILE_JS = String.raw`
       }
       closeTaskContextMenu();
       closeModelMenu();
+      closeReasoningMenu();
+      closePermissionMenu();
       toggleWorkspaceMenu(false);
     }
   });
@@ -7813,7 +8643,11 @@ export const CODEX_MOBILE_JS = String.raw`
         ? Date.now() - state.boardLastLoadedAtMs >= TASK_REFRESH_INTERVAL_MS
           ? [loadTaskBoard(false)]
           : []
-        : [refreshMessagesIfChanged(false, false), loadCurrentTaskModel(false)];
+        : [
+            refreshMessagesIfChanged(false, false),
+            loadCurrentTaskModel(false),
+            loadCurrentTaskPermission(false)
+          ];
       if (!state.boardOpen && Date.now() >= state.nextTaskRefreshAtMs) {
         refreshes.push(loadTasks(false));
       }
@@ -7842,7 +8676,8 @@ export const CODEX_MOBILE_JS = String.raw`
         else await Promise.all([
           loadTasks(false),
           refreshMessagesIfChanged(false, true),
-          loadCurrentTaskModel(true)
+          loadCurrentTaskModel(true),
+          loadCurrentTaskPermission(true)
         ]);
       })();
     }

@@ -342,6 +342,10 @@ export class CodexDesktopIpcClient {
     return this.threadStates.get(threadId.trim())?.state ?? null;
   }
 
+  getThreadRevision(threadId: string): number | null {
+    return this.threadStates.get(threadId.trim())?.revision ?? null;
+  }
+
   isConnected(): boolean {
     return Boolean(this.socket?.writable && this.clientId !== INITIALIZING_CLIENT_ID);
   }
@@ -473,7 +477,14 @@ export class CodexDesktopIpcClient {
   async startTurn(
     threadId: string,
     input: string | BridgeTurnInputItem[],
-    options: { model?: string } = {},
+    options: {
+      model?: string;
+      effort?: string;
+      approvalPolicy?: string;
+      approvalsReviewer?: string;
+      sandbox?: string;
+      sandboxPolicy?: Record<string, unknown>;
+    } = {},
   ): Promise<Record<string, unknown>> {
     const normalizedThreadId = threadId.trim();
     const items = typeof input === "string"
@@ -513,6 +524,17 @@ export class CodexDesktopIpcClient {
             threadId: normalizedThreadId,
             input: items,
             ...(options.model?.trim() ? { model: options.model.trim() } : {}),
+            ...(options.effort?.trim() ? { effort: options.effort.trim() } : {}),
+            ...(options.approvalPolicy?.trim()
+              ? { approvalPolicy: options.approvalPolicy.trim() }
+              : {}),
+            ...(options.approvalsReviewer?.trim()
+              ? { approvalsReviewer: options.approvalsReviewer.trim() }
+              : {}),
+            ...(options.sandbox?.trim() ? { sandbox: options.sandbox.trim() } : {}),
+            ...(options.sandboxPolicy
+              ? { sandboxPolicy: structuredClone(options.sandboxPolicy) }
+              : {}),
           },
         },
       },

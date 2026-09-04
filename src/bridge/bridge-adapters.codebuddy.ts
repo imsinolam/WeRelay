@@ -395,6 +395,7 @@ type CodeBuddyTranscriptMetadata = {
   sessionId?: string;
   cwd?: string;
   title?: string;
+  userRenamed?: boolean;
   firstTimestampMs?: number;
   lastUpdatedAtMs?: number;
 };
@@ -414,6 +415,8 @@ const codeBuddySessionCwdById = new Map<string, string>();
 
 function parseCodeBuddyTranscriptMetadata(text: string): CodeBuddyTranscriptMetadata {
   const metadata: CodeBuddyTranscriptMetadata = {};
+  let generatedTitle: string | undefined;
+  let customTitle: string | undefined;
   for (const line of text.split(/\r?\n/)) {
     if (!line.trim()) continue;
     let value: unknown;
@@ -435,11 +438,17 @@ function parseCodeBuddyTranscriptMetadata(text: string): CodeBuddyTranscriptMeta
       );
       metadata.lastUpdatedAtMs = Math.max(metadata.lastUpdatedAtMs ?? 0, timestamp);
     }
-    if (value.type === "message" && value.role === "user" && !metadata.title) {
+    if (value.type === "custom-title") {
+      customTitle = readString(value.customTitle) ?? customTitle;
+    } else if (value.type === "ai-title") {
+      generatedTitle = readString(value.aiTitle) ?? generatedTitle;
+    } else if (value.type === "message" && value.role === "user" && !metadata.title) {
       const textContent = codeBuddyContentText(value.content).replace(/\s+/g, " ").trim();
       if (textContent) metadata.title = truncatePreview(textContent, 80);
     }
   }
+  metadata.title = customTitle ?? generatedTitle ?? metadata.title;
+  metadata.userRenamed = Boolean(customTitle);
   return metadata;
 }
 
@@ -529,7 +538,9 @@ export async function listCodeBuddySessions(
       title: metadata.title ?? `CodeBuddy 会话 ${sessionId.slice(0, 8)}`,
       lastUpdatedAt: new Date(updatedAtMs).toISOString(),
       cwd: sessionCwd,
-      projectName: path.basename(sessionCwd) || sessionCwd,
+      ...(metadata.userRenamed
+        ? { projectName: path.basename(sessionCwd) || sessionCwd }
+        : {}),
     };
     const existing = bySessionId.get(sessionId);
     if (!existing) {
