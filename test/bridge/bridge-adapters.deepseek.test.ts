@@ -200,6 +200,13 @@ describe("DeepSeek Harness task permission scope", () => {
       ],
     });
 
+    fake.sessions[0].running = true;
+    expect(await adapter.getSessionPermissionState("session-1")).toMatchObject({
+      currentPermission: "workspace-write",
+      canChange: true,
+    });
+    fake.sessions[0].running = false;
+
     const next = await adapter.setSessionPermission(
       "session-1",
       "danger-full-access",

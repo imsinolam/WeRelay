@@ -31,6 +31,7 @@ import type {
 } from "../bridge/bridge-types.ts";
 import { CodexMobileAuthStore } from "./codex-mobile-auth.ts";
 import type { MobileProviderSettingsEntry } from "./mobile-provider-settings.ts";
+import type { MobileMessageOutboxStatus } from "./mobile-message-outbox.ts";
 import {
   CODEX_MOBILE_CSS,
   CODEX_MOBILE_HTML,
@@ -201,26 +202,24 @@ export type CodexMobileImageInput = {
 };
 
 export type CodexMobileMessageInput = {
+  clientId: string;
   text: string;
   images: CodexMobileImageInput[];
+  createdAtMs?: number;
+  retry?: boolean;
+  createTaskSourceThreadId?: string;
 };
 
 export type CodexMobileSendResult = {
   queued: boolean;
+  accepted?: boolean;
+  messageId?: string;
+  status?: MobileMessageOutboxStatus;
+  threadId?: string;
   duplicate?: boolean;
   queuedMessageId?: string;
   queuePosition?: number;
   turnId?: string;
-};
-
-type CodexMobileMessageDelivery = {
-  clientId: string;
-  threadId: string;
-  adapter?: string;
-  requestHash: string;
-  status: "forwarding" | "sent" | "queued" | "duplicate" | "failed";
-  result?: CodexMobileSendResult;
-  error?: string;
 };
 
 export type CodexMobileApprovalAction = "confirm" | "confirm_session" | "deny";
@@ -260,7 +259,16 @@ export type CodexMobilePendingApproval = {
 
 export type CodexMobileTranscript = {
   threadId: string;
+  resolvedThreadId?: string;
   messages: BridgeSessionMessage[];
+  outboundMessages?: Array<BridgeSessionMessage & {
+    clientId: string;
+    pending: true;
+    status: MobileMessageOutboxStatus;
+    attempts?: number;
+    lastError?: string;
+    queuedMessageId?: string;
+  }>;
   messagePage?: {
     start?: number;
     end?: number;
@@ -282,6 +290,7 @@ export function createCodexMobileTranscriptRevision(
     CodexMobileTranscript,
     | "threadId"
     | "messages"
+    | "outboundMessages"
     | "progressItems"
     | "queuedMessages"
     | "runSummary"
@@ -307,6 +316,19 @@ export function createCodexMobileTranscriptRevision(
             : [image.source, image.url, image.alt ?? ""]),
         }
       : null,
+    outboundMessages: (transcript.outboundMessages ?? []).map((message) => ({
+      clientId: message.clientId,
+      text: message.text,
+      status: message.status,
+      attempts: message.attempts ?? 0,
+      lastError: message.lastError ?? "",
+      turnId: message.turnId ?? "",
+      createdAtMs: message.createdAtMs ?? 0,
+      queuedMessageId: message.queuedMessageId ?? "",
+      images: (message.images ?? []).map((image) => image.source === "local"
+        ? [image.source, image.path, image.alt ?? ""]
+        : [image.source, image.url, image.alt ?? ""]),
+    })),
     progressItems: (transcript.progressItems ?? []).map((item) => ({
       id: item.id,
       turnId: item.turnId ?? "",
@@ -1020,27 +1042,12 @@ function createRequestHandler(
     maxSize: 512,
     ttlMs: 60 * 60_000,
   });
-  const messageDeliveries = new BoundedTtlMap<string, CodexMobileMessageDelivery>({
-    maxSize: 1_024,
-    ttlMs: 15 * 60_000,
-  });
   const taskCreationRequests = new BoundedTtlMap<
     string,
     Promise<CodexMobileTask>
   >({
     maxSize: 128,
     ttlMs: 15 * 60_000,
-  });
-  const messageDeliveryKey = (
-    adapter: string | undefined,
-    threadId: string,
-    clientId: string,
-  ): string => `${adapter ?? "codex"}\0${threadId}\0${clientId}`;
-  const messageDeliveryPayload = (delivery: CodexMobileMessageDelivery) => ({
-    clientId: delivery.clientId,
-    status: delivery.status,
-    ...(delivery.result ?? {}),
-    ...(delivery.error ? { error: delivery.error } : {}),
   });
   const registerOutputImage = (
     threadId: string,
@@ -1823,31 +1830,6 @@ function createRequestHandler(
         return;
       }
 
-      const messageDeliveryRoute = url.pathname.match(
-        /^\/api\/tasks\/([^/]+)\/message-deliveries\/([^/]+)$/,
-      );
-      if (method === "GET" && messageDeliveryRoute?.[1] && messageDeliveryRoute[2]) {
-        const requestedThreadId = decodeURIComponent(messageDeliveryRoute[1]).trim();
-        const clientId = decodeURIComponent(messageDeliveryRoute[2]).trim();
-        if (!requestedThreadId || !clientId) {
-          throw new HttpError(400, "消息发送标识无效。");
-        }
-        const threadId = /^[0-9a-f]{8}$/i.test(requestedThreadId)
-          ? resolveTaskBySelector(
-              await options.listTasks(requestedAdapter),
-              requestedThreadId,
-            ).threadId
-          : requestedThreadId;
-        const delivery = messageDeliveries.get(
-          messageDeliveryKey(requestedAdapter, threadId, clientId),
-        );
-        if (!delivery) {
-          throw new HttpError(404, "还没有找到这条消息的发送记录。");
-        }
-        sendJson(response, 200, messageDeliveryPayload(delivery));
-        return;
-      }
-
       const messageRoute = url.pathname.match(/^\/api\/tasks\/([^/]+)\/messages$/);
       const syncStateRoute = url.pathname.match(/^\/api\/tasks\/([^/]+)\/sync-state$/);
       if (method === "GET" && syncStateRoute?.[1]) {
@@ -1911,6 +1893,11 @@ function createRequestHandler(
             transcript.threadId,
             requestedAdapter,
           );
+          const outboundMessages = exposeMessageImages(
+            transcript.outboundMessages ?? [],
+            transcript.threadId,
+            requestedAdapter,
+          );
           const messagePage = transcript.messagePage ?? {
             start: fallbackPage?.start ?? 0,
             end: fallbackPage?.end ?? messages.length,
@@ -1921,7 +1908,11 @@ function createRequestHandler(
           sendJson(response, 200, {
             task: null,
             threadId: transcript.threadId,
+            ...(transcript.resolvedThreadId
+              ? { resolvedThreadId: transcript.resolvedThreadId }
+              : {}),
             messages,
+            outboundMessages,
             messagePage,
             progressItems: transcript.progressItems ?? [],
             queuedMessages: transcript.queuedMessages,
@@ -1942,81 +1933,35 @@ function createRequestHandler(
           const body = await readJsonBody(request, MOBILE_MESSAGE_BODY_BYTES_LIMIT);
           const text = typeof body.text === "string" ? body.text : "";
           const images = parseCodexMobileImages(body.images);
+          const requestedClientId = typeof body.clientId === "string"
+            ? body.clientId.trim()
+            : "";
+          const clientId = requestedClientId || `legacy-${crypto.randomUUID()}`;
+          if (clientId.length > 160 || !/^[A-Za-z0-9._~-]+$/.test(clientId)) {
+            throw new HttpError(400, "消息标识无效，请刷新页面后重试。");
+          }
           if (!text.trim() && images.length === 0) {
             throw new HttpError(400, "请输入文字或添加图片。");
           }
           if (Array.from(text).length > 20_000) {
             throw new HttpError(413, "消息不能超过 20000 个字符。");
           }
-          const clientId = typeof body.clientId === "string"
-            ? body.clientId.trim()
-            : "";
-          if (clientId) {
-            if (!/^[A-Za-z0-9_-]{8,128}$/.test(clientId)) {
-              throw new HttpError(400, "消息发送标识无效。");
-            }
-            const requestHash = crypto.createHash("sha256")
-              .update(text)
-              .update("\0")
-              .update(images.map((image) => [
-                image.fileName,
-                image.mimeType,
-                crypto.createHash("sha256").update(image.data).digest("hex"),
-              ]).flat().join("\0"))
-              .digest("hex");
-            const deliveryKey = messageDeliveryKey(
-              requestedAdapter,
-              threadId,
-              clientId,
-            );
-            const existing = messageDeliveries.get(deliveryKey);
-            if (existing) {
-              if (existing.requestHash !== requestHash) {
-                throw new HttpError(409, "这条消息的发送标识已经用于其他内容。");
-              }
-              sendJson(response, 202, { ok: true, ...messageDeliveryPayload(existing) });
-              return;
-            }
-            const delivery: CodexMobileMessageDelivery = {
-              clientId,
-              threadId,
-              ...(requestedAdapter ? { adapter: requestedAdapter } : {}),
-              requestHash,
-              status: "forwarding",
-            };
-            messageDeliveries.set(deliveryKey, delivery);
-            void options.sendMessage(threadId, { text, images }, requestedAdapter).then(
-              (result) => {
-                messageDeliveries.set(deliveryKey, {
-                  ...delivery,
-                  status: result.duplicate
-                    ? "duplicate"
-                    : result.queued
-                      ? "queued"
-                      : "sent",
-                  result,
-                });
-              },
-              (error: unknown) => {
-                messageDeliveries.set(deliveryKey, {
-                  ...delivery,
-                  status: "failed",
-                  error: error instanceof Error ? error.message : "消息发送失败。",
-                });
-              },
-            );
-            sendJson(response, 202, {
-              ok: true,
-              clientId,
-              status: "forwarding",
-            });
-            return;
-          }
           let result: CodexMobileSendResult;
           try {
             result = await options.sendMessage(
               threadId,
-              { text, images },
+              {
+                clientId,
+                text,
+                images,
+                ...(typeof body.createdAtMs === "number" && Number.isFinite(body.createdAtMs)
+                  ? { createdAtMs: body.createdAtMs }
+                  : {}),
+                ...(body.retry === true ? { retry: true } : {}),
+                ...(typeof body.createTaskSourceThreadId === "string"
+                  ? { createTaskSourceThreadId: body.createTaskSourceThreadId.trim() }
+                  : {}),
+              },
               requestedAdapter,
             );
           } catch (error) {

@@ -199,6 +199,13 @@ import {
 import { CodexMobileAuthStore } from "./codex-mobile-auth.ts";
 import { MobileMessageImageStore } from "./mobile-message-image-store.ts";
 import {
+  MobileMessageOutbox,
+  computeMobileMessageRetryDelayMs,
+  formatMobileMessageFailureNotice,
+  mobileMessageOutboxEntryToUserMessage,
+  type MobileMessageOutboxEntry,
+} from "./mobile-message-outbox.ts";
+import {
   buildMobileProviderSettings,
   MobileProviderInstallManager,
 } from "./mobile-provider-settings.ts";
@@ -217,6 +224,7 @@ import {
   type CodexMobileTaskBoard,
   type CodexMobileTaskStatus,
   type CodexMobileSettings,
+  type CodexMobileTranscript,
 } from "./codex-mobile-server.ts";
 import {
   startWeRelayRelayClient,
@@ -626,6 +634,8 @@ const WECHAT_GENERATED_IMAGE_KEY_CACHE_MAX_SIZE = 1_024;
 const APPROVAL_NOTIFICATION_KEY_CACHE_MAX_SIZE = 512;
 const MOBILE_CREATED_TASK_CACHE_MAX_SIZE = 256;
 const MOBILE_CREATED_TASK_CACHE_TTL_MS = 15 * 60_000;
+const MOBILE_MESSAGE_OUTBOX_MAX_ATTEMPTS = 5;
+const MOBILE_MESSAGE_FAILURE_NOTIFICATION_RETRY_MS = 30_000;
 const SINGLE_BRIDGE_STOP_TIMEOUT_MS = 10_000;
 const SINGLE_BRIDGE_FORCE_STOP_TIMEOUT_MS = 3_000;
 const SINGLE_BRIDGE_STOP_POLL_MS = 250;
@@ -2837,6 +2847,7 @@ class WeRelayDaemon {
   private readonly deferredInputStore: CodexDeferredInputStore;
   private readonly mobileMessageImageStore: MobileMessageImageStore;
   private readonly wechatImageDrafts = new WechatImageDraftCollector();
+  private readonly mobileMessageOutbox: MobileMessageOutbox;
   private readonly allowDesktopApplicationLaunch: boolean;
   private readonly mobileProviderInstallManager = new MobileProviderInstallManager();
   private readonly slots = new Map<DaemonAdapterKind, DaemonSlot>();
@@ -2878,6 +2889,8 @@ class WeRelayDaemon {
   private deskRelayRelayTaskLinks: WeRelayRelayTaskLinkClient | null = null;
   private codexTaskMonitorTimer: ReturnType<typeof setTimeout> | null = null;
   private codexTaskMonitorRunning = false;
+  private mobileMessageOutboxTimer: ReturnType<typeof setTimeout> | null = null;
+  private mobileMessageOutboxRunning = false;
   private readonly codexTaskObservations = new BoundedTtlMap<string, CodexTaskObservation>({
     maxSize: CODEX_TASK_OBSERVATION_CACHE_MAX_SIZE,
     ttlMs: DAEMON_TRANSIENT_CACHE_TTL_MS,
@@ -2924,6 +2937,7 @@ class WeRelayDaemon {
       params.allowDesktopApplicationLaunch === true;
     this.deferredInputStore = new CodexDeferredInputStore(params.cwd);
     this.mobileMessageImageStore = new MobileMessageImageStore(params.cwd);
+    this.mobileMessageOutbox = new MobileMessageOutbox({ cwd: params.cwd });
     this.codexCompletionDeliveries = new CodexCompletionDeliveryQueue({
       initial: params.stateStore.getCodexCompletionDeliveryState(),
       persist: (state) => params.stateStore.setCodexCompletionDeliveryState(state),
@@ -3115,7 +3129,7 @@ class WeRelayDaemon {
         readMessages: (threadId, options, adapter) =>
           this.readMobileMessages(threadId, options, adapter),
         sendMessage: (threadId, input, adapter) =>
-          this.sendMobileMessage(threadId, input, adapter),
+          Promise.resolve(this.acceptMobileMessage(threadId, input, adapter)),
         resolveApproval: (threadId, action, adapter) =>
           this.resolveMobileApproval(threadId, action, adapter),
         updateQueuedMessage: (threadId, messageId, text, adapter) =>
@@ -3126,6 +3140,7 @@ class WeRelayDaemon {
           this.steerMobileQueuedMessage(threadId, messageId, adapter),
         stopTask: (threadId, adapter) => this.stopMobileTask(threadId, adapter),
       });
+      this.scheduleMobileMessageOutboxDrain(0);
       if (relayConfig) {
         this.deskRelayRelayClient = startWeRelayRelayClient({
           relayUrl: relayConfig.relayUrl,
@@ -3344,6 +3359,10 @@ class WeRelayDaemon {
     if (this.codexTaskMonitorTimer) {
       clearTimeout(this.codexTaskMonitorTimer);
       this.codexTaskMonitorTimer = null;
+    }
+    if (this.mobileMessageOutboxTimer) {
+      clearTimeout(this.mobileMessageOutboxTimer);
+      this.mobileMessageOutboxTimer = null;
     }
     if (this.deskRelayRelayClient) {
       const relayClient = this.deskRelayRelayClient;
@@ -6570,22 +6589,35 @@ class WeRelayDaemon {
     threadId: string,
     options: BridgeSessionMessagePageOptions = {},
     adapter?: string,
-  ): Promise<{
-    threadId: string;
-    messages: Awaited<ReturnType<NonNullable<BridgeAdapter["getSessionMessages"]>>>;
-    messagePage?: {
-      hasMore: boolean;
-      nextBefore: string | null;
-      source?: "native" | "openagentlog";
-      caughtUp?: boolean;
-    };
-    progressItems: BridgeSessionProgressItem[];
-    queuedMessages: CodexMobileQueuedMessage[];
-    runSummary: BridgeSessionRunSummary | null;
-    pendingApproval: CodexMobilePendingApproval | null;
-    approvalResults: CodexMobileApprovalResult[];
-  }> {
-    const slot = this.getMobileSlot(adapter);
+  ): Promise<CodexMobileTranscript> {
+    const requestedThreadId = threadId;
+    const resolvedAdapter = this.resolveMobileAdapter(adapter);
+    const resolvedThreadId = this.mobileMessageOutbox.resolveRequestedThread(
+      resolvedAdapter,
+      requestedThreadId,
+    );
+    if (requestedThreadId.startsWith("local-new-") && !resolvedThreadId) {
+      return {
+        threadId: requestedThreadId,
+        messages: [],
+        outboundMessages: this.mobileMessageOutbox
+          .list(resolvedAdapter, requestedThreadId)
+          .map(mobileMessageOutboxEntryToUserMessage),
+        messagePage: {
+          hasMore: false,
+          nextBefore: null,
+          source: "native",
+          caughtUp: true,
+        },
+        progressItems: [],
+        queuedMessages: [],
+        runSummary: null,
+        pendingApproval: null,
+        approvalResults: [],
+      };
+    }
+    const activeThreadId = resolvedThreadId ?? requestedThreadId;
+    const slot = this.getMobileSlot(resolvedAdapter);
     const label = formatDaemonAdapterLabel(slot.adapter);
     if (!slot.runtime.getSessionMessages && !slot.runtime.getSessionMessagePage) {
       throw new Error(`当前 ${label} 连接暂不支持读取完整消息。`);
@@ -6593,8 +6625,8 @@ class WeRelayDaemon {
     const readNativeMessagePage = (
       readOptions: BridgeSessionMessagePageOptions = options,
     ) => slot.runtime.getSessionMessagePage
-      ? slot.runtime.getSessionMessagePage(threadId, readOptions)
-      : slot.runtime.getSessionMessages!(threadId).then((messages) => ({
+      ? slot.runtime.getSessionMessagePage(activeThreadId, readOptions)
+      : slot.runtime.getSessionMessages!(activeThreadId).then((messages) => ({
           messages,
           hasMore: false,
           nextBefore: null,
@@ -6602,7 +6634,7 @@ class WeRelayDaemon {
     const messagePagePromise = (async () => {
       const accelerated = await this.openAgentLogHistory.readPage(
         slot.adapter,
-        threadId,
+        activeThreadId,
         options,
       );
       if (accelerated) {
@@ -6630,14 +6662,14 @@ class WeRelayDaemon {
         if (slot.runtime.getSessionMessageMedia) {
           try {
             const nativeMessages = await slot.runtime.getSessionMessageMedia(
-              threadId,
+              activeThreadId,
               options,
               messages,
             );
             messages = mergeBridgeMessageMedia(messages, nativeMessages);
           } catch (error) {
             appendDaemonLog(
-              `mobile_history_media_error: adapter=${slot.adapter} thread=${threadId} error=${truncatePreview(error instanceof Error ? error.message : String(error), 400)}`,
+              `mobile_history_media_error: adapter=${slot.adapter} thread=${activeThreadId} error=${truncatePreview(error instanceof Error ? error.message : String(error), 400)}`,
             );
           }
         }
@@ -6646,7 +6678,7 @@ class WeRelayDaemon {
           0,
         );
         appendDaemonLog(
-          `mobile_history_accelerated: adapter=${slot.adapter} thread=${threadId} messages=${messages.length} images=${imageCount}`,
+          `mobile_history_accelerated: adapter=${slot.adapter} thread=${activeThreadId} messages=${messages.length} images=${imageCount}`,
         );
         return { ...accelerated, messages };
       }
@@ -6658,7 +6690,7 @@ class WeRelayDaemon {
       };
     })().catch((error) => {
           appendDaemonLog(
-            `mobile_messages_error: adapter=${slot.adapter} thread=${threadId} error=${truncatePreview(error instanceof Error ? error.stack ?? error.message : String(error), 800)}`,
+            `mobile_messages_error: adapter=${slot.adapter} thread=${activeThreadId} error=${truncatePreview(error instanceof Error ? error.stack ?? error.message : String(error), 800)}`,
           );
           throw error;
         });
@@ -6666,39 +6698,51 @@ class WeRelayDaemon {
     const [messagePage, runSummary, progressItems] = await Promise.all([
       messagePagePromise,
       !historyOnly && slot.runtime.getSessionRunSummary
-        ? slot.runtime.getSessionRunSummary(threadId, {
+        ? slot.runtime.getSessionRunSummary(activeThreadId, {
             lightweight: options.lightweight,
           }).catch((error) => {
             appendDaemonLog(
-              `mobile_summary_error: adapter=${slot.adapter} thread=${threadId} error=${truncatePreview(error instanceof Error ? error.message : String(error), 400)}`,
+              `mobile_summary_error: adapter=${slot.adapter} thread=${activeThreadId} error=${truncatePreview(error instanceof Error ? error.message : String(error), 400)}`,
             );
             return null;
           })
         : Promise.resolve(null),
       !historyOnly && slot.runtime.getSessionProgress
-        ? slot.runtime.getSessionProgress(threadId, {
+        ? slot.runtime.getSessionProgress(activeThreadId, {
             lightweight: options.lightweight,
           }).catch((error) => {
             appendDaemonLog(
-              `mobile_progress_error: adapter=${slot.adapter} thread=${threadId} error=${truncatePreview(error instanceof Error ? error.message : String(error), 400)}`,
+              `mobile_progress_error: adapter=${slot.adapter} thread=${activeThreadId} error=${truncatePreview(error instanceof Error ? error.message : String(error), 400)}`,
             );
             return [];
           })
         : Promise.resolve([]),
     ]);
-    const activeTask = this.getSlotActiveTask(slot, threadId);
+    const activeTask = this.getSlotActiveTask(slot, activeThreadId);
     const visibleMessages = messagePage.messages.flatMap((message) => {
       const visible = sanitizeDaemonVisibleSessionMessage(slot.adapter, message);
       return visible
         ? [enrichBridgeSessionMessageImages(visible, { cwd: this.cwd })]
         : [];
     });
+    const enrichedMessages = this.mobileMessageImageStore.enrich(visibleMessages, {
+      adapter: slot.adapter,
+      threadId: activeThreadId,
+    });
+    const queuedMessages = slot.runtime.getQueuedTaskInputs?.(activeThreadId) ?? [];
+    if (!historyOnly) {
+      this.mobileMessageOutbox.reconcile(slot.adapter, requestedThreadId, {
+        messages: enrichedMessages,
+        queuedMessages,
+      });
+    }
     return {
-      threadId,
-      messages: this.mobileMessageImageStore.enrich(visibleMessages, {
-        adapter: slot.adapter,
-        threadId,
-      }),
+      threadId: requestedThreadId,
+      ...(resolvedThreadId ? { resolvedThreadId } : {}),
+      messages: enrichedMessages,
+      outboundMessages: this.mobileMessageOutbox
+        .list(slot.adapter, requestedThreadId)
+        .map(mobileMessageOutboxEntryToUserMessage),
       messagePage: {
         hasMore: messagePage.hasMore,
         nextBefore: messagePage.nextBefore,
@@ -6716,11 +6760,11 @@ class WeRelayDaemon {
           : {}),
         runSummary,
       }),
-      queuedMessages: slot.runtime.getQueuedTaskInputs?.(threadId) ?? [],
+      queuedMessages,
       runSummary,
-      pendingApproval: this.getMobilePendingApproval(slot, threadId),
+      pendingApproval: this.getMobilePendingApproval(slot, activeThreadId),
       approvalResults: this.stateStore
-        .getMobileApprovalResults(slot.adapter, threadId)
+        .getMobileApprovalResults(slot.adapter, activeThreadId)
         .map(({ adapter: _adapter, threadId: _threadId, ...result }) => result),
     };
   }
@@ -6906,21 +6950,254 @@ class WeRelayDaemon {
     return interrupted;
   }
 
-  private async sendMobileMessage(
+  private acceptMobileMessage(
     threadId: string,
     input: CodexMobileMessageInput,
     adapter?: string,
-  ): Promise<{
+  ): {
     queued: boolean;
+    accepted: true;
     duplicate?: boolean;
+    messageId: string;
+    status: MobileMessageOutboxEntry["status"];
+    threadId: string;
     queuedMessageId?: string;
     queuePosition?: number;
     turnId?: string;
-  }> {
-    const slot = this.getMobileSlot(adapter);
+  } {
+    const resolvedAdapter = this.resolveMobileAdapter(adapter);
+    const resolvedThreadId = this.mobileMessageOutbox.resolveRequestedThread(
+      resolvedAdapter,
+      threadId,
+    );
+    const activeThreadId = resolvedThreadId ?? threadId;
+    const existing = this.mobileMessageOutbox.get(
+      resolvedAdapter,
+      threadId,
+      input.clientId,
+    );
+    if (existing) {
+      if (input.retry && existing.status === "failed") {
+        this.mobileMessageOutbox.retry(
+          resolvedAdapter,
+          threadId,
+          input.clientId,
+          Date.now(),
+        );
+      }
+      const current = this.mobileMessageOutbox.get(
+        resolvedAdapter,
+        threadId,
+        input.clientId,
+      ) ?? existing;
+      this.scheduleMobileMessageOutboxDrain(0);
+      return this.mobileMessageAcceptanceResult(current, true);
+    }
+
+    const images = this.persistMobileImages(input);
+    const accepted = this.mobileMessageOutbox.accept({
+      clientId: input.clientId,
+      adapter: resolvedAdapter,
+      threadId: activeThreadId,
+      ...(resolvedThreadId ? { originalThreadId: threadId } : {}),
+      ...(input.createTaskSourceThreadId
+        ? { createTaskSourceThreadId: input.createTaskSourceThreadId }
+        : {}),
+      text: input.text,
+      images,
+      ...(input.createdAtMs ? { createdAtMs: input.createdAtMs } : {}),
+    });
+    appendDaemonLog(
+      `mobile_message_accepted: adapter=${resolvedAdapter} thread=${threadId} client=${input.clientId} images=${images.length} text=${truncatePreview(input.text)}`,
+    );
+    this.scheduleMobileMessageOutboxDrain(0);
+    return this.mobileMessageAcceptanceResult(accepted.entry, accepted.duplicate);
+  }
+
+  private mobileMessageAcceptanceResult(
+    entry: MobileMessageOutboxEntry,
+    duplicate: boolean,
+  ): {
+    queued: boolean;
+    accepted: true;
+    duplicate?: boolean;
+    messageId: string;
+    status: MobileMessageOutboxEntry["status"];
+    threadId: string;
+    queuedMessageId?: string;
+    queuePosition?: number;
+    turnId?: string;
+  } {
+    return {
+      queued: entry.status === "queued",
+      accepted: true,
+      ...(duplicate ? { duplicate: true } : {}),
+      messageId: entry.clientId,
+      status: entry.status,
+      threadId: entry.threadId,
+      ...(entry.queuedMessageId ? { queuedMessageId: entry.queuedMessageId } : {}),
+      ...(entry.queuePosition ? { queuePosition: entry.queuePosition } : {}),
+      ...(entry.turnId ? { turnId: entry.turnId } : {}),
+    };
+  }
+
+  private scheduleMobileMessageOutboxDrain(delayMs: number): void {
+    if (this.shutdownPromise) return;
+    if (this.mobileMessageOutboxTimer) {
+      clearTimeout(this.mobileMessageOutboxTimer);
+    }
+    this.mobileMessageOutboxTimer = setTimeout(() => {
+      this.mobileMessageOutboxTimer = null;
+      void this.drainMobileMessageOutbox();
+    }, Math.max(0, delayMs));
+    this.mobileMessageOutboxTimer.unref?.();
+  }
+
+  private async drainMobileMessageOutbox(): Promise<void> {
+    if (this.shutdownPromise || this.mobileMessageOutboxRunning) return;
+    this.mobileMessageOutboxRunning = true;
+    let notificationFailed = false;
+    try {
+      const ready = this.mobileMessageOutbox.readyEntries(Date.now());
+      for (const entry of ready) {
+        await this.dispatchMobileMessageOutboxEntry(entry);
+      }
+      notificationFailed = !await this.deliverMobileMessageFailureNotifications();
+    } finally {
+      this.mobileMessageOutboxRunning = false;
+      if (!this.shutdownPromise) {
+        const readyNow = this.mobileMessageOutbox.readyEntries(Date.now());
+        const nextAttemptAtMs = this.mobileMessageOutbox.nextAttemptAtMs();
+        const retryNotifications = notificationFailed ||
+          this.mobileMessageOutbox.pendingFailureNotifications().length > 0;
+        const nextDelayMs = readyNow.length > 0
+          ? 0
+          : nextAttemptAtMs !== null
+            ? Math.max(50, nextAttemptAtMs - Date.now())
+            : retryNotifications
+              ? MOBILE_MESSAGE_FAILURE_NOTIFICATION_RETRY_MS
+              : null;
+        if (nextDelayMs !== null) {
+          this.scheduleMobileMessageOutboxDrain(nextDelayMs);
+        }
+      }
+    }
+  }
+
+  private async dispatchMobileMessageOutboxEntry(
+    initialEntry: MobileMessageOutboxEntry,
+  ): Promise<void> {
+    this.mobileMessageOutbox.markSending(
+      initialEntry.adapter,
+      initialEntry.threadId,
+      initialEntry.clientId,
+      Date.now(),
+    );
+    let entry = this.mobileMessageOutbox.get(
+      initialEntry.adapter,
+      initialEntry.threadId,
+      initialEntry.clientId,
+    ) ?? initialEntry;
+    try {
+      const adapter = this.resolveMobileAdapter(entry.adapter);
+      if (!this.slots.has(adapter)) {
+        await this.ensureSlot(adapter, {
+          openVisible: true,
+          reuseExistingVisible: true,
+          activate: false,
+        });
+      }
+      if (entry.threadId.startsWith("local-new-")) {
+        const created = await this.createMobileTask(
+          adapter,
+          entry.createTaskSourceThreadId,
+        );
+        this.mobileMessageOutbox.resolveThread(
+          adapter,
+          entry.threadId,
+          entry.clientId,
+          created.threadId,
+        );
+        entry = this.mobileMessageOutbox.get(
+          adapter,
+          entry.threadId,
+          entry.clientId,
+        ) ?? { ...entry, originalThreadId: entry.threadId, threadId: created.threadId };
+      }
+
+      const result = await this.dispatchPersistedMobileMessage(entry);
+      if (result?.queued) {
+        this.mobileMessageOutbox.markQueued(
+          entry.adapter,
+          entry.threadId,
+          entry.clientId,
+          {
+            ...(result.queuedMessageId
+              ? { queuedMessageId: result.queuedMessageId }
+              : {}),
+            ...(result.queuePosition ? { queuePosition: result.queuePosition } : {}),
+            ...(result.turnId ? { turnId: result.turnId } : {}),
+            submittedAtMs: Date.now(),
+          },
+        );
+      } else {
+        this.mobileMessageOutbox.markSubmitted(
+          entry.adapter,
+          entry.threadId,
+          entry.clientId,
+          {
+            ...(result?.turnId ? { turnId: result.turnId } : {}),
+            submittedAtMs: Date.now(),
+          },
+        );
+      }
+      appendDaemonLog(
+        `mobile_message_submitted: adapter=${entry.adapter} thread=${entry.threadId} client=${entry.clientId} queued=${Boolean(result?.queued)} duplicate=${Boolean(result?.duplicate)}`,
+      );
+    } catch (error) {
+      const errorText = error instanceof Error ? error.message : String(error);
+      const current = this.mobileMessageOutbox.get(
+        entry.adapter,
+        entry.threadId,
+        entry.clientId,
+      );
+      const attempts = current?.attempts ?? entry.attempts + 1;
+      if (attempts >= MOBILE_MESSAGE_OUTBOX_MAX_ATTEMPTS) {
+        this.mobileMessageOutbox.markFailed(
+          entry.adapter,
+          entry.threadId,
+          entry.clientId,
+          errorText,
+        );
+        appendDaemonLog(
+          `mobile_message_failed: adapter=${entry.adapter} thread=${entry.threadId} client=${entry.clientId} attempts=${attempts} error=${truncatePreview(errorText, 400)}`,
+        );
+        return;
+      }
+      const delayMs = computeMobileMessageRetryDelayMs(attempts);
+      this.mobileMessageOutbox.markRetrying(
+        entry.adapter,
+        entry.threadId,
+        entry.clientId,
+        {
+          error: errorText,
+          nextAttemptAtMs: Date.now() + delayMs,
+        },
+      );
+      appendDaemonLog(
+        `mobile_message_retry_scheduled: adapter=${entry.adapter} thread=${entry.threadId} client=${entry.clientId} attempt=${attempts} delay_ms=${delayMs} error=${truncatePreview(errorText, 400)}`,
+      );
+    }
+  }
+
+  private async dispatchPersistedMobileMessage(
+    entry: MobileMessageOutboxEntry,
+  ): Promise<BridgeSessionSendResult | void> {
+    const slot = this.getMobileSlot(entry.adapter);
     if (!slot.runtime.sendInputToSession) {
       throw new Error(`当前 ${formatDaemonAdapterLabel(slot.adapter)} 连接暂不支持向指定任务发送消息。`);
     }
+    const threadId = entry.threadId;
     const createdTaskKey = `${slot.adapter}\0${threadId}`;
     const currentThreadId = this.getSlotThreadId(slot);
     const recentlyCreated = this.mobileCreatedTaskKeys.has(createdTaskKey);
@@ -6938,51 +7215,75 @@ class WeRelayDaemon {
     })) {
       throw new Error(`没有找到这个 ${formatDaemonAdapterLabel(slot.adapter)} 任务。`);
     }
-    const imagePaths = this.persistMobileImages(input);
-    let result: BridgeSessionSendResult | void;
-    try {
-      result = await this.dispatchMobileInput(
-        slot,
-        threadId,
-        input.text,
-        imagePaths,
-      );
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      appendDaemonLog(
-        `mobile_input_send_error: adapter=${slot.adapter} thread=${threadId} images=${imagePaths.length} error=${truncatePreview(detail, 400)}`,
-      );
-      if (imagePaths.length > 0) {
-        appendDaemonLog(
-          `mobile_images_retained_after_send_error: adapter=${slot.adapter} thread=${threadId} images=${imagePaths.length}`,
-        );
-      }
-      throw error;
-    }
-    this.mobileConversationRevisions.touch(slot.adapter, threadId);
+    const imagePaths = entry.images.map((image) => image.path);
+    const result = await this.dispatchMobileInput(
+      slot,
+      threadId,
+      entry.text,
+      imagePaths,
+    );
     this.mobileCreatedTaskKeys.delete(createdTaskKey);
     if (!result?.duplicate && imagePaths.length > 0) {
       this.mobileMessageImageStore.remember({
         adapter: slot.adapter,
         threadId,
         ...(result?.turnId ? { turnId: result.turnId } : {}),
-        text: input.text,
-        images: imagePaths.map((imagePath, index) => ({
-          path: imagePath,
-          alt: input.images[index]?.fileName || path.basename(imagePath),
+        text: entry.text,
+        images: entry.images.map((image) => ({
+          path: image.path,
+          alt: image.fileName || path.basename(image.path),
         })),
       });
     }
-    return {
-      queued: result?.queued ?? false,
-      duplicate: result?.duplicate,
-      queuedMessageId: result?.queuedMessageId,
-      queuePosition: result?.queuePosition,
-      turnId: result?.turnId,
-    };
+    return result;
   }
 
-  private persistMobileImages(input: CodexMobileMessageInput): string[] {
+  private async deliverMobileMessageFailureNotifications(): Promise<boolean> {
+    for (const entry of this.mobileMessageOutbox.pendingFailureNotifications()) {
+      const adapter = this.resolveMobileAdapter(entry.adapter);
+      let title = `${formatDaemonAdapterLabel(adapter)} 任务`;
+      try {
+        title = (await this.listMobileTasks(adapter)).find(
+          (task) => task.threadId === entry.threadId,
+        )?.title ?? title;
+      } catch {
+        // The failure notice remains useful even when task metadata is unavailable.
+      }
+      const url = this.codexMobileServer?.buildTaskUrl(entry.threadId, entry.adapter);
+      try {
+        const sent = await this.queueWechatMessage(
+          this.authorizedUserId,
+          formatMobileMessageFailureNotice({
+            title,
+            text: entry.text,
+            error: entry.lastError ?? "电脑端暂时无法接收消息",
+            ...(url ? { url } : {}),
+          }),
+          "inbound_error",
+        );
+        if (!sent) return false;
+        this.mobileMessageOutbox.markFailureNotified(
+          entry.adapter,
+          entry.threadId,
+          entry.clientId,
+          Date.now(),
+        );
+        appendDaemonLog(
+          `mobile_message_failure_notified: adapter=${entry.adapter} thread=${entry.threadId} client=${entry.clientId}`,
+        );
+      } catch (error) {
+        appendDaemonLog(
+          `mobile_message_failure_notification_error: adapter=${entry.adapter} thread=${entry.threadId} client=${entry.clientId} error=${truncatePreview(error instanceof Error ? error.message : String(error), 400)}`,
+        );
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private persistMobileImages(
+    input: CodexMobileMessageInput,
+  ): MobileMessageOutboxEntry["images"] {
     if (input.images.length === 0) {
       return [];
     }
@@ -7004,7 +7305,11 @@ class WeRelayDaemon {
         `mobile-${Date.now()}-${randomUUID()}${extensionByMimeType[image.mimeType]}`,
       );
       writePrivateFileAtomic(filePath, image.data);
-      return filePath;
+      return {
+        path: filePath,
+        fileName: image.fileName || path.basename(filePath),
+        mimeType: image.mimeType,
+      };
     });
   }
 
@@ -7361,14 +7666,15 @@ class WeRelayDaemon {
   }
 
   private getSlotTaskKey(slot: DaemonSlot, threadId?: string): string {
-    if (slot.adapter !== "codex") {
+    const supportsSessions = getBridgeProvider(slot.adapter).capabilities.sessions;
+    if (!supportsSessions && slot.adapter !== "codex") {
       return "__adapter__";
     }
     return (
       threadId ??
       slot.runtime.getState().sharedThreadId ??
       slot.runtime.getState().sharedSessionId ??
-      "__codex__"
+      slot.adapter
     );
   }
 
@@ -7396,7 +7702,8 @@ class WeRelayDaemon {
     const activeTask = slot.activeTasks.get(key);
     if (
       activeTask &&
-      shouldClearCodexActiveTaskForCompletion(activeTask.turnId, turnId)
+      (slot.adapter !== "codex" ||
+        shouldClearCodexActiveTaskForCompletion(activeTask.turnId, turnId))
     ) {
       slot.activeTasks.delete(key);
     }

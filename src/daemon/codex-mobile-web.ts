@@ -13,7 +13,7 @@ export const CODEX_MOBILE_HTML = `<!doctype html>
   <section class="boot-screen" id="boot-screen" aria-label="正在打开 WeRelay">
     <div class="boot-content">
       <div class="boot-wordmark">WeRelay</div>
-      <div class="boot-activity" aria-hidden="true"><span></span><span></span><span></span></div>
+      <div class="boot-activity" role="status" aria-label="正在处理"><span class="solving-copy">正在处理</span><span class="solving-dots" aria-hidden="true"><span>·</span><span>·</span><span>·</span></span></div>
       <div class="boot-status" id="boot-status">正在检查电脑连接状态…</div>
       <div class="boot-detail" id="boot-detail">正在确认服务器和电脑是否在线。</div>
     </div>
@@ -170,6 +170,7 @@ export const CODEX_MOBILE_HTML = `<!doctype html>
         <div class="composer-queue" id="composer-queue" aria-live="polite" hidden></div>
         <input id="composer-image-input" type="file" hidden accept="image/png,image/jpeg,image/webp,image/gif" multiple>
         <div class="composer">
+          <div class="composer-beam" aria-hidden="true"><span class="composer-beam-bloom"></span></div>
           <div class="composer-media" id="composer-media" hidden></div>
           <textarea id="composer-input" rows="1" maxlength="20000" placeholder="有问题，尽管问"></textarea>
           <button class="composer-image-button" id="composer-image-button" type="button" aria-label="添加图片">
@@ -183,19 +184,12 @@ export const CODEX_MOBILE_HTML = `<!doctype html>
               </button>
               <div class="composer-model-menu" id="composer-model-menu" role="menu" hidden></div>
             </div>
-            <div class="composer-model-control" id="composer-reasoning-control" hidden>
-              <button class="composer-model-button" id="composer-reasoning-button" type="button" aria-haspopup="menu" aria-expanded="false">
-                <span id="composer-reasoning-label">推理</span>
+            <div class="composer-model-control" id="composer-session-control" hidden>
+              <button class="composer-model-button" id="composer-session-button" type="button" aria-haspopup="menu" aria-expanded="false">
+                <span id="composer-session-label">推理 · 权限</span>
                 <svg class="composer-model-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4.5 6 3.5 3.5L11.5 6"/></svg>
               </button>
-              <div class="composer-model-menu composer-reasoning-menu" id="composer-reasoning-menu" role="menu" hidden></div>
-            </div>
-            <div class="composer-model-control" id="composer-permission-control" hidden>
-              <button class="composer-model-button" id="composer-permission-button" type="button" aria-haspopup="menu" aria-expanded="false">
-                <span id="composer-permission-label">权限范围</span>
-                <svg class="composer-model-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4.5 6 3.5 3.5L11.5 6"/></svg>
-              </button>
-              <div class="composer-model-menu composer-permission-menu" id="composer-permission-menu" role="menu" hidden></div>
+              <div class="composer-model-menu composer-session-menu" id="composer-session-menu" role="menu" hidden></div>
             </div>
           </div>
           <button class="send-button" id="send-button" type="submit" aria-label="发送">
@@ -251,7 +245,7 @@ export const WE_RELAY_ABOUT_HTML = `<!doctype html>
 
   <main class="about-main">
     <section class="about-hero">
-      <div class="about-eyebrow">ONE REAL SESSION. EVERY SCREEN.</div>
+      <div class="about-eyebrow">同一条真实任务，延伸到每一块屏幕</div>
       <h1>让真实的 AI 编程任务<br>延伸到任何设备</h1>
       <p>WeRelay 连接电脑上的真实 Codex、Claude Code、Cursor 和其他编程 Agent 任务。微信、手机网页与其他入口只负责延伸这条任务，不复制会话，也不在后台创建一条看不见的分支。</p>
       <div class="about-actions">
@@ -346,13 +340,13 @@ export const WE_RELAY_ABOUT_HTML = `<!doctype html>
         <div class="about-section-index">05</div>
         <h2>本地优先</h2>
       </div>
-      <p>任务和 Agent 仍然运行在你的电脑上。WeRelay 只在你授权的入口之间传递必要的信息。移动网页使用独立访问密码；公网访问可通过 WeRelay 应用层主动 Relay 提供，电脑不需要暴露本地端口。</p>
+      <p>任务和 Agent 仍然运行在你的电脑上。WeRelay 只在你授权的入口之间传递必要的信息。移动网页使用独立访问密码；公网访问可通过 WeRelay 应用层主动中继提供，电脑不需要暴露本地端口。</p>
     </section>
 
     <footer class="about-footer">
       <div>
         <strong>WeRelay</strong>
-        <span>Your real coding-agent sessions, everywhere.</span>
+        <span>让真实的本地 Agent 任务，随时在你手边继续。</span>
       </div>
       <a href="/">返回任务</a>
     </footer>
@@ -443,11 +437,14 @@ button:focus-visible { outline: 2px solid var(--border-strong); outline-offset: 
 .boot-screen { min-height: 100dvh; display: grid; place-items: center; background: var(--canvas); }
 .boot-content { width: min(360px, calc(100vw - 48px)); display: grid; justify-items: center; gap: 9px; }
 .boot-wordmark { color: var(--text); font-size: 24px; font-weight: 650; letter-spacing: -0.035em; }
-.boot-activity { display: inline-flex; align-items: center; gap: 4px; height: 12px; margin: 6px 0 1px; }
-.boot-activity span { width: 4px; height: 4px; border-radius: 50%; background: var(--muted); animation: boot-activity-dot 1.2s ease-in-out infinite; }
-.boot-activity span:nth-child(2) { animation-delay: .16s; }
-.boot-activity span:nth-child(3) { animation-delay: .32s; }
-@keyframes boot-activity-dot { 0%, 60%, 100% { opacity: .28; transform: translateY(0); } 30% { opacity: .92; transform: translateY(-3px); } }
+.boot-activity { display: inline-flex; align-items: baseline; gap: 3px; min-height: 24px; margin: 8px 0 1px; color: var(--muted-strong); font-size: 14px; font-weight: 560; letter-spacing: -.01em; }
+.solving-copy { background: linear-gradient(100deg, var(--muted) 20%, var(--text) 48%, var(--muted) 76%); background-size: 220% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; animation: solving-shimmer 1.55s ease-in-out infinite; }
+.solving-dots { display: inline-flex; width: 18px; }
+.solving-dots span { display: inline-block; animation: solving-dot 1.15s ease-in-out infinite; }
+.solving-dots span:nth-child(2) { animation-delay: .14s; }
+.solving-dots span:nth-child(3) { animation-delay: .28s; }
+@keyframes solving-shimmer { 0% { background-position: 120% 0; } 100% { background-position: -120% 0; } }
+@keyframes solving-dot { 0%, 60%, 100% { opacity: .2; transform: translateY(0); } 30% { opacity: 1; transform: translateY(-1px); } }
 .boot-status { color: var(--text); font-size: 14px; font-weight: 570; line-height: 1.5; text-align: center; }
 .boot-detail { min-height: 40px; color: var(--muted); font-size: 12px; line-height: 1.65; text-align: center; text-wrap: balance; }
 .auth-screen { min-height: 100dvh; display: grid; place-items: center; padding: max(24px, env(safe-area-inset-top)) 20px max(24px, env(safe-area-inset-bottom)); background: var(--canvas); }
@@ -987,7 +984,7 @@ svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.75; stro
 .approval-result-detail { margin-top: 8px; }
 .approval-result-detail-label { margin-bottom: 4px; color: var(--muted); font-size: 10px; }
 .approval-result-detail pre { margin: 0; padding: 8px 10px; overflow-x: auto; border-radius: 9px; background: rgba(127,127,127,.055); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted-strong); font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-.message-row.user.pending .message-card { opacity: .76; }
+.message-row.user.pending .message-card { opacity: 1; }
 .message-row.user.failed .message-card { border: 1px solid rgba(208,14,23,.22); }
 .message-delivery { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 5px; color: var(--muted); font-size: 10px; line-height: 1.3; }
 .message-delivery.failed { color: var(--red); }
@@ -1009,12 +1006,13 @@ svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.75; stro
 body.image-viewer-open { overflow: hidden; }
 .message-retry { padding: 0; border: 0; background: transparent; color: inherit; font-size: inherit; font-weight: 650; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
 .message-content { -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; }
-.response-pending { width: min(100%, var(--thread-max)); display: flex; align-items: center; gap: 4px; margin: -8px auto 20px; padding-left: 2px; color: var(--muted); }
-.response-pending-dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; opacity: .28; animation: response-pending-dot 1.15s ease-in-out infinite; }
-.response-pending-dot:nth-child(2) { animation-delay: .16s; }
-.response-pending-dot:nth-child(3) { animation-delay: .32s; }
-@keyframes response-pending-dot { 0%, 60%, 100% { opacity: .24; transform: translateY(0); } 30% { opacity: .9; transform: translateY(-3px); } }
-@media (prefers-reduced-motion: reduce) { .response-pending-dot { animation: none; opacity: .5; } }
+.response-pending { width: min(100%, var(--thread-max)); display: inline-flex; align-items: baseline; gap: 3px; margin: -8px auto 20px; padding-left: 2px; color: var(--muted); font-size: 13px; font-weight: 520; }
+.agent-planning-copy { background: linear-gradient(100deg, var(--muted) 20%, var(--text) 48%, var(--muted) 76%); background-size: 220% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; animation: solving-shimmer 1.55s ease-in-out infinite; }
+.agent-planning-dots { display: inline-flex; width: 18px; }
+.agent-planning-dots span { display: inline-block; animation: solving-dot 1.15s ease-in-out infinite; }
+.agent-planning-dots span:nth-child(2) { animation-delay: .14s; }
+.agent-planning-dots span:nth-child(3) { animation-delay: .28s; }
+@media (prefers-reduced-motion: reduce) { .solving-copy, .agent-planning-copy, .solving-dots span, .agent-planning-dots span { animation: none; color: var(--muted); background: none; opacity: 1; transform: none; } }
 .message-content > :first-child { margin-top: 0; }
 .message-content > :last-child { margin-bottom: 0; }
 .message-content p { margin: 0 0 10px; }
@@ -1034,6 +1032,11 @@ body.image-viewer-open { overflow: hidden; }
 .message-code-fold[open] .message-code-fold-closed { display: none; }
 .message-code-fold[open] .message-code-fold-open { display: inline; }
 .message-code-fold-action { flex: 0 0 auto; color: var(--muted); font-size: 11px; }
+.message-tools-group { overflow: hidden; margin: 14px 0; border: 1px dashed var(--border); border-radius: 12px; background: transparent; }
+.message-tools-group > summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 36px; padding: 0 13px; cursor: pointer; list-style: none; color: var(--muted); font-size: 12px; line-height: 1.4; }
+.message-tools-group > summary::-webkit-details-marker { display: none; }
+.message-tools-group-items { padding: 0 10px 10px; }
+.message-tools-group-items .message-code-fold { margin: 10px 0 0; }
 .message-content a { color: #0b57d0; text-decoration: underline; text-decoration-color: rgba(11, 87, 208, 0.32); text-underline-offset: 2px; }
 .message-content hr { height: 1px; margin: 22px 0; border: 0; background: var(--border); }
 .message-content img { max-width: 100%; height: auto; border-radius: 12px; }
@@ -1075,11 +1078,15 @@ body.image-viewer-open { overflow: hidden; }
 .composer-model-chevron { width: 14px; height: 14px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.6; }
 .composer-model-button.is-readonly .composer-model-chevron { display: none; }
 .composer-model-menu { position: absolute; left: 0; bottom: calc(100% + 8px); width: fit-content; max-width: min(420px, calc(100vw - 48px)); min-width: 148px; max-height: min(360px, 52vh); overflow: auto; padding: 5px; border: 1px solid var(--border); border-radius: 13px; background: var(--page); box-shadow: var(--shadow); z-index: 30; }
-.composer-reasoning-menu { left: auto; right: 0; width: fit-content; max-width: min(280px, calc(100vw - 48px)); min-width: 96px; }
-.composer-permission-menu { left: auto; right: 0; width: fit-content; max-width: min(360px, calc(100vw - 48px)); min-width: 96px; }
+.composer-session-menu { left: auto; right: 0; width: fit-content; max-width: min(360px, calc(100vw - 48px)); min-width: 188px; }
+.composer-permission-option .composer-model-option-label { white-space: nowrap; overflow-wrap: normal; }
 .composer-model-menu[hidden] { display: none; }
 .composer-model-group { padding: 7px 9px 3px; color: var(--muted); font-size: 11px; font-weight: 560; letter-spacing: .02em; white-space: nowrap; user-select: none; -webkit-user-select: none; pointer-events: none; }
 .composer-model-group:not(:first-child) { margin-top: 3px; border-top: 1px solid var(--border); }
+.composer-model-back { width: 100%; min-height: 38px; display: inline-flex; align-items: center; gap: 6px; padding: 6px 9px; margin-bottom: 3px; border: 0; border-radius: 9px; border-bottom: 1px solid var(--border); background: transparent; color: var(--muted-strong); font: inherit; font-size: 12px; font-weight: 560; cursor: pointer; }
+.composer-model-back:hover { background: var(--surface); color: var(--text); }
+.composer-model-chevron-left { transform: rotate(90deg); }
+.composer-model-chevron-right { transform: rotate(-90deg); }
 .composer-model-option { width: 100%; min-height: 44px; display: grid; grid-template-columns: minmax(0, 1fr) 18px; gap: 10px; align-items: center; padding: 7px 9px; border: 0; border-radius: 9px; background: transparent; color: var(--text); font: inherit; text-align: left; cursor: pointer; }
 .composer-model-option:hover { background: var(--surface); }
 .composer-model-option:disabled { opacity: .48; cursor: wait; }
@@ -1103,8 +1110,18 @@ body.image-viewer-open { overflow: hidden; }
 .queued-followup-action:focus-visible { box-shadow: inset 0 0 0 2px rgba(16,163,127,.24); }
 .queued-followup-action:disabled { opacity: .42; cursor: default; }
 .queued-followup-action svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.7; }
+@property --composer-beam-angle {
+  syntax: "<angle>";
+  initial-value: 0deg;
+  inherits: true;
+}
 .composer {
   display: grid;
+  --composer-beam-stroke-opacity: .12;
+  --composer-beam-inner-opacity: .26;
+  --composer-beam-bloom-opacity: .34;
+  position: relative;
+  isolation: isolate;
   grid-template-columns: 36px minmax(0, 1fr) 36px;
   align-items: flex-end;
   gap: 4px;
@@ -1116,7 +1133,85 @@ body.image-viewer-open { overflow: hidden; }
   box-shadow: 0 0 0 1px rgba(0,0,0,.04), 0 2px 8px rgba(0,0,0,.04), 0 4px 80px 8px rgba(0,0,0,.024);
   transition: box-shadow .16s ease;
 }
+.composer > :not(.composer-beam) { position: relative; z-index: 2; }
+.composer-beam {
+  --composer-beam-angle: 0deg;
+  --composer-beam-gradient: conic-gradient(
+    from var(--composer-beam-angle),
+    transparent 0%,
+    transparent 52%,
+    rgba(255, 50, 100, .52) 56%,
+    rgb(255, 50, 100) 59%,
+    rgb(40, 140, 255) 63%,
+    rgb(50, 200, 80) 67%,
+    rgb(30, 185, 170) 70%,
+    rgb(100, 70, 255) 74%,
+    rgb(240, 50, 180) 78%,
+    rgb(255, 120, 40) 81%,
+    transparent 85%,
+    transparent 100%
+  );
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  overflow: hidden;
+  border-radius: inherit;
+  pointer-events: none;
+  contain: paint;
+  opacity: .78;
+  filter: hue-rotate(-30deg) brightness(1.3) saturate(1.5);
+  animation: composer-beam-spin 1.96s linear infinite, composer-beam-hue 12s ease-in-out infinite;
+  transition: opacity .2s cubic-bezier(.16, 1, .3, 1);
+}
+.composer-beam::before,
+.composer-beam::after,
+.composer-beam-bloom {
+  content: "";
+  position: absolute;
+  border-radius: inherit;
+  background: var(--composer-beam-gradient);
+  pointer-events: none;
+}
+.composer-beam::before {
+  inset: -2px;
+  padding: 5px;
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  mask-composite: exclude;
+  filter: blur(4px);
+  opacity: var(--composer-beam-inner-opacity);
+}
+.composer-beam::after {
+  inset: 0;
+  padding: 1px;
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  mask-composite: exclude;
+  opacity: var(--composer-beam-stroke-opacity);
+}
+.composer-beam-bloom {
+  inset: -3px;
+  padding: 4px;
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  mask-composite: exclude;
+  filter: blur(9px);
+  opacity: var(--composer-beam-bloom-opacity);
+}
 .composer:focus-within { box-shadow: 0 0 0 1px rgba(0,0,0,.08), 0 2px 10px rgba(0,0,0,.055), 0 8px 80px 10px rgba(0,0,0,.03); }
+.composer:focus-within .composer-beam { opacity: 1; }
+@keyframes composer-beam-spin { to { --composer-beam-angle: 360deg; } }
+@keyframes composer-beam-hue {
+  0%, 100% { filter: hue-rotate(-30deg) brightness(1.3) saturate(1.5); }
+  50% { filter: hue-rotate(30deg) brightness(1.3) saturate(1.5); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .composer-beam { animation: none; filter: none; --composer-beam-angle: 68deg; opacity: .62; }
+  .composer:focus-within .composer-beam { opacity: .82; }
+}
 .composer-image-button, .send-button { width: 36px; height: 36px; flex: 0 0 auto; display: grid; place-items: center; margin: 0; padding: 0; border: 0; border-radius: 50%; cursor: pointer; }
 .composer-image-button { grid-column: 1; background: transparent; color: var(--text); }
 .composer-settings-controls { grid-column: 2; min-width: 0; display: flex; align-items: center; gap: 6px; }
@@ -1413,7 +1508,7 @@ body.task-rename-open { overflow: hidden; }
   .icon-button:active { background: #333; }
   .message-content pre, .message-content code { background: #2b2b2b; }
   .message-content pre code { background: transparent; }
-  .composer { background: #303030; box-shadow: 0 0 0 1px rgba(255,255,255,.06), 0 2px 12px rgba(0,0,0,.22); }
+  .composer { --composer-beam-stroke-opacity: .26; --composer-beam-inner-opacity: .42; --composer-beam-bloom-opacity: .24; background: #303030; box-shadow: 0 0 0 1px rgba(255,255,255,.06), 0 2px 12px rgba(0,0,0,.22); }
   .composer-wrap { background: linear-gradient(to bottom, rgba(33,33,33,0), rgba(33,33,33,.94) 32%, #212121 62%); }
   .composer-image-button:hover { background: #3a3a3a; }
   .message-content a { color: #7ab7ff; }
@@ -1476,14 +1571,10 @@ export const CODEX_MOBILE_JS = String.raw`
   var composerModelButton = document.getElementById("composer-model-button");
   var composerModelLabel = document.getElementById("composer-model-label");
   var composerModelMenu = document.getElementById("composer-model-menu");
-  var composerReasoningControl = document.getElementById("composer-reasoning-control");
-  var composerReasoningButton = document.getElementById("composer-reasoning-button");
-  var composerReasoningLabel = document.getElementById("composer-reasoning-label");
-  var composerReasoningMenu = document.getElementById("composer-reasoning-menu");
-  var composerPermissionControl = document.getElementById("composer-permission-control");
-  var composerPermissionButton = document.getElementById("composer-permission-button");
-  var composerPermissionLabel = document.getElementById("composer-permission-label");
-  var composerPermissionMenu = document.getElementById("composer-permission-menu");
+  var composerSessionControl = document.getElementById("composer-session-control");
+  var composerSessionButton = document.getElementById("composer-session-button");
+  var composerSessionLabelEl = document.getElementById("composer-session-label");
+  var composerSessionMenu = document.getElementById("composer-session-menu");
   var sendButton = document.getElementById("send-button");
   var messageNavigation = document.getElementById("message-navigation");
   var previousUserMessage = document.getElementById("previous-user-message");
@@ -1540,13 +1631,14 @@ export const CODEX_MOBILE_JS = String.raw`
     modelRequestId: 0,
     modelChanging: false,
     modelMenuOpen: false,
+    activeModelGroup: null,
     reasoningChanging: false,
-    reasoningMenuOpen: false,
+    sessionMenuOpen: false,
     taskPermissions: Object.create(null),
     permissionRequestId: 0,
     permissionChanging: false,
-    permissionMenuOpen: false,
     serverMessages: [],
+    outboundMessages: [],
     historyMessages: [],
     latestMessages: [],
     oldestMessageCursor: null,
@@ -1580,7 +1672,7 @@ export const CODEX_MOBILE_JS = String.raw`
     nextTaskRefreshAtMs: 0,
     messageRequestId: 0,
     composerRevision: 0,
-    messagePostChains: Object.create(null),
+    sending: false,
     creatingTask: false,
     pendingImages: [],
     messageNodes: Object.create(null),
@@ -1970,7 +2062,8 @@ export const CODEX_MOBILE_JS = String.raw`
     var sanitized = {};
     [
       "id", "role", "text", "turnId", "phase", "model", "createdAt", "createdAtMs",
-      "status", "pending", "clientId", "imageCount"
+      "status", "pending", "clientId", "imageCount", "attempts", "browserAttempts",
+      "lastError", "waitingForTaskCreation", "createTaskSourceThreadId", "displayInTranscript"
     ].forEach(function (key) {
       if (message[key] !== undefined) sanitized[key] = message[key];
     });
@@ -2005,6 +2098,7 @@ export const CODEX_MOBILE_JS = String.raw`
     var messages = sanitizePersistentMessages(snapshot.serverMessages);
     return {
       serverMessages: messages,
+      outboundMessages: sanitizePersistentMessages(snapshot.outboundMessages),
       historyMessages: [],
       latestMessages: messages,
       oldestMessageCursor: snapshot.oldestMessageCursor === null
@@ -2015,7 +2109,13 @@ export const CODEX_MOBILE_JS = String.raw`
       historyCaughtUp: snapshot.historyCaughtUp !== false,
       progressItems: [],
       optimisticProgressTurnId: null,
-      pendingMessages: [],
+      pendingMessages: sanitizePersistentMessages(snapshot.pendingMessages).map(function (message) {
+        if (Number(message.imageCount) > 0 && (!Array.isArray(message.images) || !message.images.length)) {
+          message.status = "failed";
+          message.lastError = "页面关闭前图片尚未上传，请重新添加图片后提交。";
+        }
+        return message;
+      }),
       transcriptSignature: "",
       contentRevision: typeof snapshot.contentRevision === "string"
         ? snapshot.contentRevision
@@ -2324,9 +2424,7 @@ export const CODEX_MOBILE_JS = String.raw`
   }
 
   function taskNeedsCreation(task) {
-    return Boolean(task && (
-      task.localCreationState === "creating" || task.localCreationState === "failed"
-    ));
+    return Boolean(task && isTemporaryTask(task) && String(task.threadId || "").startsWith("local-new-"));
   }
 
   function taskCreationErrorText(task) {
@@ -2442,6 +2540,9 @@ export const CODEX_MOBILE_JS = String.raw`
       key,
       {
         serverMessages: state.serverMessages.slice(),
+        outboundMessages: Array.isArray(state.outboundMessages)
+          ? state.outboundMessages.slice()
+          : [],
         historyMessages: state.historyMessages.slice(),
         latestMessages: state.latestMessages.slice(),
         oldestMessageCursor: state.oldestMessageCursor,
@@ -2480,6 +2581,9 @@ export const CODEX_MOBILE_JS = String.raw`
     );
     if (!snapshot) return false;
     state.serverMessages = snapshot.serverMessages.slice();
+    state.outboundMessages = Array.isArray(snapshot.outboundMessages)
+      ? snapshot.outboundMessages.slice()
+      : [];
     state.historyMessages = snapshot.historyMessages.slice();
     state.latestMessages = snapshot.latestMessages.slice();
     state.oldestMessageCursor = snapshot.oldestMessageCursor;
@@ -2590,8 +2694,15 @@ export const CODEX_MOBILE_JS = String.raw`
     source = source.replace(/\[([^\]]+)\]\(((?:(?:https?|file):\/\/|\/(?!\/)|[A-Za-z]:[\\/])[^)\s]+)\)/gi, function (_, label, target) {
       return preserveLink(target, label);
     });
-    source = source.replace(/(^|\s)((?:https?|file):\/\/[^\s<]+)/gi, function (_, prefix, target) {
-      return prefix + preserveLink(target, target);
+    source = source.replace(/(^|[\s:：(（\[【>])((?:https?|file):\/\/[a-zA-Z0-9\-._~:/?#\[\]@!$&'()*+,;%=]+)/gi, function (_, prefix, rawUrl) {
+      var trail = "";
+      var m = rawUrl.match(/([,.:;!?)]+)$/);
+      var url = rawUrl;
+      if (m) {
+        trail = m[1];
+        url = rawUrl.slice(0, rawUrl.length - trail.length);
+      }
+      return prefix + preserveLink(url, url) + trail;
     });
     var escaped = escapeHtml(source);
     escaped = escaped.replace(/\x60([^\x60]+)\x60/g, "<code>$1</code>");
@@ -2669,25 +2780,88 @@ export const CODEX_MOBILE_JS = String.raw`
     return html.join("");
   }
 
+  function isCommandCodeLanguage(lang) {
+    return ["bash", "sh", "shell", "zsh", "fish", "console", "terminal"]
+      .indexOf(String(lang || "").toLowerCase()) >= 0;
+  }
+
   function renderMarkdown(text, foldPrefix) {
     var parts = String(text || "").split(/\x60\x60\x60/);
-    return parts.map(function (part, index) {
+    var units = [];
+    parts.forEach(function (part, index) {
       if (index % 2 === 1) {
         var newline = part.indexOf("\n");
+        var info = newline >= 0 ? part.slice(0, newline).trim() : "";
+        var lang = info.split(/\s+/)[0] || "";
         var code = newline >= 0 ? part.slice(newline + 1) : part;
         var normalizedCode = code.replace(/\n$/, "");
         var lineCount = normalizedCode ? normalizedCode.split("\n").length : 1;
+        var isCommand = isCommandCodeLanguage(lang);
+        var shouldFold = isCommand || lineCount > 6 || normalizedCode.length > 320;
         var codeHtml = "<pre><code>" + escapeHtml(normalizedCode) + "</code></pre>";
-        if (lineCount <= 6 && normalizedCode.length <= 320) return codeHtml;
+        if (!shouldFold) {
+          units.push({ kind: "code", command: false, html: codeHtml });
+          return;
+        }
         var amount = lineCount > 1 ? lineCount + " 行" : normalizedCode.length + " 字";
         var foldKey = String(foldPrefix || "message") + ":" + index;
-        return '<details class="message-code-fold" data-fold-key="' + escapeHtml(foldKey) + '"><summary>' +
-          '<span>代码 / 输出 · ' + amount + "</span>" +
-          '<span class="message-code-fold-action"><span class="message-code-fold-closed">展开</span>' +
-          '<span class="message-code-fold-open">收起</span></span></summary>' + codeHtml + "</details>";
+        var title = isCommand ? "命令 · " + amount : "代码 / 输出 · " + amount;
+        units.push({
+          kind: "code",
+          command: isCommand,
+          html: '<details class="message-code-fold" data-fold-key="' + escapeHtml(foldKey) + '"><summary>' +
+            '<span>' + title + "</span>" +
+            '<span class="message-code-fold-action"><span class="message-code-fold-closed">展开</span>' +
+            '<span class="message-code-fold-open">收起</span></span></summary>' + codeHtml + "</details>"
+        });
+        return;
       }
-      return renderTextBlock(part);
-    }).join("");
+      units.push({ kind: "text", html: renderTextBlock(part) });
+    });
+    // 命令类折叠默认收起；连续多条命令（中间只有很短、且后面还跟命令的
+    // 连接文字）再合并进一个外层分组，避免一串 bash 折叠条目仍占满正文；
+    // 收尾文字即使很短也保留在分组外，避免结论被折叠吞掉。
+    var output = [];
+    var group = null;
+    var groupIndex = 0;
+    function flushCommandGroup() {
+      if (!group) return;
+      if (group.commands <= 1) {
+        output.push(group.items.join(""));
+      } else {
+        groupIndex += 1;
+        var foldKey = String(foldPrefix || "message") + ":tools-" + groupIndex;
+        output.push('<details class="message-tools-group" data-fold-key="' + escapeHtml(foldKey) + '"><summary>' +
+          "<span>命令 / 工具 · " + group.commands + " 条</span>" +
+          '<span class="message-code-fold-action"><span class="message-code-fold-closed">展开</span>' +
+          '<span class="message-code-fold-open">收起</span></span></summary>' +
+          '<div class="message-tools-group-items">' + group.items.join("") + "</div></details>");
+      }
+      group = null;
+    }
+    units.forEach(function (unit, index) {
+      if (unit.kind === "code" && unit.command) {
+        if (!group) group = { commands: 0, items: [] };
+        group.commands += 1;
+        group.items.push(unit.html);
+        return;
+      }
+      if (unit.kind === "text" && group) {
+        var bridgeText = unit.html.replace(/<[^>]*>/g, "").trim();
+        var nextUnit = units[index + 1];
+        var nextIsCommand = Boolean(
+          nextUnit && nextUnit.kind === "code" && nextUnit.command
+        );
+        if (bridgeText.length <= 40 && nextIsCommand) {
+          group.items.push(unit.html);
+          return;
+        }
+      }
+      flushCommandGroup();
+      output.push(unit.html);
+    });
+    flushCommandGroup();
+    return output.join("");
   }
 
   function isMobileFetchNetworkError(error) {
@@ -3129,124 +3303,192 @@ export const CODEX_MOBILE_JS = String.raw`
 
   function closeModelMenu() {
     state.modelMenuOpen = false;
+    state.activeModelGroup = null;
     composerModelMenu.hidden = true;
     composerModelButton.setAttribute("aria-expanded", "false");
   }
 
-  function closeReasoningMenu() {
-    state.reasoningMenuOpen = false;
-    composerReasoningMenu.hidden = true;
-    composerReasoningButton.setAttribute("aria-expanded", "false");
+  function closeSessionMenu() {
+    state.sessionMenuOpen = false;
+    composerSessionMenu.hidden = true;
+    composerSessionButton.setAttribute("aria-expanded", "false");
   }
 
-  function closePermissionMenu() {
-    state.permissionMenuOpen = false;
-    composerPermissionMenu.hidden = true;
-    composerPermissionButton.setAttribute("aria-expanded", "false");
+  function eventPathContains(event, element) {
+    if (!event || !element) return false;
+    var path = typeof event.composedPath === "function" ? event.composedPath() : [];
+    if (Array.isArray(path) && path.indexOf(element) >= 0) return true;
+    return typeof element.contains === "function" && element.contains(event.target);
   }
 
   function syncComposerSettingsVisibility() {
-    composerSettingsControls.hidden = composerModelControl.hidden &&
-      composerReasoningControl.hidden && composerPermissionControl.hidden;
+    composerSettingsControls.hidden = composerModelControl.hidden && composerSessionControl.hidden;
   }
 
   function permissionLabel(value) {
     if (value === "read-only") return "只读";
     if (value === "workspace-write") return "项目内读写";
     if (value === "danger-full-access") return "完全访问";
-    if (value === "default") return "标准权限";
-    if (value === "acceptEdits") return "自动接受文件修改";
+    if (value === "default") return "标准";
+    if (value === "acceptEdits") return "自动接受修改";
     if (value === "fullAccess") return "完全访问";
     if (value === "bypassPermissions") return "跳过审批";
-    if (value === "plan") return "规划模式";
-    if (value === "custom") return "自定义权限";
-    return value || "权限范围";
+    if (value === "plan") return "规划";
+    if (value === "custom") return "自定义";
+    return value || "权限";
   }
 
-  function renderPermissionControl() {
+  function composerSessionLabel(reasoning, permission) {
+    return (reasoning || "推理") + " · " + (permission || "权限");
+  }
+
+  function appendSessionMenuHeading(label) {
+    var heading = document.createElement("div");
+    heading.className = "composer-model-group";
+    heading.textContent = label;
+    composerSessionMenu.appendChild(heading);
+  }
+
+  function appendSessionMenuOption(option, config) {
+    var button = document.createElement("button");
+    button.type = "button";
+    button.className = "composer-model-option" +
+      (config.kind === "permission" ? " composer-permission-option" : "");
+    button.setAttribute("role", "menuitemradio");
+    button.setAttribute("aria-checked", config.selected ? "true" : "false");
+    button.disabled = Boolean(config.disabled);
+    var copy = document.createElement("span");
+    copy.className = "composer-model-option-copy";
+    var label = document.createElement("span");
+    label.className = "composer-model-option-label";
+    label.textContent = config.label;
+    copy.appendChild(label);
+    if (option && option.description) {
+      var description = document.createElement("span");
+      description.className = "composer-model-option-description";
+      description.textContent = option.description;
+      copy.appendChild(description);
+    }
+    var check = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    check.setAttribute("viewBox", "0 0 16 16");
+    check.setAttribute("aria-hidden", "true");
+    check.setAttribute("class", "composer-model-option-check");
+    if (config.selected) {
+      var path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", "m3.5 8.2 2.7 2.7 6.3-6.3");
+      check.appendChild(path);
+    }
+    button.appendChild(copy);
+    button.appendChild(check);
+    if (!config.disabled && typeof config.onSelect === "function") {
+      button.addEventListener("click", config.onSelect);
+    }
+    composerSessionMenu.appendChild(button);
+  }
+
+  function renderSessionControl() {
+    var modelState = currentTaskModelState();
     var permissionState = currentTaskPermissionState();
-    var currentPermission = permissionState && permissionState.currentPermission || "";
-    var options = permissionState && Array.isArray(permissionState.options)
-      ? permissionState.options
-      : [];
     if (!state.currentThreadId) {
-      composerPermissionControl.hidden = true;
-      closePermissionMenu();
+      composerSessionControl.hidden = true;
+      closeSessionMenu();
       syncComposerSettingsVisibility();
       return;
     }
-    composerPermissionControl.hidden = false;
-    var currentOption = options.find(function (option) {
+
+    composerSessionControl.hidden = false;
+    var currentEffort = modelState && modelState.currentReasoningEffort || "";
+    var reasoningOptions = modelState && Array.isArray(modelState.reasoningEffortOptions)
+      ? modelState.reasoningEffortOptions
+      : [];
+    var currentReasoningOption = reasoningOptions.find(function (option) {
+      return option.id === currentEffort;
+    });
+    var currentPermission = permissionState && permissionState.currentPermission || "";
+    var permissionOptions = permissionState && Array.isArray(permissionState.options)
+      ? permissionState.options
+      : [];
+    var currentPermissionOption = permissionOptions.find(function (option) {
       return option.id === currentPermission;
     });
-    composerPermissionLabel.textContent = state.permissionChanging
+    var reasoningText = state.reasoningChanging
+      ? "正在切换…"
+      : !modelState
+        ? "获取中"
+        : currentReasoningOption && currentReasoningOption.label ||
+          (currentEffort ? reasoningEffortLabel(currentEffort) : "跟随会话");
+    var permissionText = state.permissionChanging
       ? "正在切换…"
       : !permissionState
         ? "获取中"
-        : currentPermission
-          ? (
-              currentOption && currentOption.label || permissionLabel(currentPermission)
-            )
-          : "暂不可用";
-    var canChange = Boolean(
-      permissionState && permissionState.canChange && options.length > 0
+        : currentPermissionOption && currentPermissionOption.label ||
+          (currentPermission ? permissionLabel(currentPermission) : "暂不可用");
+    composerSessionLabelEl.textContent = composerSessionLabel(reasoningText, permissionText);
+
+    var canChangeReasoning = Boolean(
+      modelState && modelState.canChangeReasoningEffort && reasoningOptions.length > 0
     );
-    composerPermissionButton.classList.toggle("is-readonly", !canChange);
-    composerPermissionButton.classList.toggle("is-loading", state.permissionChanging);
-    composerPermissionButton.setAttribute(
+    var canChangePermission = Boolean(
+      permissionState && permissionState.canChange && permissionOptions.length > 0
+    );
+    var canChange = canChangeReasoning || canChangePermission;
+    var isChanging = state.reasoningChanging || state.permissionChanging;
+    composerSessionButton.classList.toggle("is-readonly", !canChange);
+    composerSessionButton.classList.toggle("is-loading", isChanging);
+    composerSessionButton.setAttribute(
       "aria-disabled",
-      canChange && !state.permissionChanging ? "false" : "true"
+      canChange && !isChanging ? "false" : "true"
     );
-    composerPermissionButton.title = !canChange
-      ? permissionState && permissionState.unavailableReason ||
-        (!permissionState ? "正在读取当前任务权限范围。" : "当前任务暂时不能切换权限范围。")
-      : "切换当前任务权限范围";
-    composerPermissionMenu.innerHTML = "";
-    if (!canChange) {
-      closePermissionMenu();
-      syncComposerSettingsVisibility();
-      return;
-    }
-    options.forEach(function (option) {
-      var button = document.createElement("button");
-      button.type = "button";
-      button.className = "composer-model-option";
-      button.setAttribute("role", "menuitemradio");
-      button.setAttribute("aria-checked", option.id === currentPermission ? "true" : "false");
-      button.disabled = state.permissionChanging;
-      var copy = document.createElement("span");
-      copy.className = "composer-model-option-copy";
-      var label = document.createElement("span");
-      label.className = "composer-model-option-label";
-      label.textContent = option.label || permissionLabel(option.id);
-      copy.appendChild(label);
-      if (option.description) {
-        var description = document.createElement("span");
-        description.className = "composer-model-option-description";
-        description.textContent = option.description;
-        copy.appendChild(description);
-      }
-      var check = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-      check.setAttribute("viewBox", "0 0 16 16");
-      check.setAttribute("aria-hidden", "true");
-      check.setAttribute("class", "composer-model-option-check");
-      if (option.id === currentPermission) {
-        var path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-        path.setAttribute("d", "m3.5 8.2 2.7 2.7 6.3-6.3");
-        check.appendChild(path);
-      }
-      button.appendChild(copy);
-      button.appendChild(check);
-      button.addEventListener("click", function () {
-        void selectCurrentTaskPermission(option.id);
+    composerSessionButton.title = canChange
+      ? "切换推理强度或访问权限"
+      : modelState && modelState.reasoningEffortUnavailableReason ||
+        permissionState && permissionState.unavailableReason ||
+        (!modelState || !permissionState ? "正在读取当前任务设置。" : "当前任务没有可切换的设置。");
+
+    composerSessionMenu.innerHTML = "";
+    appendSessionMenuHeading("推理强度");
+    if (reasoningOptions.length > 0) {
+      reasoningOptions.forEach(function (option) {
+        appendSessionMenuOption(option, {
+          kind: "reasoning",
+          label: option.label || reasoningEffortLabel(option.id),
+          selected: option.id === currentEffort,
+          disabled: !canChangeReasoning || isChanging,
+          onSelect: function () { void selectCurrentTaskReasoningEffort(option.id); }
+        });
       });
-      composerPermissionMenu.appendChild(button);
-    });
-    composerPermissionMenu.hidden = !state.permissionMenuOpen;
-    composerPermissionButton.setAttribute(
-      "aria-expanded",
-      state.permissionMenuOpen ? "true" : "false"
-    );
+    } else {
+      appendSessionMenuOption(null, {
+        kind: "reasoning",
+        label: reasoningText,
+        selected: Boolean(currentEffort),
+        disabled: true
+      });
+    }
+
+    appendSessionMenuHeading("访问权限");
+    if (permissionOptions.length > 0) {
+      permissionOptions.forEach(function (option) {
+        appendSessionMenuOption(option, {
+          kind: "permission",
+          label: option.label || permissionLabel(option.id),
+          selected: option.id === currentPermission,
+          disabled: !canChangePermission || isChanging,
+          onSelect: function () { void selectCurrentTaskPermission(option.id); }
+        });
+      });
+    } else {
+      appendSessionMenuOption(null, {
+        kind: "permission",
+        label: permissionText,
+        selected: Boolean(currentPermission),
+        disabled: true
+      });
+    }
+
+    if (!canChange) closeSessionMenu();
+    composerSessionMenu.hidden = !state.sessionMenuOpen;
+    composerSessionButton.setAttribute("aria-expanded", state.sessionMenuOpen ? "true" : "false");
     syncComposerSettingsVisibility();
   }
 
@@ -3262,84 +3504,6 @@ export const CODEX_MOBILE_JS = String.raw`
     return value || "推理";
   }
 
-  function renderReasoningControl() {
-    var modelState = currentTaskModelState();
-    var currentEffort = modelState && modelState.currentReasoningEffort || "";
-    var options = modelState && Array.isArray(modelState.reasoningEffortOptions)
-      ? modelState.reasoningEffortOptions
-      : [];
-    if (!state.currentThreadId || (!currentEffort && options.length === 0 && !state.reasoningChanging)) {
-      composerReasoningControl.hidden = true;
-      closeReasoningMenu();
-      syncComposerSettingsVisibility();
-      return;
-    }
-    composerReasoningControl.hidden = false;
-    var currentOption = options.find(function (option) { return option.id === currentEffort; });
-    composerReasoningLabel.textContent = state.reasoningChanging
-      ? "正在切换…"
-      : (
-          currentOption && currentOption.label ||
-          (currentEffort ? reasoningEffortLabel(currentEffort) : "跟随会话")
-        );
-    var canChange = Boolean(
-      modelState && modelState.canChangeReasoningEffort && options.length > 0
-    );
-    composerReasoningButton.classList.toggle("is-readonly", !canChange);
-    composerReasoningButton.classList.toggle("is-loading", state.reasoningChanging);
-    composerReasoningButton.setAttribute(
-      "aria-disabled",
-      canChange && !state.reasoningChanging ? "false" : "true"
-    );
-    composerReasoningButton.title = !canChange
-      ? modelState && modelState.reasoningEffortUnavailableReason || "当前模型没有可选推理强度。"
-      : "切换当前任务推理强度";
-    composerReasoningMenu.innerHTML = "";
-    if (!canChange) {
-      closeReasoningMenu();
-      syncComposerSettingsVisibility();
-      return;
-    }
-    options.forEach(function (option) {
-      var button = document.createElement("button");
-      button.type = "button";
-      button.className = "composer-model-option";
-      button.setAttribute("role", "menuitemradio");
-      button.setAttribute("aria-checked", option.id === currentEffort ? "true" : "false");
-      button.disabled = state.reasoningChanging;
-      var copy = document.createElement("span");
-      copy.className = "composer-model-option-copy";
-      var label = document.createElement("span");
-      label.className = "composer-model-option-label";
-      label.textContent = option.label || reasoningEffortLabel(option.id);
-      copy.appendChild(label);
-      if (option.description) {
-        var description = document.createElement("span");
-        description.className = "composer-model-option-description";
-        description.textContent = option.description;
-        copy.appendChild(description);
-      }
-      var check = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-      check.setAttribute("viewBox", "0 0 16 16");
-      check.setAttribute("aria-hidden", "true");
-      check.setAttribute("class", "composer-model-option-check");
-      if (option.id === currentEffort) {
-        var path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-        path.setAttribute("d", "m3.5 8.2 2.7 2.7 6.3-6.3");
-        check.appendChild(path);
-      }
-      button.appendChild(copy);
-      button.appendChild(check);
-      button.addEventListener("click", function () {
-        void selectCurrentTaskReasoningEffort(option.id);
-      });
-      composerReasoningMenu.appendChild(button);
-    });
-    composerReasoningMenu.hidden = !state.reasoningMenuOpen;
-    composerReasoningButton.setAttribute("aria-expanded", state.reasoningMenuOpen ? "true" : "false");
-    syncComposerSettingsVisibility();
-  }
-
   function renderModelControl() {
     var modelState = currentTaskModelState();
     var currentModel = modelState && modelState.currentModel || "";
@@ -3347,8 +3511,7 @@ export const CODEX_MOBILE_JS = String.raw`
     if (!state.currentThreadId || (!currentModel && options.length === 0 && !state.modelChanging)) {
       composerModelControl.hidden = true;
       closeModelMenu();
-      renderReasoningControl();
-      renderPermissionControl();
+      renderSessionControl();
       return;
     }
     composerModelControl.hidden = false;
@@ -3367,20 +3530,19 @@ export const CODEX_MOBILE_JS = String.raw`
     composerModelMenu.innerHTML = "";
     if (!canChange) {
       closeModelMenu();
-      renderReasoningControl();
-      renderPermissionControl();
+      renderSessionControl();
       return;
     }
-    var lastModelGroup;
+    var groupsMap = new Map();
     options.forEach(function (option) {
-      var groupName = typeof option.group === "string" ? option.group.trim() : "";
-      if (groupName && groupName !== lastModelGroup) {
-        lastModelGroup = groupName;
-        var heading = document.createElement("div");
-        heading.className = "composer-model-group";
-        heading.textContent = groupName;
-        composerModelMenu.appendChild(heading);
-      }
+      var groupName = typeof option.group === "string" && option.group.trim() ? option.group.trim() : "";
+      if (!groupsMap.has(groupName)) groupsMap.set(groupName, []);
+      groupsMap.get(groupName).push(option);
+    });
+    var groupNames = Array.from(groupsMap.keys());
+    var multiSource = groupNames.length > 1;
+
+    function renderOptionButton(option) {
       var button = document.createElement("button");
       button.type = "button";
       button.className = "composer-model-option";
@@ -3413,12 +3575,82 @@ export const CODEX_MOBILE_JS = String.raw`
       button.addEventListener("click", function () {
         void selectCurrentTaskModel(option.id);
       });
-      composerModelMenu.appendChild(button);
-    });
+      return button;
+    }
+
+    if (multiSource) {
+      if (state.activeModelGroup === null) {
+        groupNames.forEach(function (groupName) {
+          var groupOptions = groupsMap.get(groupName) || [];
+          var activeOption = groupOptions.find(function (opt) { return opt.id === currentModel; });
+          var button = document.createElement("button");
+          button.type = "button";
+          button.className = "composer-model-option";
+          button.setAttribute("role", "menuitem");
+          button.disabled = state.modelChanging;
+          var copy = document.createElement("span");
+          copy.className = "composer-model-option-copy";
+          var label = document.createElement("span");
+          label.className = "composer-model-option-label";
+          label.textContent = groupName || "默认来源";
+          copy.appendChild(label);
+          var desc = document.createElement("span");
+          desc.className = "composer-model-option-description";
+          desc.textContent = activeOption
+            ? (activeOption.label || activeOption.id)
+            : (groupOptions.length + " 个模型");
+          copy.appendChild(desc);
+
+          var chevron = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+          chevron.setAttribute("viewBox", "0 0 16 16");
+          chevron.setAttribute("aria-hidden", "true");
+          chevron.setAttribute("class", "composer-model-chevron composer-model-chevron-right");
+          var path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+          path.setAttribute("d", "m4.5 6 3.5 3.5L11.5 6");
+          chevron.appendChild(path);
+
+          button.appendChild(copy);
+          button.appendChild(chevron);
+          button.addEventListener("click", function () {
+            state.activeModelGroup = groupName;
+            renderModelControl();
+          });
+          composerModelMenu.appendChild(button);
+        });
+      } else {
+        var currentGroupName = state.activeModelGroup;
+        var backButton = document.createElement("button");
+        backButton.type = "button";
+        backButton.className = "composer-model-back";
+        backButton.innerHTML = '<svg class="composer-model-chevron composer-model-chevron-left" viewBox="0 0 16 16" aria-hidden="true"><path d="m4.5 6 3.5 3.5L11.5 6"/></svg><span>' + escapeHtml(currentGroupName || "默认来源") + ' (返回来源列表)</span>';
+        backButton.addEventListener("click", function () {
+          state.activeModelGroup = null;
+          renderModelControl();
+        });
+        composerModelMenu.appendChild(backButton);
+
+        var groupOptions = groupsMap.get(currentGroupName) || [];
+        groupOptions.forEach(function (option) {
+          composerModelMenu.appendChild(renderOptionButton(option));
+        });
+      }
+    } else {
+      var lastModelGroup;
+      options.forEach(function (option) {
+        var groupName = typeof option.group === "string" ? option.group.trim() : "";
+        if (groupName && groupName !== lastModelGroup) {
+          lastModelGroup = groupName;
+          var heading = document.createElement("div");
+          heading.className = "composer-model-group";
+          heading.textContent = groupName;
+          composerModelMenu.appendChild(heading);
+        }
+        composerModelMenu.appendChild(renderOptionButton(option));
+      });
+    }
     composerModelMenu.hidden = !state.modelMenuOpen;
     composerModelButton.setAttribute("aria-expanded", state.modelMenuOpen ? "true" : "false");
-    renderReasoningControl();
-    renderPermissionControl();
+    renderSessionControl();
   }
 
   async function loadCurrentTaskModel(force) {
@@ -3471,12 +3703,12 @@ export const CODEX_MOBILE_JS = String.raw`
 
   async function loadCurrentTaskPermission(force) {
     if (!state.currentThreadId) {
-      renderPermissionControl();
+      renderSessionControl();
       return null;
     }
     var key = currentTaskPermissionKey();
     var cached = state.taskPermissions[key];
-    renderPermissionControl();
+    renderSessionControl();
     if (!force && cached && Date.now() - Number(cached.loadedAtMs || 0) < 10000) {
       return cached;
     }
@@ -3494,7 +3726,7 @@ export const CODEX_MOBILE_JS = String.raw`
         requestedThreadId !== state.currentThreadId
       ) return null;
       state.taskPermissions[key] = Object.assign({}, payload, { loadedAtMs: Date.now() });
-      renderPermissionControl();
+      renderSessionControl();
       return state.taskPermissions[key];
     } catch (error) {
       if (
@@ -3509,7 +3741,7 @@ export const CODEX_MOBILE_JS = String.raw`
           unavailableReason: error.message || "暂时无法读取权限范围。",
           loadedAtMs: Date.now()
         };
-        renderPermissionControl();
+        renderSessionControl();
       }
       return null;
     }
@@ -3522,8 +3754,8 @@ export const CODEX_MOBILE_JS = String.raw`
       return;
     }
     if (state.permissionChanging || permission === permissionState.currentPermission) {
-      closePermissionMenu();
-      renderPermissionControl();
+      closeSessionMenu();
+      renderSessionControl();
       return;
     }
     var option = (permissionState.options || []).find(function (candidate) {
@@ -3539,8 +3771,8 @@ export const CODEX_MOBILE_JS = String.raw`
         (option.description || "这个权限范围会减少审批并扩大任务可访问的范围。")
       );
       if (!confirmed) {
-        closePermissionMenu();
-        renderPermissionControl();
+        closeSessionMenu();
+        renderSessionControl();
         return;
       }
     }
@@ -3549,8 +3781,8 @@ export const CODEX_MOBILE_JS = String.raw`
     var requestedAdapter = state.currentAdapter;
     var requestedThreadId = state.currentThreadId;
     state.permissionChanging = true;
-    closePermissionMenu();
-    renderPermissionControl();
+    closeSessionMenu();
+    renderSessionControl();
     try {
       var path = adapterApiPath(
         "/api/tasks/" + encodeURIComponent(state.currentThreadId) + "/permission"
@@ -3575,7 +3807,7 @@ export const CODEX_MOBILE_JS = String.raw`
       ) showToast(error.message || "权限范围切换失败，请重试");
     } finally {
       if (requestId === state.permissionRequestId) state.permissionChanging = false;
-      renderPermissionControl();
+      renderSessionControl();
     }
   }
 
@@ -3630,8 +3862,8 @@ export const CODEX_MOBILE_JS = String.raw`
       return;
     }
     if (state.reasoningChanging || reasoningEffort === modelState.currentReasoningEffort) {
-      closeReasoningMenu();
-      renderReasoningControl();
+      closeSessionMenu();
+      renderSessionControl();
       return;
     }
     var key = currentTaskModelKey();
@@ -3639,8 +3871,8 @@ export const CODEX_MOBILE_JS = String.raw`
     var requestedAdapter = state.currentAdapter;
     var requestedThreadId = state.currentThreadId;
     state.reasoningChanging = true;
-    closeReasoningMenu();
-    renderReasoningControl();
+    closeSessionMenu();
+    renderSessionControl();
     try {
       var path = adapterApiPath("/api/tasks/" + encodeURIComponent(state.currentThreadId) + "/model");
       var payload = await api(path, {
@@ -3682,10 +3914,10 @@ export const CODEX_MOBILE_JS = String.raw`
     state.permissionRequestId += 1;
     state.permissionChanging = false;
     closeModelMenu();
-    closeReasoningMenu();
-    closePermissionMenu();
+    closeSessionMenu();
     renderModelControl();
     state.serverMessages = [];
+    state.outboundMessages = [];
     state.historyMessages = [];
     state.latestMessages = [];
     state.oldestMessageCursor = null;
@@ -3768,6 +4000,7 @@ export const CODEX_MOBILE_JS = String.raw`
       return false;
     } finally {
       state.switchingAdapter = false;
+      renderMessages(false);
       state.switchingAdapterId = "";
       state.switchStartedAtMs = 0;
       renderAdapterMenu();
@@ -3964,6 +4197,10 @@ export const CODEX_MOBILE_JS = String.raw`
     if (!restoredCacheScrollPosition()) scrollToLatest(false);
     updateUserMessageNavigation();
     persistMobileCacheNow();
+    state.pendingMessages.slice().forEach(function (pending, index) {
+      if (pending.status === "failed" || Number(pending.imageCount) > 0 && !(pending.images || []).length) return;
+      setTimeout(function () { void submitPendingMessage(pending); }, index * 120);
+    });
     scheduleLiveRefresh(2200);
   }
 
@@ -4003,9 +4240,16 @@ export const CODEX_MOBILE_JS = String.raw`
   }
 
   function visiblePendingMessages() {
-    return state.pendingMessages.filter(function (pending) {
-      return pending.displayInTranscript !== false;
+    var outbound = Array.isArray(state.outboundMessages)
+      ? state.outboundMessages.slice()
+      : [];
+    var acceptedClientIds = new Set(outbound.map(function (message) {
+      return message && message.clientId;
+    }).filter(Boolean));
+    var local = state.pendingMessages.filter(function (pending) {
+      return pending.displayInTranscript !== false && !acceptedClientIds.has(pending.clientId);
     });
+    return outbound.concat(local);
   }
 
   function currentVisibleRunSummary() {
@@ -5216,7 +5460,7 @@ export const CODEX_MOBILE_JS = String.raw`
     toggleWorkspaceMenu(false);
     closeTaskContextMenu();
     closeModelMenu();
-    closeReasoningMenu();
+    closeSessionMenu();
     if (updateUrl) {
       var url = new URL(window.location.href);
       if (state.settingsOpen) {
@@ -5554,6 +5798,7 @@ export const CODEX_MOBILE_JS = String.raw`
       if (!state.currentThreadId) {
         state.tasks = [];
         state.serverMessages = [];
+        state.outboundMessages = [];
         state.historyMessages = [];
         state.latestMessages = [];
         state.progressItems = [];
@@ -6419,23 +6664,36 @@ export const CODEX_MOBILE_JS = String.raw`
       });
       return { first: first, last: last };
     }
+    function messageInsertionBoundary(item) {
+      var bounds = item.turnId ? turnBounds(item.turnId) : { first: 0, last: messages.length - 1 };
+      var first = bounds.first < 0 ? 0 : bounds.first;
+      var last = bounds.last < 0 ? messages.length - 1 : bounds.last;
+      if (item.occurredAtMs === null) return last + 1;
+      var boundary = first;
+      for (var index = first; index <= last; index += 1) {
+        var messageTime = timelineOccurredAtMs(messages[index], "createdAt");
+        if (messageTime !== null && messageTime <= item.occurredAtMs) {
+          boundary = index + 1;
+        }
+      }
+      return boundary;
+    }
+
     items.forEach(function (item) {
-      if (item.kind === "message" || !item.turnId) return;
-      var bounds = turnBounds(item.turnId);
-      if (bounds.first < 0) return;
-      item.anchorIndex = bounds.last;
-      item.fallbackOrder = bounds.last * 10 + timelineFallbackRank(item.kind);
+      if (item.kind === "message") {
+        item.sortPosition = item.messageIndex * 2;
+        return;
+      }
+      item.anchorIndex = messageInsertionBoundary(item);
+      item.sortPosition = item.anchorIndex * 2 - 1;
+      item.fallbackOrder = item.anchorIndex * 10 + timelineFallbackRank(item.kind);
     });
 
     return items.sort(function (left, right) {
-      if (
-        left.occurredAtMs !== null &&
-        right.occurredAtMs !== null &&
-        left.occurredAtMs !== right.occurredAtMs
-      ) {
-        return left.occurredAtMs - right.occurredAtMs;
+      if (left.sortPosition !== right.sortPosition) return left.sortPosition - right.sortPosition;
+      if (left.kind === "message" && right.kind === "message") {
+        return left.messageIndex - right.messageIndex;
       }
-      if (left.anchorIndex !== right.anchorIndex) return left.anchorIndex - right.anchorIndex;
       if (left.occurredAtMs !== null && right.occurredAtMs !== null) {
         if (left.occurredAtMs !== right.occurredAtMs) return left.occurredAtMs - right.occurredAtMs;
       } else if (left.occurredAtMs !== null) {
@@ -6527,7 +6785,7 @@ export const CODEX_MOBILE_JS = String.raw`
       Date.now(),
       state.progressItems
     );
-    renderPermissionControl();
+    renderSessionControl();
     if (!header || !summary) return;
     var label = header.querySelector(".run-header-label");
     if (label) {
@@ -6538,7 +6796,13 @@ export const CODEX_MOBILE_JS = String.raw`
     }
   }
 
-  function reconcilePendingMessages(messages) {
+  function reconcilePendingMessages(messages, outboundMessages) {
+    var acceptedClientIds = new Set((Array.isArray(outboundMessages) ? outboundMessages : []).map(function (message) {
+      return message && message.clientId;
+    }).filter(Boolean));
+    state.pendingMessages = state.pendingMessages.filter(function (pending) {
+      return !acceptedClientIds.has(pending.clientId);
+    });
     var users = messages.filter(function (message) { return message.role === "user"; });
     var used = {};
 
@@ -6850,35 +7114,39 @@ export const CODEX_MOBILE_JS = String.raw`
         ? taskCreationErrorText(taskById(message.threadId))
         : "";
       var statusText = message.status === "creating_task"
-        ? "正在创建任务，创建后自动发送…"
+        ? "已接收，正在创建任务"
         : message.status === "waiting_task_retry"
           ? creationError
-            ? "任务创建失败：" + taskCreationErrorText(taskById(message.threadId))
-            : "任务创建失败，点击重试后自动发送"
+            ? "任务创建失败：" + creationError
+            : "任务创建失败，消息已保留"
           : message.status === "waiting_to_send"
-            ? "任务已创建，正在发送…"
-            : message.status === "contacting_computer"
-              ? "正在尝试发送给电脑…"
-              : message.status === "forwarding_to_agent"
-                ? "电脑正在组织发送给 " + adapterName(message.adapter || state.currentAdapter) + "…"
-                : message.status === "sending"
-                  ? "正在尝试发送给电脑…"
-        : message.status === "failed"
-          ? "发送失败"
-          : message.status === "unconfirmed"
-            ? "发送状态未确认"
-            : message.status === "queued"
-              ? "已排队 · 等待当前任务完成"
-              : message.status === "steered"
-                ? "已引导 · 正在处理"
-                : "已发送 · 正在处理";
-      var retry = message.status === "failed" || message.status === "waiting_task_retry" || message.status === "unconfirmed"
+            ? "已保留，等待前一条消息提交"
+            : message.status === "accepted"
+              ? "已接收，正在提交"
+              : message.status === "sending"
+                ? "正在提交到 " + adapterName(message.adapter || state.currentAdapter)
+                : message.status === "retrying"
+                  ? "提交未成功，正在自动重试（第 " + Math.max(1, Number(message.attempts || message.browserAttempts || 1)) + " 次）"
+                  : message.status === "failed"
+                    ? "提交失败，消息已保留"
+                    : message.status === "unconfirmed"
+                      ? "提交状态暂未确认，消息已保留"
+                      : message.status === "queued"
+                        ? "已排队，等待当前任务完成"
+                        : message.status === "submitted"
+                          ? "已提交，正在等待任务接收"
+                          : message.status === "steered"
+                            ? "已引导，正在处理"
+                            : "已提交，正在处理";
+      var failed = message.status === "failed" || message.status === "waiting_task_retry";
+      var retry = failed || message.status === "unconfirmed"
         ? '<button class="message-retry" type="button" data-retry="' + escapeHtml(message.clientId) + '">' +
-          (message.status === "unconfirmed" ? "检查状态" : "重试") + "</button>"
+          (message.status === "unconfirmed" ? "检查状态" : "重新提交") + "</button>"
         : "";
-      deliveryHtml = '<div class="message-delivery ' + (
-        message.status === "failed" || message.status === "waiting_task_retry" ? "failed" : ""
-      ) + '"><span>' + escapeHtml(statusText) + "</span>" + retry + "</div>";
+      var copy = failed && message.text
+        ? '<button class="message-retry" type="button" data-copy-message="' + escapeHtml(message.clientId) + '">复制消息</button>'
+        : "";
+      deliveryHtml = '<div class="message-delivery ' + (failed ? "failed" : "") + '"><span>' + escapeHtml(statusText) + "</span>" + copy + retry + "</div>";
     }
     var imagesHtml = renderMessageImages(message);
     var visibleText = visibleMessageText(message);
@@ -6890,6 +7158,8 @@ export const CODEX_MOBILE_JS = String.raw`
     row.innerHTML = '<div class="message-card">' + imagesHtml + textHtml + modelHtml + deliveryHtml + "</div>";
     var retryButton = row.querySelector("[data-retry]");
     if (retryButton) retryButton.addEventListener("click", function () { retryPendingMessage(message.clientId); });
+    var copyButton = row.querySelector("[data-copy-message]");
+    if (copyButton) copyButton.addEventListener("click", function () { void copyMessageText(message.text); });
     bindMessageImageActions(row);
     return row;
   }
@@ -6899,10 +7169,9 @@ export const CODEX_MOBILE_JS = String.raw`
     var row = document.createElement("div");
     row.className = "response-pending";
     row.setAttribute("role", "status");
-    row.setAttribute("aria-label", "正在处理");
-    row.innerHTML = '<span class="response-pending-dot"></span>' +
-      '<span class="response-pending-dot"></span>' +
-      '<span class="response-pending-dot"></span>';
+    row.setAttribute("aria-label", "正在规划");
+    row.innerHTML = '<span class="agent-planning-copy">正在规划</span>' +
+      '<span class="agent-planning-dots" aria-hidden="true"><span>·</span><span>·</span><span>·</span></span>';
     return row;
   }
 
@@ -6922,7 +7191,9 @@ export const CODEX_MOBILE_JS = String.raw`
       return { codeKeys: [], progressHistoryOpen: false };
     }
     return {
-      codeKeys: Array.from(messagesEl.querySelectorAll(".message-code-fold[open]"))
+      codeKeys: Array.from(
+        messagesEl.querySelectorAll(".message-code-fold[open], .message-tools-group[open]")
+      )
         .map(function (details) { return details.getAttribute("data-fold-key") || ""; })
         .filter(Boolean),
       progressHistoryOpen: Boolean(messagesEl.querySelector(".run-progress-history[open]"))
@@ -6931,7 +7202,7 @@ export const CODEX_MOBILE_JS = String.raw`
 
   function restoreOpenFoldState(foldState) {
     var openCodeKeys = new Set(foldState && foldState.codeKeys || []);
-    messagesEl.querySelectorAll(".message-code-fold").forEach(function (details) {
+    messagesEl.querySelectorAll(".message-code-fold, .message-tools-group").forEach(function (details) {
       if (openCodeKeys.has(details.getAttribute("data-fold-key") || "")) {
         details.open = true;
       }
@@ -6945,12 +7216,11 @@ export const CODEX_MOBILE_JS = String.raw`
 
   function renderMessages(forceBottom) {
     if (state.switchingAdapter) {
-      messagesEl.innerHTML = "";
-      messagesEl.dataset.threadId = "";
-      state.messageNodes = Object.create(null);
+      messagesEl.setAttribute("aria-busy", "true");
       updateUserMessageNavigation();
       return;
     }
+    messagesEl.setAttribute("aria-busy", "false");
     var shouldStick = forceBottom || isNearBottom();
     var previousScrollTop = messagesEl.scrollTop;
     var openFoldState = captureOpenFoldState();
@@ -7419,6 +7689,11 @@ export const CODEX_MOBILE_JS = String.raw`
         requestedThreadId !== state.currentThreadId ||
         payload.threadId !== requestedThreadId
       ) return;
+      if (payload.resolvedThreadId && payload.resolvedThreadId !== requestedThreadId) {
+        migrateTemporaryConversation(requestedThreadId, payload.resolvedThreadId);
+        finishLocalTaskDraft(payload.resolvedThreadId);
+        void loadTasks(false);
+      }
       applyLatestMessagePage(payload, historyOnly);
       if (!historyOnly) {
         state.lastLiveMessageRefreshAtMs = Date.now();
@@ -7427,7 +7702,10 @@ export const CODEX_MOBILE_JS = String.raw`
         }
       }
       var messages = state.serverMessages;
-      reconcilePendingMessages(payload.messages || []);
+      state.outboundMessages = Array.isArray(payload.outboundMessages)
+        ? payload.outboundMessages
+        : [];
+      reconcilePendingMessages(payload.messages || [], state.outboundMessages);
       var taskIndex = state.tasks.findIndex(function (task) { return task.threadId === payload.threadId; });
       if (taskIndex >= 0 && payload.task) {
         state.tasks[taskIndex] = mergeTasksWithLocalDrafts(
@@ -7469,6 +7747,7 @@ export const CODEX_MOBILE_JS = String.raw`
       });
       var signature = JSON.stringify([
         messages,
+        state.outboundMessages,
         pendingSignature,
         runSummaryRenderKey(effectiveRunSummary()),
         payload.task && [payload.task.status, payload.task.startedAtMs, payload.task.activeTurnId],
@@ -7589,6 +7868,13 @@ export const CODEX_MOBILE_JS = String.raw`
     state.pendingMessages.forEach(function (pending) {
       if (pending.threadId === temporaryThreadId) pending.threadId = realThreadId;
     });
+    var temporaryTask = taskById(temporaryThreadId);
+    if (temporaryTask) {
+      temporaryTask.threadId = realThreadId;
+      temporaryTask.localCreationState = "ready";
+      temporaryTask.lastUpdatedAt = new Date().toISOString();
+      rememberLocalTaskDraft(temporaryTask);
+    }
     saveCurrentConversationSnapshot();
     moveConversationValue(
       state.composerDrafts,
@@ -7612,152 +7898,33 @@ export const CODEX_MOBILE_JS = String.raw`
     history.replaceState(null, "", url.pathname + url.search + url.hash);
   }
 
-  async function submitMessagesWaitingForTaskCreation(threadId) {
-    var waiting = state.pendingMessages.filter(function (pending) {
-      return pending.threadId === threadId && pending.waitingForTaskCreation;
-    });
-    if (!waiting.length) return;
-    finishLocalTaskDraft(threadId);
-    for (var index = 0; index < waiting.length; index += 1) {
-      var pending = waiting[index];
-      pending.waitingForTaskCreation = false;
-      pending.status = "waiting_to_send";
-      await submitPendingMessage(pending);
-    }
-  }
-
-  function shouldRetryTaskCreationRequest(error, attempt) {
-    return attempt === 0 && Boolean(
-      error && (error.network || error.status === 504)
-    );
-  }
-
-  async function requestTaskCreation(createPath, requestId) {
-    for (var attempt = 0; attempt < 2; attempt += 1) {
-      try {
-        return await api(createPath, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ requestId: requestId })
-        });
-      } catch (error) {
-        if (!shouldRetryTaskCreationRequest(error, attempt)) throw error;
-        await waitForMobileFetchRetry();
-      }
-    }
-    throw new Error("电脑响应超时，请稍后重试。");
-  }
 
   async function createTask(sourceThreadId, projectName, existingTemporaryTask) {
-    if (state.creatingTask || state.switchingAdapter) return;
+    if (state.switchingAdapter) return;
     var reusableTask = currentLocalTaskDraft();
     if (!existingTemporaryTask && reusableTask) {
       await selectTask(reusableTask.threadId, true);
       requestAnimationFrame(function () { composerInput.focus(); });
-      if (reusableTask.localCreationState === "failed") {
-        sourceThreadId = reusableTask.localSourceThreadId || "";
-        projectName = reusableTask.projectName || projectName || "";
-        existingTemporaryTask = reusableTask;
-      } else {
-        showToast("已回到未完成的新任务");
-        return;
-      }
+      showToast("已回到未完成的新任务");
+      return;
     }
     var temporaryTask = existingTemporaryTask || createTemporaryTask(sourceThreadId, projectName);
-    state.creatingTask = true;
-    temporaryTask.localCreationState = "creating";
+    temporaryTask.localCreationState = "ready";
     temporaryTask.localCreationError = "";
-    state.creatingProjectKey = sourceThreadId
-      ? taskGroupKey(taskById(sourceThreadId) || {})
-      : "";
+    temporaryTask.localSourceThreadId = sourceThreadId || "";
+    rememberLocalTaskDraft(temporaryTask);
     if (!existingTemporaryTask) {
-      rememberLocalTaskDraft(temporaryTask);
       state.tasks.unshift(temporaryTask);
       await selectTask(temporaryTask.threadId, true);
-      requestAnimationFrame(function () { composerInput.focus(); });
     } else {
       renderTasks();
       updateHeader();
       renderMessages(false);
     }
-    try {
-      var createPath = adapterApiPath("/api/tasks");
-      if (sourceThreadId) {
-        var createUrl = new URL(createPath, window.location.origin);
-        createUrl.searchParams.set("sourceTask", sourceThreadId);
-        createPath = createUrl.pathname + createUrl.search;
-      }
-      var payload = await requestTaskCreation(createPath, temporaryTask.threadId);
-      var task = payload && payload.task;
-      if (!task || !task.threadId) throw new Error("电脑端没有返回新任务。");
-      task = Object.assign({}, task, {
-        localCreationState: "ready",
-        localCreationError: "",
-        localSourceThreadId: sourceThreadId || ""
-      });
-      rememberLocalTaskDraft(task);
-      state.adapterError = "";
-      var temporaryThreadId = temporaryTask.threadId;
-      state.tasks = state.tasks.filter(function (candidate) {
-        return candidate.threadId !== task.threadId || candidate.threadId === temporaryThreadId;
-      });
-      var taskIndex = state.tasks.findIndex(function (candidate) {
-        return candidate.threadId === temporaryThreadId;
-      });
-      if (taskIndex >= 0) state.tasks[taskIndex] = task;
-      if (state.currentThreadId === temporaryThreadId) {
-        migrateTemporaryConversation(temporaryThreadId, task.threadId);
-      } else {
-        var temporaryKey = conversationStateKey(state.currentAdapter, temporaryThreadId);
-        var realKey = conversationStateKey(state.currentAdapter, task.threadId);
-        moveConversationValue(
-          state.composerDrafts,
-          state.composerDraftOrder,
-          temporaryKey,
-          realKey,
-          MAX_COMPOSER_DRAFTS
-        );
-        moveConversationValue(
-          state.conversationSnapshots,
-          state.conversationSnapshotOrder,
-          temporaryKey,
-          realKey,
-          MAX_CONVERSATION_SNAPSHOTS
-        );
-        state.pendingMessages.forEach(function (pending) {
-          if (pending.threadId === temporaryThreadId) pending.threadId = task.threadId;
-        });
-      }
-      renderTasks();
-      updateHeader();
-      renderMessages(false);
-      void submitMessagesWaitingForTaskCreation(task.threadId);
-      void loadTasks(false);
-      if (state.currentThreadId === task.threadId) void loadMessages(false, false, false);
-      showToast(sourceThreadId
-        ? "已在“" + (projectName || "这个项目") + "”中准备好新任务"
-        : "新任务已准备好，可以继续输入");
-    } catch (error) {
-      temporaryTask.localCreationState = "failed";
-      temporaryTask.localCreationError = error.message || "新建任务失败";
-      rememberLocalTaskDraft(temporaryTask);
-      state.pendingMessages.forEach(function (pending) {
-        if (pending.threadId === temporaryTask.threadId && pending.waitingForTaskCreation) {
-          pending.status = "waiting_task_retry";
-        }
-      });
-      saveComposerDraft(state.currentAdapter, temporaryTask.threadId);
-      if (state.currentThreadId === temporaryTask.threadId) saveCurrentConversationSnapshot();
-      renderTasks();
-      updateHeader();
-      renderMessages(false);
-      showToast("创建失败，输入内容已保留");
-    } finally {
-      state.creatingTask = false;
-      state.creatingProjectKey = "";
-      updateHeader();
-      renderTasks();
-    }
+    requestAnimationFrame(function () { composerInput.focus(); });
+    showToast(sourceThreadId
+      ? "新任务已准备好，发送第一条消息后创建"
+      : "新任务已准备好，发送第一条消息后创建");
   }
 
   async function selectTask(threadId, updateUrl) {
@@ -7794,8 +7961,7 @@ export const CODEX_MOBILE_JS = String.raw`
     state.permissionRequestId += 1;
     state.permissionChanging = false;
     closeModelMenu();
-    closeReasoningMenu();
-    closePermissionMenu();
+    closeSessionMenu();
     renderModelControl();
     state.loadingOlderMessages = false;
     state.historyRequestId += 1;
@@ -7803,6 +7969,7 @@ export const CODEX_MOBILE_JS = String.raw`
     var restored = restoreConversationSnapshot(state.currentAdapter, threadId);
     if (!restored) {
       state.serverMessages = [];
+      state.outboundMessages = [];
       state.historyMessages = [];
       state.latestMessages = [];
       state.oldestMessageCursor = null;
@@ -8052,7 +8219,10 @@ export const CODEX_MOBILE_JS = String.raw`
       text: text,
       images: images.slice(),
       imageCount: images.length,
-      status: "contacting_computer",
+      status: "sending",
+      browserAttempts: 0,
+      manualRetry: false,
+      createTaskSourceThreadId: "",
       turnId: "",
       queued: false,
       optimisticRun: false,
@@ -8065,26 +8235,50 @@ export const CODEX_MOBILE_JS = String.raw`
     };
   }
 
-  function enqueuePendingPost(pending, post) {
-    var key = conversationStateKey(pending.adapter || "codex", pending.threadId);
-    var previous = state.messagePostChains[key] || Promise.resolve();
-    var current = previous.catch(function () {}).then(post);
-    var tail = current.then(function () {}, function () {}).then(function () {
-      if (state.messagePostChains[key] === tail) delete state.messagePostChains[key];
+  function pendingMessageNeedsServerAcceptance(pending) {
+    return !["accepted", "queued", "submitted", "delivered"].includes(pending.status);
+  }
+
+  function hasEarlierPendingMessage(pending) {
+    var pendingIndex = state.pendingMessages.findIndex(function (message) {
+      return message.clientId === pending.clientId;
     });
-    state.messagePostChains[key] = tail;
-    return current;
+    if (pendingIndex <= 0) return false;
+    return state.pendingMessages.slice(0, pendingIndex).some(pendingMessageNeedsServerAcceptance);
+  }
+
+  function submitNextWaitingMessage() {
+    if (state.sending) return;
+    var next = state.pendingMessages.find(function (message) {
+      return message.status === "waiting_to_send" && !hasEarlierPendingMessage(message);
+    });
+    if (next) void submitPendingMessage(next);
   }
 
   async function submitPendingMessage(pending) {
     if (pending.inFlight) return;
     var requestedThreadId = pending.threadId;
     var requestedAdapter = pending.adapter || state.currentAdapter;
+    if (hasEarlierPendingMessage(pending)) {
+      pending.status = "waiting_to_send";
+      renderMessages(true);
+      updateHeader();
+      saveCurrentConversationSnapshot();
+      return;
+    }
+    if (state.sending) {
+      pending.status = "waiting_to_send";
+      renderMessages(true);
+      updateHeader();
+      return;
+    }
+    state.sending = true;
     pending.inFlight = true;
-    pending.status = "contacting_computer";
+    pending.status = pending.browserAttempts > 0 ? "retrying" : (
+      pending.waitingForTaskCreation ? "creating_task" : "sending"
+    );
     renderMessages(true);
     updateHeader();
-    showToast("正在尝试发送给电脑…");
     try {
       var images = (pending.images || []).map(function (image) {
         return {
@@ -8093,132 +8287,78 @@ export const CODEX_MOBILE_JS = String.raw`
           dataBase64: image.dataBase64
         };
       });
-      var result = await enqueuePendingPost(pending, function () {
-        return api(adapterApiPath(
-          "/api/tasks/" + encodeURIComponent(requestedThreadId) + "/messages",
-          requestedAdapter
-        ), {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            clientId: pending.clientId,
-            text: pending.text,
-            images: images
-          })
-        });
+      var body = JSON.stringify({
+        clientId: pending.clientId,
+        createdAtMs: pending.createdAtMs,
+        text: pending.text,
+        images: images,
+        retry: Boolean(pending.manualRetry),
+        createTaskSourceThreadId: pending.waitingForTaskCreation
+          ? pending.createTaskSourceThreadId || ""
+          : undefined
       });
-      var deliveryChecks = 0;
-      while (result && result.status === "forwarding") {
-        pending.status = "forwarding_to_agent";
-        renderMessages(true);
-        deliveryChecks += 1;
-        if (deliveryChecks >= 100) {
-          throw new Error(currentAdapterName() + " 暂未确认收到这条消息，请先检查任务状态。");
-        }
-        await new Promise(function (resolve) { setTimeout(resolve, 650); });
-        result = await api(adapterApiPath(
-          "/api/tasks/" + encodeURIComponent(requestedThreadId) +
-          "/message-deliveries/" + encodeURIComponent(pending.clientId),
-          requestedAdapter
-        ));
+      var result = await api(adapterApiPath(
+        "/api/tasks/" + encodeURIComponent(requestedThreadId) + "/messages",
+        requestedAdapter
+      ), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: body,
+        keepalive: body.length < 60 * 1024
+      });
+      pending.manualRetry = false;
+      pending.browserAttempts = 0;
+      pending.turnId = result.turnId || pending.turnId || "";
+      pending.queuedMessageId = result.queuedMessageId || pending.queuedMessageId || "";
+      pending.queued = Boolean(result.queued || result.status === "queued");
+      pending.status = result.status || (pending.queued ? "queued" : "accepted");
+      if (result.threadId && result.threadId !== requestedThreadId) {
+        migrateTemporaryConversation(requestedThreadId, result.threadId);
       }
-      if (result && result.status === "failed") {
-        throw new Error(result.error || "消息发送失败。");
-      }
-      if (result.duplicate) {
-        state.pendingMessages = state.pendingMessages.filter(function (message) {
-          return message.clientId !== pending.clientId;
-        });
-        if (pending.optimisticRun) {
-          state.localRunSummary = null;
-          state.optimisticProgressTurnId = null;
-          pending.optimisticRun = false;
-        }
-        renderQueuedMessages(state.queuedMessages);
-        renderMessages(true);
-        showToast("与最近一条消息相同，未重复发送");
-        await loadMessages(false);
-        return;
-      }
-      pending.turnId = result.turnId || "";
-      pending.queuedMessageId = result.queuedMessageId || "";
-      pending.queued = Boolean(result.queued);
-      pending.status = pending.queued ? "queued" : "sent";
-      if (requestedThreadId !== state.currentThreadId) return;
-      if (pending.queued) {
-        if (pending.optimisticRun) {
-          state.localRunSummary = null;
-          state.optimisticProgressTurnId = null;
-          pending.optimisticRun = false;
-        }
-        var queuedMessage = {
-          id: pending.queuedMessageId || pending.clientId,
-          text: pending.text,
-          imageCount: pending.imageCount,
-          createdAtMs: pending.createdAtMs
-        };
-        if (!state.queuedMessages.some(function (message) {
-          return message.id === queuedMessage.id;
-        })) state.queuedMessages.push(queuedMessage);
-        state.pendingMessages = state.pendingMessages.filter(function (message) {
-          return message.clientId !== pending.clientId;
-        });
-        renderQueuedMessages(state.queuedMessages);
-        showToast("已加入待发送");
-        await loadMessages(false);
-      } else {
-        beginOptimisticRunIfNeeded(pending);
-        pending.displayInTranscript = true;
-        renderQueuedMessages(state.queuedMessages);
-        if (pending.optimisticRun) {
-          state.optimisticProgressTurnId = pending.turnId || "";
-        }
-        if (pending.optimisticRun && state.localRunSummary) {
-          state.localRunSummary.turnId = pending.turnId || undefined;
-        } else if (!state.localRunSummary || state.localRunSummary.status !== "running") {
-          state.localRunSummary = {
-            turnId: pending.turnId || undefined,
-            status: "running",
-            startedAtMs: Date.now(),
-            durationMs: 0,
-            receivedAtMs: Date.now()
-          };
-        }
-        showToast("已交给 " + currentAdapterName() + "，正在处理");
-      }
-      renderMessages(true);
-      setTimeout(function () {
-        if (requestedThreadId === state.currentThreadId) loadMessages(true);
-      }, 250);
-    } catch (error) {
-      var uncertain = Boolean(error && error.network) ||
-        String(error && error.message || "").includes("暂未确认");
-      pending.status = uncertain ? "unconfirmed" : "failed";
-      pending.displayInTranscript = true;
-      renderQueuedMessages(state.queuedMessages);
-      if (pending.optimisticRun) {
+      if (pending.queued && pending.optimisticRun) {
         state.localRunSummary = null;
+        state.optimisticProgressTurnId = null;
         pending.optimisticRun = false;
       }
-      if (requestedThreadId === state.currentThreadId) {
-        try {
-          await loadMessages(false);
-        } catch {}
-        var stillPending = state.pendingMessages.some(function (message) {
-          return message.clientId === pending.clientId;
-        });
-        if (stillPending) {
-          renderMessages(true);
-          showToast(uncertain
-            ? "发送状态暂未确认，请先查看任务状态"
-            : "发送失败：" + (error.message || "请稍后重试"));
-        } else {
-          showToast("已发送，" + currentAdapterName() + " 正在处理");
+      renderQueuedMessages(state.queuedMessages);
+      renderMessages(true);
+      showToast(result.duplicate
+        ? "消息已由后台接收，无需重复提交"
+        : "消息已接收，将在后台继续提交");
+      setTimeout(function () {
+        var activeThreadId = result.threadId || requestedThreadId;
+        if (activeThreadId === state.currentThreadId || requestedThreadId === state.currentThreadId) {
+          void loadMessages(true);
         }
+      }, 180);
+    } catch (error) {
+      pending.browserAttempts = Math.min(6, Number(pending.browserAttempts || 0) + 1);
+      pending.lastError = error && error.message || "网络连接暂时中断";
+      pending.status = pending.browserAttempts >= 6 ? "failed" : "retrying";
+      pending.displayInTranscript = true;
+      if (pending.optimisticRun) {
+        state.localRunSummary = null;
+        state.optimisticProgressTurnId = null;
+        pending.optimisticRun = false;
+      }
+      renderMessages(true);
+      if (pending.browserAttempts < 6) {
+        var retryDelay = Math.min(30000, 1000 * Math.pow(2, pending.browserAttempts - 1));
+        showToast("连接暂时中断，正在自动重试");
+        setTimeout(function () {
+          if (state.pendingMessages.some(function (message) { return message.clientId === pending.clientId; })) {
+            void submitPendingMessage(pending);
+          }
+        }, retryDelay);
+      } else {
+        showToast("暂时无法提交，消息已保留");
       }
     } finally {
+      state.sending = false;
       pending.inFlight = false;
       updateHeader();
+      saveCurrentConversationSnapshot();
+      submitNextWaitingMessage();
     }
   }
 
@@ -8236,26 +8376,68 @@ export const CODEX_MOBILE_JS = String.raw`
     };
   }
 
+  async function copyMessageText(text) {
+    var value = String(text || "");
+    if (!value) return;
+    try {
+      await navigator.clipboard.writeText(value);
+      showToast("消息已复制");
+    } catch (_) {
+      var textarea = document.createElement("textarea");
+      textarea.value = value;
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand("copy");
+      textarea.remove();
+      showToast("消息已复制");
+    }
+  }
+
   function retryPendingMessage(clientId) {
     var pending = state.pendingMessages.find(function (message) { return message.clientId === clientId; });
-    if (!pending || pending.inFlight) return;
-    var task = taskById(pending.threadId);
-    if (isTemporaryTask(task)) {
-      pending.waitingForTaskCreation = true;
-      pending.status = "creating_task";
-      renderMessages(true);
-      void createTask(task.localSourceThreadId || "", task.projectName || "", task);
-      return;
+    if (!pending) {
+      var outbound = state.outboundMessages.find(function (message) { return message.clientId === clientId; });
+      if (!outbound) return;
+      outbound.status = "accepted";
+      outbound.attempts = 0;
+      pending = {
+        clientId: outbound.clientId,
+        createdAtMs: outbound.createdAtMs || Date.now(),
+        threadId: state.currentThreadId,
+        text: outbound.text || "",
+        images: [],
+        imageCount: outbound.imageCount || (outbound.images || []).length,
+        status: "accepted",
+        browserAttempts: 0,
+        manualRetry: true,
+        createTaskSourceThreadId: currentTask() && currentTask().localSourceThreadId || "",
+        waitingForTaskCreation: String(state.currentThreadId || "").startsWith("local-new-"),
+        turnId: "",
+        queued: false,
+        optimisticRun: false,
+        displayInTranscript: true,
+        baselineUserCount: state.serverMessages.filter(function (message) { return message.role === "user"; }).length,
+        baselineUserKeys: state.serverMessages.filter(function (message) {
+          return message.role === "user";
+        }).map(messagePageKey)
+      };
+      state.pendingMessages.push(pending);
     }
+    var task = taskById(pending.threadId);
     pending.turnId = "";
+    pending.manualRetry = true;
+    pending.browserAttempts = 0;
     pending.baselineUserCount = state.serverMessages.filter(function (message) {
       return message.role === "user";
     }).length;
     pending.baselineUserKeys = state.serverMessages.filter(function (message) {
       return message.role === "user";
     }).map(messagePageKey);
+    if (!isTemporaryTask(task)) beginOptimisticRunIfNeeded(pending);
     renderMessages(true);
-    submitPendingMessage(pending);
+    void submitPendingMessage(pending);
   }
 
   composerForm.addEventListener("submit", function (event) {
@@ -8284,23 +8466,18 @@ export const CODEX_MOBILE_JS = String.raw`
     if (!hasContent || !state.currentThreadId) return;
     var pending = makePendingMessage(text, images);
     var waitingForTaskCreation = taskNeedsCreation(task);
-    var likelyQueued = shouldQueueComposerSubmission(
-      task,
-      visibleRunSummary,
-      state.queuedMessages,
-      state.pendingApproval,
-      waitingForTaskCreation
-    );
-    pending.displayInTranscript = !likelyQueued;
+    var likelyQueued = !waitingForTaskCreation && (isTaskActivelyRunning(task) ||
+      state.queuedMessages.length > 0 || Boolean(state.pendingApproval));
+    pending.displayInTranscript = true;
     if (waitingForTaskCreation) {
       pending.waitingForTaskCreation = true;
-      pending.status = task.localCreationState === "failed"
-        ? "waiting_task_retry"
-        : "creating_task";
+      pending.createTaskSourceThreadId = task.localSourceThreadId || "";
+      pending.status = "creating_task";
+    } else if (!likelyQueued) {
+      beginOptimisticRunIfNeeded(pending);
     }
     state.composerRevision += 1;
     state.pendingMessages.push(pending);
-    if (task && task.localCreationState === "ready") finishLocalTaskDraft(task.threadId);
     composerInput.value = "";
     clearComposerDraft(state.currentAdapter, state.currentThreadId);
     state.pendingImages = [];
@@ -8308,12 +8485,7 @@ export const CODEX_MOBILE_JS = String.raw`
     resizeComposer();
     renderQueuedMessages(state.queuedMessages);
     renderMessages(true);
-    if (!waitingForTaskCreation) {
-      submitPendingMessage(pending);
-    } else if (task.localCreationState === "failed") {
-      pending.status = "creating_task";
-      void createTask(task.localSourceThreadId || "", task.projectName || "", task);
-    }
+    void submitPendingMessage(pending);
   });
 
   authForm.addEventListener("submit", async function (event) {
@@ -8346,33 +8518,33 @@ export const CODEX_MOBILE_JS = String.raw`
       return;
     }
     state.modelMenuOpen = !state.modelMenuOpen;
-    closeReasoningMenu();
-    closePermissionMenu();
+    closeSessionMenu();
     renderModelControl();
   });
 
-  composerReasoningButton.addEventListener("click", function () {
+  composerSessionButton.addEventListener("click", function () {
     var modelState = currentTaskModelState();
-    if (!modelState || !modelState.canChangeReasoningEffort) {
-      showToast(modelState && modelState.reasoningEffortUnavailableReason || "当前模型没有可选推理强度");
-      return;
-    }
-    state.reasoningMenuOpen = !state.reasoningMenuOpen;
-    closeModelMenu();
-    closePermissionMenu();
-    renderReasoningControl();
-  });
-
-  composerPermissionButton.addEventListener("click", function () {
     var permissionState = currentTaskPermissionState();
-    if (!permissionState || !permissionState.canChange) {
-      showToast(permissionState && permissionState.unavailableReason || "当前任务暂时不能切换权限范围");
+    var canChangeReasoning = Boolean(
+      modelState && modelState.canChangeReasoningEffort &&
+      Array.isArray(modelState.reasoningEffortOptions) && modelState.reasoningEffortOptions.length > 0
+    );
+    var canChangePermission = Boolean(
+      permissionState && permissionState.canChange &&
+      Array.isArray(permissionState.options) && permissionState.options.length > 0
+    );
+    if (!canChangeReasoning && !canChangePermission) {
+      showToast(
+        modelState && modelState.reasoningEffortUnavailableReason ||
+        permissionState && permissionState.unavailableReason ||
+        "当前任务暂时不能切换推理强度或访问权限"
+      );
       return;
     }
-    state.permissionMenuOpen = !state.permissionMenuOpen;
+    if (state.reasoningChanging || state.permissionChanging) return;
+    state.sessionMenuOpen = !state.sessionMenuOpen;
     closeModelMenu();
-    closeReasoningMenu();
-    renderPermissionControl();
+    renderSessionControl();
   });
 
   composerImageButton.addEventListener("click", function () {
@@ -8427,6 +8599,7 @@ export const CODEX_MOBILE_JS = String.raw`
     state.tasks = [];
     state.currentThreadId = "";
     state.serverMessages = [];
+    state.outboundMessages = [];
     state.historyMessages = [];
     state.latestMessages = [];
     state.oldestMessageCursor = null;
@@ -8588,19 +8761,14 @@ export const CODEX_MOBILE_JS = String.raw`
     }
     if (
       state.modelMenuOpen &&
-      !composerModelMenu.contains(event.target) &&
-      !composerModelButton.contains(event.target)
+      !eventPathContains(event, composerModelMenu) &&
+      !eventPathContains(event, composerModelButton)
     ) closeModelMenu();
     if (
-      state.reasoningMenuOpen &&
-      !composerReasoningMenu.contains(event.target) &&
-      !composerReasoningButton.contains(event.target)
-    ) closeReasoningMenu();
-    if (
-      state.permissionMenuOpen &&
-      !composerPermissionMenu.contains(event.target) &&
-      !composerPermissionButton.contains(event.target)
-    ) closePermissionMenu();
+      state.sessionMenuOpen &&
+      !eventPathContains(event, composerSessionMenu) &&
+      !eventPathContains(event, composerSessionButton)
+    ) closeSessionMenu();
     if (!taskContextMenu.hidden && !taskContextMenu.contains(event.target)) {
       closeTaskContextMenu();
     }
@@ -8618,9 +8786,14 @@ export const CODEX_MOBILE_JS = String.raw`
         return;
       }
       closeTaskContextMenu();
+      if (state.modelMenuOpen && state.activeModelGroup !== null) {
+        event.preventDefault();
+        state.activeModelGroup = null;
+        renderModelControl();
+        return;
+      }
       closeModelMenu();
-      closeReasoningMenu();
-      closePermissionMenu();
+      closeSessionMenu();
       toggleWorkspaceMenu(false);
     }
   });

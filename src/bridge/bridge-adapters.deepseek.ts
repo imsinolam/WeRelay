@@ -1357,17 +1357,14 @@ export class DeepSeekHarnessAdapter implements BridgeAdapter {
     if (projectedPermission === selectedPermission) {
       this.permissionSelectionBySession.delete(normalizedSessionId);
     }
-    const taskRunning = summary.running === true;
     const hasSelectableOptions = options.some((option) => option.id !== "custom");
     return {
       ...(currentPermission ? { currentPermission } : {}),
       options,
-      canChange: hasSelectableOptions && !taskRunning,
+      canChange: hasSelectableOptions,
       ...(!hasSelectableOptions
         ? { unavailableReason: "DeepSeek Harness 当前任务没有提供可切换的权限范围。" }
-        : taskRunning
-          ? { unavailableReason: "任务正在处理，完成或停止后再切换权限范围。" }
-          : {}),
+        : {}),
     };
   }
 

@@ -278,172 +278,19 @@ describe("mobile task short links", () => {
 });
 
 describe("mobile message delivery stages", () => {
-  test("acknowledges computer receipt before the Agent confirms the turn", async () => {
-    const authStore = createAuthStore("delivery stages password");
-    const sessionCookie = `codex_mobile_session=${authStore.createSessionToken()}`;
-    let finishSend: ((value: { queued: false; turnId: string }) => void) | undefined;
-    let failSend: ((error: Error) => void) | undefined;
-    let sendCalls = 0;
-    const server = await startCodexMobileServer({
-      host: "127.0.0.1",
-      port: 0,
-      lanAddress: "127.0.0.1",
-      accessToken: "mobile-secret",
-      authStore,
-      listTasks: async () => [],
-      readMessages: async (threadId) => ({
-        threadId,
-        messages: [],
-        queuedMessages: [],
-      }),
-      sendMessage: async () => {
-        sendCalls += 1;
-        return await new Promise((resolve, reject) => {
-          finishSend = resolve;
-          failSend = reject;
-        });
-      },
-    });
-
-    try {
-      const root = `http://127.0.0.1:${server.port}`;
-      const headers = {
-        cookie: sessionCookie,
-        "content-type": "application/json",
-      };
-      const response = await fetch(`${root}/api/tasks/thread-1/messages`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          clientId: "mobile-delivery-1",
-          text: "继续处理",
-          images: [],
-        }),
-      });
-      expect(response.status).toBe(202);
-      expect(await response.json()).toEqual({
-        ok: true,
-        clientId: "mobile-delivery-1",
-        status: "forwarding",
-      });
-      expect(sendCalls).toBe(1);
-
-      const forwarding = await fetch(
-        `${root}/api/tasks/thread-1/message-deliveries/mobile-delivery-1`,
-        { headers: { cookie: sessionCookie } },
-      );
-      expect(await forwarding.json()).toEqual({
-        clientId: "mobile-delivery-1",
-        status: "forwarding",
-      });
-
-      finishSend?.({ queued: false, turnId: "turn-1" });
-      await Bun.sleep(0);
-      const delivered = await fetch(
-        `${root}/api/tasks/thread-1/message-deliveries/mobile-delivery-1`,
-        { headers: { cookie: sessionCookie } },
-      );
-      expect(await delivered.json()).toEqual({
-        clientId: "mobile-delivery-1",
-        status: "sent",
-        queued: false,
-        turnId: "turn-1",
-      });
-
-      const duplicatePost = await fetch(`${root}/api/tasks/thread-1/messages`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          clientId: "mobile-delivery-1",
-          text: "继续处理",
-          images: [],
-        }),
-      });
-      expect(duplicatePost.status).toBe(202);
-      expect(sendCalls).toBe(1);
-
-      finishSend = undefined;
-      const failedPost = await fetch(`${root}/api/tasks/thread-1/messages`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          clientId: "mobile-delivery-2",
-          text: "检查失败状态",
-          images: [],
-        }),
-      });
-      expect(failedPost.status).toBe(202);
-      expect(sendCalls).toBe(2);
-      expect(failSend).toBeDefined();
-      failSend?.(new Error("Codex 暂未确认收到这条消息。"));
-      await Bun.sleep(0);
-      const failedDelivery = await fetch(
-        `${root}/api/tasks/thread-1/message-deliveries/mobile-delivery-2`,
-        { headers: { cookie: sessionCookie } },
-      );
-      expect(await failedDelivery.json()).toEqual({
-        clientId: "mobile-delivery-2",
-        status: "failed",
-        error: "Codex 暂未确认收到这条消息。",
-      });
-    } finally {
-      await server.close();
-    }
-  });
-
-  test("shows transport and Agent forwarding as separate mobile states", () => {
+  test("shows browser acceptance and background Agent forwarding as separate states", () => {
     const mobileWebSource = fs.readFileSync(
       path.join(process.cwd(), "src/daemon/codex-mobile-web.ts"),
       "utf8",
     );
     expect(mobileWebSource).toContain("正在尝试发送给电脑");
     expect(mobileWebSource).toContain("电脑正在组织发送给");
-    expect(CODEX_MOBILE_JS).toContain("message-deliveries");
+    expect(CODEX_MOBILE_JS).not.toContain("message-deliveries");
     expect(CODEX_MOBILE_JS).toContain("clientId: pending.clientId");
-    expect(CODEX_MOBILE_JS).toContain("adapter: state.currentAdapter");
+    expect(CODEX_MOBILE_JS).toContain("pending.adapter || state.currentAdapter");
     expect(CODEX_MOBILE_JS).toContain("requestedAdapter");
-    const submitStart = CODEX_MOBILE_JS.indexOf("  async function submitPendingMessage");
-    const submitEnd = CODEX_MOBILE_JS.indexOf("\n  function beginOptimisticRunIfNeeded", submitStart);
-    const submitBlock = CODEX_MOBILE_JS.slice(submitStart, submitEnd);
-    const duplicateBranch = submitBlock.indexOf("if (result.duplicate)");
-    const optimisticStart = submitBlock.indexOf("beginOptimisticRunIfNeeded(pending)");
-    expect(duplicateBranch).toBeGreaterThan(0);
-    expect(optimisticStart).toBeGreaterThan(duplicateBranch);
-    const creationSubmitStart = CODEX_MOBILE_JS.indexOf(
-      "  async function submitMessagesWaitingForTaskCreation",
-    );
-    const creationSubmitEnd = CODEX_MOBILE_JS.indexOf(
-      "\n  async function createTask",
-      creationSubmitStart,
-    );
-    expect(CODEX_MOBILE_JS.slice(creationSubmitStart, creationSubmitEnd))
-      .not.toContain("beginOptimisticRunIfNeeded(pending)");
-  });
-});
-
-describe("mobile document title", () => {
-  test("tracks task selection, async task loading, rename, and stable fallback", () => {
-    const state = {
-      currentThreadId: "task-a",
-      tasks: [] as Array<{ threadId: string; title: string }>,
-    };
-    const updateTitle = loadMobileDocumentTitleUpdater({ state, adapterName: "Codex" });
-
-    expect(updateTitle()).toBe("WeRelay · Codex");
-    state.tasks = [
-      { threadId: "task-a", title: "任务 A" },
-      { threadId: "task-b", title: "任务 B" },
-    ];
-    expect(updateTitle()).toBe("任务 A");
-
-    state.currentThreadId = "task-b";
-    expect(updateTitle()).toBe("任务 B");
-
-    state.tasks[1]!.title = "任务 B（已重命名）";
-    expect(updateTitle()).toBe("任务 B（已重命名）");
-
-    state.currentThreadId = "";
-    expect(updateTitle()).toBe("WeRelay · Codex");
+    expect(CODEX_MOBILE_JS).toContain('pending.status = result.status || (pending.queued ? "queued" : "accepted");');
+    expect(CODEX_MOBILE_JS).toContain("\\u6D88\\u606F\\u5DF2\\u63A5\\u6536\\uFF0C\\u5C06\\u5728\\u540E\\u53F0\\u7EE7\\u7EED\\u63D0\\u4EA4");
   });
 });
 
@@ -506,7 +353,7 @@ describe("mobile terminal switcher status", () => {
 describe("mobile reasoning effort selection", () => {
   test("leaves the control unselected when the session does not report an effort", () => {
     expect(CODEX_MOBILE_JS).toContain('"\\u8DDF\\u968F\\u4F1A\\u8BDD"');
-    expect(CODEX_MOBILE_JS).toContain('option.id === currentEffort ? "true" : "false"');
+    expect(CODEX_MOBILE_JS).toContain("selected: option.id === currentEffort");
   });
 });
 
@@ -652,33 +499,19 @@ describe("mobile fetch resilience", () => {
     expect(postAttempts).toBe(1);
   });
 
-  test("keeps transient background refresh failures quiet and treats POST delivery as uncertain", () => {
+  test("keeps transient background refresh failures quiet and retries POST acceptance with one stable id", () => {
     expect(CODEX_MOBILE_JS).toContain("if (error.network && !initial && state.tasks.length)");
     expect(CODEX_MOBILE_JS).toContain("if (!error.network) showToast");
-    expect(CODEX_MOBILE_JS).toContain('var uncertain = Boolean(error && error.network) ||');
+    expect(CODEX_MOBILE_JS).toContain("clientId: pending.clientId");
+    expect(CODEX_MOBILE_JS).toContain("pending.browserAttempts = Math.min(6");
+    expect(CODEX_MOBILE_JS).toContain("keepalive: body.length < 60 * 1024");
+    expect(CODEX_MOBILE_JS).toContain("void submitPendingMessage(pending);");
+    expect(CODEX_MOBILE_JS).toContain("hasEarlierPendingMessage(pending)");
+    expect(CODEX_MOBILE_JS).toContain("\\u5DF2\\u4FDD\\u7559\\uFF0C\\u7B49\\u5F85\\u524D\\u4E00\\u6761\\u6D88\\u606F\\u63D0\\u4EA4");
+    expect(CODEX_MOBILE_JS).toContain("submitNextWaitingMessage();");
   });
 
-  test("retries idempotent task creation once after a Relay timeout", async () => {
-    const requests: Array<Record<string, unknown>> = [];
-    let attempts = 0;
-    const requestTaskCreation = loadMobileTaskCreationRequester(async (_path, options) => {
-      attempts += 1;
-      requests.push(options as Record<string, unknown>);
-      if (attempts === 1) {
-        throw Object.assign(new Error("电脑响应超时，请稍后重试。"), { status: 504 });
-      }
-      return { task: { threadId: "task-created" } };
-    });
 
-    await expect(requestTaskCreation("/api/tasks", "local-draft-1")).resolves.toEqual({
-      task: { threadId: "task-created" },
-    });
-    expect(attempts).toBe(2);
-    expect(requests.map((request) => request.body)).toEqual([
-      JSON.stringify({ requestId: "local-draft-1" }),
-      JSON.stringify({ requestId: "local-draft-1" }),
-    ]);
-  });
 });
 
 describe("mobile message refresh coordination", () => {
@@ -711,59 +544,7 @@ describe("mobile message refresh coordination", () => {
   });
 });
 
-describe("mobile per-message delivery state", () => {
-  test("serializes initial posts per task while allowing different tasks in parallel", async () => {
-    const { enqueuePendingPost } = loadMobilePendingPostQueue();
-    const order: string[] = [];
-    let releaseFirst: (() => void) | undefined;
-    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
 
-    const first = enqueuePendingPost(
-      { adapter: "codex", threadId: "task-a" },
-      async () => {
-        order.push("a1-start");
-        await firstGate;
-        order.push("a1-end");
-        return "a1";
-      },
-    );
-    const second = enqueuePendingPost(
-      { adapter: "codex", threadId: "task-a" },
-      async () => {
-        order.push("a2-start");
-        return "a2";
-      },
-    );
-    const otherTask = enqueuePendingPost(
-      { adapter: "codex", threadId: "task-b" },
-      async () => {
-        order.push("b1-start");
-        return "b1";
-      },
-    );
-
-    await Bun.sleep(0);
-    expect(order).toEqual(["a1-start", "b1-start"]);
-    releaseFirst?.();
-    expect(await Promise.all([first, second, otherTask])).toEqual(["a1", "a2", "b1"]);
-    expect(order).toEqual(["a1-start", "b1-start", "a1-end", "a2-start"]);
-  });
-
-  test("does not lock the composer while another message waits for Agent confirmation", () => {
-    const submitStart = CODEX_MOBILE_JS.indexOf("  async function submitPendingMessage");
-    const submitEnd = CODEX_MOBILE_JS.indexOf("\n  function beginOptimisticRunIfNeeded", submitStart);
-    const submitBlock = CODEX_MOBILE_JS.slice(submitStart, submitEnd);
-    const composerStart = CODEX_MOBILE_JS.indexOf('composerForm.addEventListener("submit"');
-    const composerEnd = CODEX_MOBILE_JS.indexOf("\n\n  authForm.addEventListener", composerStart);
-    const composerBlock = CODEX_MOBILE_JS.slice(composerStart, composerEnd);
-
-    expect(submitBlock).toContain("pending.inFlight = true");
-    expect(submitBlock).toContain("await enqueuePendingPost(pending");
-    expect(submitBlock).not.toContain("state.sending");
-    expect(composerBlock).not.toContain("state.sending");
-    expect(CODEX_MOBILE_JS).not.toContain("sending: false");
-  });
-});
 
 describe("mobile optimistic progress isolation", () => {
   const oldProgress = [
@@ -870,6 +651,18 @@ describe("mobile approval result helpers", () => {
     expect(helpers.title("confirm_session")).toBe("本任务后续同类操作已允许");
     expect(helpers.title("confirm_task")).toBe("已按本任务免审允许");
     expect(helpers.title("deny")).toBe("已拒绝此操作");
+  });
+
+  test("keeps the server message order authoritative when timestamps move backwards", () => {
+    const helpers = loadMobileApprovalResultHelpers();
+    const timeline = helpers.buildTimeline({
+      messages: [
+        { id: "old", role: "user", createdAtMs: 20_000 },
+        { id: "new", role: "user", createdAtMs: 10_000 },
+      ],
+    });
+
+    expect(timeline.map((item) => item.message?.id)).toEqual(["old", "new"]);
   });
 
   test("interleaves messages, progress, pending approvals, and approval results by occurrence time", () => {
@@ -1093,19 +886,7 @@ return {
 };`)() as ReturnType<typeof loadMobileFetchResilienceHelpers>;
 }
 
-function loadMobileTaskCreationRequester(
-  apiImpl: (path: string, options: Record<string, unknown>) => Promise<unknown>,
-): (path: string, requestId: string) => Promise<unknown> {
-  const start = CODEX_MOBILE_JS.indexOf("  function shouldRetryTaskCreationRequest");
-  const end = CODEX_MOBILE_JS.indexOf("\n  async function createTask(", start);
-  if (start < 0 || end < 0) throw new Error("Mobile task creation requester not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
-  return new Function("api", "waitForMobileFetchRetry", `${source}
-return requestTaskCreation;`)(
-    apiImpl,
-    async () => undefined,
-  ) as ReturnType<typeof loadMobileTaskCreationRequester>;
-}
+
 
 function loadMobileMarkdownRenderer(): (markdown: string, foldPrefix?: string) => string {
   const start = CODEX_MOBILE_JS.indexOf("  function escapeHtml");
@@ -1115,24 +896,7 @@ function loadMobileMarkdownRenderer(): (markdown: string, foldPrefix?: string) =
   return new Function(`${source}\nreturn renderMarkdown;`)() as (markdown: string) => string;
 }
 
-function loadMobilePendingPostQueue(): {
-  enqueuePendingPost: (
-    pending: { adapter?: string; threadId: string },
-    post: () => Promise<unknown>,
-  ) => Promise<unknown>;
-} {
-  const start = CODEX_MOBILE_JS.indexOf("  function enqueuePendingPost");
-  const end = CODEX_MOBILE_JS.indexOf("\n  async function submitPendingMessage", start);
-  if (start < 0 || end < 0) throw new Error("Mobile pending-post queue not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
-  const state = { messagePostChains: Object.create(null) };
-  const conversationStateKey = (adapter: string, threadId: string) =>
-    `${adapter}\0${threadId}`;
-  return new Function("state", "conversationStateKey", `
-${source}
-return { enqueuePendingPost };
-`)(state, conversationStateKey) as ReturnType<typeof loadMobilePendingPostQueue>;
-}
+
 
 function loadMobileMessageRefreshMerger(): (
   current: { forceBottom: boolean; historyOnly: boolean; forceFullPage: boolean } | null,
@@ -1767,6 +1531,26 @@ function loadMobileSwitchProgressFormatter(): (startedAtMs: number, nowMs: numbe
   >;
 }
 
+function loadMobileEventPathContains(): (event: unknown, element: unknown) => boolean {
+  const start = CODEX_MOBILE_JS.indexOf("  function eventPathContains");
+  const end = CODEX_MOBILE_JS.indexOf("\n  function ", start + 4);
+  const source = CODEX_MOBILE_JS.slice(start, end);
+  return new Function(`${source}\nreturn eventPathContains;`)() as (
+    event: unknown,
+    element: unknown,
+  ) => boolean;
+}
+
+function loadMobileComposerSessionLabel(): (reasoning: string, permission: string) => string {
+  const start = CODEX_MOBILE_JS.indexOf("  function composerSessionLabel");
+  const end = CODEX_MOBILE_JS.indexOf("\n  function ", start + 4);
+  const source = CODEX_MOBILE_JS.slice(start, end);
+  return new Function(`${source}\nreturn composerSessionLabel;`)() as (
+    reasoning: string,
+    permission: string,
+  ) => string;
+}
+
 function loadMobileTaskContextMenuTrigger(options: {
   selectedText?: string;
   mobile?: boolean;
@@ -2053,76 +1837,49 @@ describe("Codex mobile conversation cache", () => {
     expect(helpers.findReusableLocalTask(merged)).toBe(merged[0]);
   });
 
-  test("reuses the unfinished new task and only ends draft mode on first submit", () => {
+  test("reuses the unfinished new task and ends draft mode after the server resolves it", () => {
     const start = CODEX_MOBILE_JS.indexOf("  async function createTask(");
     const end = CODEX_MOBILE_JS.indexOf("\n  async function selectTask(", start);
     const block = CODEX_MOBILE_JS.slice(start, end);
 
     expect(block).toContain("var reusableTask = currentLocalTaskDraft();");
     expect(block).toContain("await selectTask(reusableTask.threadId, true);");
-    expect(block).toContain('localCreationState: "ready"');
+    expect(block).toContain('temporaryTask.localCreationState = "ready";');
     expect(CODEX_MOBILE_JS).toContain("localTaskDrafts: Object.create(null)");
-    expect(CODEX_MOBILE_JS).toContain("rememberLocalTaskDraft(task);");
+    expect(CODEX_MOBILE_JS).toContain("rememberLocalTaskDraft(temporaryTask);");
     expect(CODEX_MOBILE_JS).toContain("forgetLocalTaskDraft(state.currentAdapter, threadId);");
     expect(CODEX_MOBILE_JS).toContain(
-      'if (task && task.localCreationState === "ready") finishLocalTaskDraft(task.threadId);',
-    );
-    expect(CODEX_MOBILE_JS).toContain(
-      "if (!waiting.length) return;\n    finishLocalTaskDraft(threadId);",
+      "finishLocalTaskDraft(payload.resolvedThreadId);",
     );
     expect(CODEX_MOBILE_JS).toContain(
       "var waitingForTaskCreation = taskNeedsCreation(task);",
     );
   });
 
-  test("automatically retries a restored failed task draft when New Task is pressed", () => {
-    const createStart = CODEX_MOBILE_JS.indexOf("  async function createTask(");
-    const createEnd = CODEX_MOBILE_JS.indexOf("\n  async function selectTask(", createStart);
-    const createBlock = CODEX_MOBILE_JS.slice(createStart, createEnd);
-    const buttonStart = CODEX_MOBILE_JS.indexOf('  newTaskButton.addEventListener("click"');
-    const buttonEnd = CODEX_MOBILE_JS.indexOf("\n  taskList.addEventListener", buttonStart);
-    const buttonBlock = CODEX_MOBILE_JS.slice(buttonStart, buttonEnd);
-
-    expect(createBlock).toContain('reusableTask.localCreationState === "failed"');
-    expect(createBlock).toContain("existingTemporaryTask = reusableTask;");
-    expect(createBlock).toContain("sourceThreadId = reusableTask.localSourceThreadId || \"\";");
-    expect(buttonBlock).toContain('void createTask("", "");');
-    expect(buttonBlock).not.toContain("void selectTask(task.threadId, true);");
-  });
-
-  test("shows the real task creation failure beside the retry action", () => {
-    expect(CODEX_MOBILE_JS).toContain("function taskCreationErrorText(task)");
-    expect(CODEX_MOBILE_JS).toContain(
-      'taskCreationErrorText(taskById(message.threadId))',
-    );
-    expect(CODEX_MOBILE_JS).toContain(
-      "escapeHtml(taskCreationErrorText(emptyTask))",
-    );
-  });
-
-  test("shows an optimistic task before waiting for desktop creation and preserves failed input", () => {
+  test("shows a local task immediately and lets the persisted first message create it in the background", () => {
     const start = CODEX_MOBILE_JS.indexOf("  async function createTask(");
     const end = CODEX_MOBILE_JS.indexOf("\n  async function selectTask(", start);
     const block = CODEX_MOBILE_JS.slice(start, end);
     const insertIndex = block.indexOf("state.tasks.unshift(temporaryTask);");
     const selectIndex = block.indexOf("await selectTask(temporaryTask.threadId, true);");
-    const requestIndex = block.indexOf("var payload = await requestTaskCreation(createPath");
+
 
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);
     expect(insertIndex).toBeGreaterThan(-1);
     expect(selectIndex).toBeGreaterThan(insertIndex);
-    expect(requestIndex).toBeGreaterThan(selectIndex);
-    expect(block).toContain('temporaryTask.localCreationState = "failed";');
-    expect(
-      block.includes("创建失败，输入内容已保留") ||
-        block.includes("\\u521B\\u5EFA\\u5931\\u8D25\\uFF0C\\u8F93\\u5165\\u5185\\u5BB9\\u5DF2\\u4FDD\\u7559"),
-    ).toBe(true);
+    expect(block).not.toContain("await api(");
     expect(block).not.toContain('composerInput.value = "";');
-    expect(block).toContain("requestTaskCreation(createPath, temporaryTask.threadId)");
+    expect(CODEX_MOBILE_JS).toContain("pending.waitingForTaskCreation = true;");
     expect(CODEX_MOBILE_JS).toContain(
-      "task && task.localCreationState === \"creating\"",
+      'pending.createTaskSourceThreadId = task.localSourceThreadId || "";',
     );
+    expect(CODEX_MOBILE_JS).toContain("void submitPendingMessage(pending);");
+    expect(CODEX_MOBILE_JS).toContain(
+      'pending.status = pending.browserAttempts >= 6 ? "failed" : "retrying";',
+    );
+    expect(CODEX_MOBILE_JS).toContain("\\u590D\\u5236\\u6D88\\u606F");
+    expect(CODEX_MOBILE_JS).toContain("\\u91CD\\u65B0\\u63D0\\u4EA4");
     expect(CODEX_MOBILE_JS).toContain(
       "var localTasks = state.tasks.filter(isTemporaryTask);",
     );
@@ -2521,10 +2278,10 @@ describe("Codex mobile web rendering", () => {
   test("uses server control state instead of a stale local running badge", () => {
     expect(CODEX_MOBILE_JS).toContain("modelState && modelState.canChange && options.length > 0");
     expect(CODEX_MOBILE_JS).toContain(
-      "modelState && modelState.canChangeReasoningEffort && options.length > 0",
+      "modelState && modelState.canChangeReasoningEffort && reasoningOptions.length > 0",
     );
     expect(CODEX_MOBILE_JS).toContain(
-      "permissionState && permissionState.canChange && options.length > 0",
+      "permissionState && permissionState.canChange && permissionOptions.length > 0",
     );
   });
 
@@ -2533,10 +2290,49 @@ describe("Codex mobile web rendering", () => {
     expect(CODEX_MOBILE_JS).toContain("state.lastLiveMessageRefreshAtMs");
   });
 
-  test("renders a task permission scope selector beside model controls", () => {
-    expect(CODEX_MOBILE_HTML).toContain('id="composer-permission-control"');
-    expect(CODEX_MOBILE_HTML).toContain('id="composer-permission-button"');
-    expect(CODEX_MOBILE_HTML).toContain('id="composer-permission-menu"');
+  test("keeps the visible transcript while an adapter switch catches up", () => {
+    const renderStart = CODEX_MOBILE_JS.indexOf("  function renderMessages");
+    const renderEnd = CODEX_MOBILE_JS.indexOf("\n  function updateHeader", renderStart);
+    const renderBlock = CODEX_MOBILE_JS.slice(renderStart, renderEnd);
+    const switchStart = CODEX_MOBILE_JS.indexOf("  async function switchAdapter");
+    const switchEnd = CODEX_MOBILE_JS.indexOf("\n  function showAuthentication", switchStart);
+    const switchBlock = CODEX_MOBILE_JS.slice(switchStart, switchEnd);
+
+    expect(renderBlock).toContain('messagesEl.setAttribute("aria-busy", "true")');
+    expect(renderBlock).not.toContain(
+      'if (state.switchingAdapter) {\n      messagesEl.innerHTML = "";',
+    );
+    expect(renderBlock).toContain('messagesEl.setAttribute("aria-busy", "false")');
+    expect(switchBlock).toContain('state.switchingAdapter = false;\n      renderMessages(false);');
+  });
+
+  test("combines reasoning and permission into one concise composer menu", () => {
+    const sessionLabel = loadMobileComposerSessionLabel();
+    expect(CODEX_MOBILE_HTML).toContain('id="composer-session-control"');
+    expect(CODEX_MOBILE_HTML).toContain('id="composer-session-button"');
+    expect(CODEX_MOBILE_HTML).toContain('id="composer-session-menu"');
+    expect(CODEX_MOBILE_HTML).not.toContain('id="composer-reasoning-button"');
+    expect(CODEX_MOBILE_HTML).not.toContain('id="composer-permission-button"');
+    expect(sessionLabel("中", "完全访问")).toBe("中 · 完全访问");
+    expect(CODEX_MOBILE_JS).toContain('appendSessionMenuHeading("\\u63A8\\u7406\\u5F3A\\u5EA6")');
+    expect(CODEX_MOBILE_JS).toContain('appendSessionMenuHeading("\\u8BBF\\u95EE\\u6743\\u9650")');
+    expect(CODEX_MOBILE_CSS).toContain(
+      ".composer-permission-option .composer-model-option-label { white-space: nowrap; overflow-wrap: normal; }",
+    );
+  });
+
+  test("keeps a cascading model menu open when its clicked row is rerendered", () => {
+    const eventPathContains = loadMobileEventPathContains();
+    const detachedRow = {};
+    const modelMenu = { contains: () => false };
+    expect(eventPathContains({
+      target: detachedRow,
+      composedPath: () => [detachedRow, modelMenu],
+    }, modelMenu)).toBe(true);
+    expect(CODEX_MOBILE_JS).toContain("!eventPathContains(event, composerModelMenu)");
+  });
+
+  test("supports task permission scopes inside the combined session menu", () => {
     expect(CODEX_MOBILE_JS).toContain("loadCurrentTaskPermission");
     expect(CODEX_MOBILE_JS).toContain("selectCurrentTaskPermission");
     expect(CODEX_MOBILE_JS).toContain("taskPermissions: Object.create(null)");
@@ -2677,6 +2473,7 @@ describe("Codex mobile web rendering", () => {
     const html = renderMarkdown([
       "本地页面 http://127.0.0.1:17800/dashboard",
       "备用页面 http://localhost:4173/",
+      "• 评审页：http://localhost:5173/?view=design-audit",
       "[打开本地报告](file:///Users/demo/project/report.html)",
       "[打开工作区文件](/Users/demo/project/output/index.html)",
       "远程文档 https://example.com/docs",
@@ -2687,6 +2484,9 @@ describe("Codex mobile web rendering", () => {
     );
     expect(html).toContain(
       'href="/preview/open?target=http%3A%2F%2Flocalhost%3A4173%2F"',
+    );
+    expect(html).toContain(
+      'href="/preview/open?target=http%3A%2F%2Flocalhost%3A5173%2F%3Fview%3Ddesign-audit"',
     );
     expect(html).toContain(
       'href="/preview/open?target=file%3A%2F%2F%2FUsers%2Fdemo%2Fproject%2Freport.html"',
@@ -2708,6 +2508,43 @@ describe("Codex mobile web rendering", () => {
     expect(longBlock).toContain("代码 / 输出 · 7 行");
     expect(shortBlock).not.toContain('class="message-code-fold"');
     expect(shortBlock).toContain("<pre><code>line 1\nline 2</code></pre>");
+  });
+
+  test("folds command blocks by default and groups consecutive commands", () => {
+    const renderMarkdown = loadMobileMarkdownRenderer();
+
+    const singleCommand = renderMarkdown("```bash\ngit status --short\n```", "message-7");
+    expect(singleCommand).toContain('<details class="message-code-fold" data-fold-key="message-7:1">');
+    expect(singleCommand).toContain("命令 · 18 字");
+    expect(singleCommand).not.toContain("<pre><code>git status --short</code></pre></p>");
+    expect(singleCommand).not.toContain('class="message-tools-group"');
+
+    const grouped = renderMarkdown([
+      "我先确认状态：",
+      "```bash\ngit status --short\n```",
+      "再看分支：",
+      "```bash\ngit branch -a\n```",
+      "```bash\nnpm test\n```",
+      "以上就是全部检查。",
+    ].join("\n"), "message-9");
+    expect(grouped).toContain('<details class="message-tools-group" data-fold-key="message-9:tools-1">');
+    expect(grouped).toContain("命令 / 工具 · 3 条");
+    expect(grouped).toContain('data-fold-key="message-9:1"');
+    expect(grouped).toContain('data-fold-key="message-9:3"');
+    expect(grouped).toContain('data-fold-key="message-9:5"');
+    expect(grouped).toContain("我先确认状态：");
+    expect(grouped).toContain("再看分支：");
+    expect(grouped).toContain("以上就是全部检查。");
+    expect(grouped.indexOf("以上就是全部检查。")).toBeGreaterThan(grouped.indexOf("message-tools-group"));
+
+    const separated = renderMarkdown([
+      "```bash\ngit status\n```",
+      `${"这是很长的正文说明。".repeat(8)}因此两条命令被正文隔开，不应归入同一分组。`,
+      "```bash\ngit branch\n```",
+    ].join("\n"), "message-11");
+    expect(separated).not.toContain('class="message-tools-group"');
+    expect(separated).toContain('data-fold-key="message-11:1"');
+    expect(separated).toContain('data-fold-key="message-11:3"');
   });
 
   test("keeps the plan and latest progress visible while folding older completed activity", () => {
@@ -4215,6 +4052,105 @@ describe("Codex mobile server", () => {
     }
   });
 
+  test("returns persisted outbound messages and the resolved task id", async () => {
+    const authStore = createAuthStore("a configured mobile password");
+    const sessionCookie = `codex_mobile_session=${authStore.createSessionToken()}`;
+    const sends: Array<{ threadId: string; input: Record<string, unknown> }> = [];
+    const server = await startCodexMobileServer({
+      host: "127.0.0.1",
+      port: 0,
+      lanAddress: "127.0.0.1",
+      accessToken: "mobile-secret",
+      authStore,
+      listTasks: async () => [],
+      readMessages: async (threadId) => ({
+        threadId,
+        resolvedThreadId: "real-thread",
+        messages: [{ role: "assistant", text: "已有回复" }],
+        outboundMessages: [{
+          id: "mobile-outbox:codex:mobile-persisted",
+          role: "user",
+          text: "离页后继续提交",
+          clientId: "mobile-persisted",
+          pending: true,
+          status: "retrying",
+          attempts: 2,
+        }],
+        queuedMessages: [],
+      }),
+      sendMessage: async (threadId, input) => {
+        sends.push({ threadId, input });
+        return {
+          queued: false,
+          accepted: true,
+          messageId: input.clientId,
+          status: "accepted",
+          threadId: "real-thread",
+        };
+      },
+    });
+
+    try {
+      const root = `http://127.0.0.1:${server.port}`;
+      const headers = { cookie: sessionCookie };
+      const readResponse = await fetch(
+        `${root}/api/tasks/local-new-1/messages?adapter=codex`,
+        { headers },
+      );
+      expect(readResponse.status).toBe(200);
+      expect(await readResponse.json()).toMatchObject({
+        threadId: "local-new-1",
+        resolvedThreadId: "real-thread",
+        outboundMessages: [{
+          clientId: "mobile-persisted",
+          text: "离页后继续提交",
+          status: "retrying",
+          attempts: 2,
+        }],
+      });
+
+      const sendResponse = await fetch(
+        `${root}/api/tasks/local-new-1/messages?adapter=codex`,
+        {
+          method: "POST",
+          headers: {
+            ...headers,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            clientId: "mobile-stable-1",
+            createdAtMs: 1_788_451_200_000,
+            retry: true,
+            createTaskSourceThreadId: "source-thread",
+            text: "保持幂等提交",
+          }),
+        },
+      );
+      expect(sendResponse.status).toBe(202);
+      expect(await sendResponse.json()).toEqual({
+        ok: true,
+        queued: false,
+        accepted: true,
+        messageId: "mobile-stable-1",
+        status: "accepted",
+        threadId: "real-thread",
+      });
+      expect(sends).toEqual([{
+        threadId: "local-new-1",
+        input: {
+          clientId: "mobile-stable-1",
+          createdAtMs: 1_788_451_200_000,
+          retry: true,
+          createTaskSourceThreadId: "source-thread",
+          text: "保持幂等提交",
+          images: [],
+        },
+      }]);
+    } finally {
+      await server.close();
+    }
+  });
+
   test("serves the responsive app and authenticated task APIs", async () => {
     const authStore = createAuthStore("a configured mobile password");
     const sessionCookie = `codex_mobile_session=${authStore.createSessionToken()}`;
@@ -4223,8 +4159,10 @@ describe("Codex mobile server", () => {
     const sent: Array<{
       threadId: string;
       input: {
+        clientId: string;
         text: string;
         images: Array<{ fileName: string; mimeType: string; data: Buffer }>;
+        createdAtMs?: number;
       };
     }> = [];
     const stopped: string[] = [];
@@ -4428,6 +4366,7 @@ describe("Codex mobile server", () => {
       expect(html).toContain('id="composer-image-input"');
       expect(html).toContain('id="composer-model-button"');
       expect(html).toContain('id="composer-model-menu"');
+      expect(html).toContain('<div class="composer-beam" aria-hidden="true"><span class="composer-beam-bloom"></span></div>');
       const composerStart = html.indexOf('<div class="composer">');
       const composerEnd = html.indexOf("</div>\n      </form>", composerStart);
       const composerMediaIndex = html.indexOf('id="composer-media"');
@@ -4457,7 +4396,7 @@ describe("Codex mobile server", () => {
       const aboutHtml = await aboutResponse.text();
       expect(aboutResponse.status).toBe(200);
       expect(aboutHtml).toContain("<title>项目说明 · WeRelay</title>");
-      expect(aboutHtml).toContain("ONE REAL SESSION. EVERY SCREEN.");
+      expect(aboutHtml).toContain("同一条真实任务，延伸到每一块屏幕");
       expect(aboutHtml).toContain("电脑端持有唯一真实任务");
       expect(aboutHtml).toContain('class="about-logo" href="/about">WeRelay</a>');
       expect(aboutHtml).toContain('class="about-open-app" href="/">打开任务</a>');
@@ -4541,7 +4480,13 @@ describe("Codex mobile server", () => {
       expect(css).toContain("user-select: none;");
       expect(css).toContain("-webkit-touch-callout: none;");
       expect(css).toContain(".response-pending {");
-      expect(css).toContain("@keyframes response-pending-dot");
+      expect(css).toContain("@keyframes solving-shimmer");
+      expect(css).toContain(".agent-planning-copy");
+      const responsePendingRule = css.slice(
+        css.indexOf(".response-pending {"),
+        css.indexOf("}", css.indexOf(".response-pending {")) + 1,
+      );
+      expect(responsePendingRule).not.toContain("border");
       expect(css).toContain(".run-progress-item {");
       expect(css).toContain(".workspace-switch-progress");
       expect(css).toContain(".workspace-menu { position: fixed;");
@@ -4601,7 +4546,8 @@ describe("Codex mobile server", () => {
       expect(js).not.toContain('"正在连接 " + switchingAdapterName()');
       expect(js).not.toContain('showToast("正在连接 " + adapterName(adapterId) + "…")');
       expect(js).toContain('status.className = "queued-followup-status"');
-      expect(js).toContain('if (!waitingForTaskCreation) {\n      submitPendingMessage(pending);');
+      expect(js).toContain("pending.waitingForTaskCreation = true;");
+      expect(js).toContain("void submitPendingMessage(pending);");
       expect(js).toContain('pending.status = "creating_task";');
       expect(js).toContain("initializeAuthentication");
       expect(js).toContain("attemptLanAcceleration");
@@ -4701,7 +4647,7 @@ describe("Codex mobile server", () => {
       expect(js).toContain("switchAdapter");
       expect(js).toContain("deleteQueuedMessage");
       expect(js).not.toContain("state.queuedMessages.concat");
-      expect(js).toContain("message.clientId !== pending.clientId");
+      expect(js).toContain("!acceptedClientIds.has(pending.clientId)");
       expect(js).toContain('pending.displayInTranscript = true;');
       const startAuthenticatedAppIndex = js.indexOf("function startAuthenticatedApp");
       const appVisibleIndex = js.indexOf("app.hidden = false;", startAuthenticatedAppIndex);
@@ -4716,11 +4662,14 @@ describe("Codex mobile server", () => {
       expect(js).not.toContain('if (pending.status === "sending") return true;');
       expect(js).toContain("baselineUserKeys");
       expect(js).not.toContain('pending.status === "failed" || pending.status === "sending"');
-      expect(js).toContain('pending.status = uncertain ? "unconfirmed" : "failed";');
-      expect(js).toContain('var stillPending = state.pendingMessages.some');
+      expect(js).toContain('pending.status = pending.browserAttempts >= 6 ? "failed" : "retrying";');
+      expect(js).toContain("pending.browserAttempts = Math.min(6");
       expect(js).toContain('message.status === "unconfirmed"');
-      expect(js).toContain('if (result.duplicate)');
-      expect(js).toContain("\\u4E0E\\u6700\\u8FD1\\u4E00\\u6761\\u6D88\\u606F\\u76F8\\u540C\\uFF0C\\u672A\\u91CD\\u590D\\u53D1\\u9001");
+      expect(js).toContain("result.duplicate");
+      expect(js).toContain("\\u6D88\\u606F\\u5DF2\\u7531\\u540E\\u53F0\\u63A5\\u6536\\uFF0C\\u65E0\\u9700\\u91CD\\u590D\\u63D0\\u4EA4");
+      expect(js).toContain("\\u63D0\\u4EA4\\u5931\\u8D25\\uFF0C\\u6D88\\u606F\\u5DF2\\u4FDD\\u7559");
+      expect(js).toContain("\\u590D\\u5236\\u6D88\\u606F");
+      expect(js).toContain("\\u91CD\\u65B0\\u63D0\\u4EA4");
       expect(js).toContain("filterVisibleConversationMessages(state.serverMessages)");
       expect(js).toContain("filterVisibleConversationMessages(payload.messages || [])");
       expect(js).toContain("renderResponsePendingIndicator");
@@ -5006,7 +4955,11 @@ describe("Codex mobile server", () => {
             ...headers,
             "content-type": "application/json",
           },
-          body: JSON.stringify({ text: "  继续处理这个任务\n保留缩进  " }),
+          body: JSON.stringify({
+            clientId: "mobile-text-1",
+            createdAtMs: 1_788_451_200_000,
+            text: "  继续处理这个任务\n保留缩进  ",
+          }),
         },
       );
       expect(sendResponse.status).toBe(202);
@@ -5019,6 +4972,8 @@ describe("Codex mobile server", () => {
         {
           threadId: "0000000a-0000-7000-8000-00000000000a",
           input: {
+            clientId: "mobile-text-1",
+            createdAtMs: 1_788_451_200_000,
             text: "  继续处理这个任务\n保留缩进  ",
             images: [],
           },
@@ -5033,13 +4988,14 @@ describe("Codex mobile server", () => {
             ...headers,
             "content-type": "application/json",
           },
-          body: JSON.stringify({ text: "/model claude-sonnet-4-6" }),
+          body: JSON.stringify({ clientId: "mobile-command-1", text: "/model claude-sonnet-4-6" }),
         },
       );
       expect(nativeCommandResponse.status).toBe(202);
       expect(sent[1]).toEqual({
         threadId: "0000000a-0000-7000-8000-00000000000a",
         input: {
+          clientId: "mobile-command-1",
           text: "/model claude-sonnet-4-6",
           images: [],
         },
@@ -5054,6 +5010,7 @@ describe("Codex mobile server", () => {
             "content-type": "application/json",
           },
           body: JSON.stringify({
+            clientId: "mobile-image-1",
             text: "请分析图片",
             images: [
               {

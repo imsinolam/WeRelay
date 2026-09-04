@@ -153,7 +153,7 @@ describe("desktop owner slot readiness", () => {
 describe("mobile image persistence", () => {
   test("does not delete an uploaded image when desktop acceptance is uncertain", () => {
     const source = readRepoFile("src/daemon/werelay-daemon.ts");
-    const start = source.indexOf("  private async sendMobileMessage(");
+    const start = source.indexOf("  private async dispatchPersistedMobileMessage(");
     const end = source.indexOf("\n  private persistMobileImages", start);
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);
@@ -785,7 +785,7 @@ describe("werelay-daemon helpers", () => {
     const targetEnd = source.indexOf("  private async handlePendingApprovalSequence(", targetStart);
 
     expect(source.slice(readStart, readEnd)).toContain(
-      "getMobileApprovalResults(slot.adapter, threadId)",
+      "getMobileApprovalResults(slot.adapter, activeThreadId)",
     );
     expect(source.slice(webStart, webEnd)).toContain(
       "recordMobileApprovalResult(slot, pending, action",
@@ -1137,6 +1137,22 @@ describe("werelay-daemon helpers", () => {
   });
 
   test("lets a connected non-Codex runtime override a stale idle task snapshot", () => {
+    expect(resolveCodexMobileTaskStatusFromSignals({
+      runtimeStatus: { type: "idle" },
+      hasPendingApproval: false,
+      hasPendingUserInput: false,
+      hasActiveTask: false,
+      selectedStateStatus: "busy",
+      preferSelectedState: true,
+    })).toBe("running");
+    expect(resolveCodexMobileTaskStatusFromSignals({
+      runtimeStatus: { type: "idle" },
+      hasPendingApproval: false,
+      hasPendingUserInput: false,
+      hasActiveTask: false,
+      selectedStateStatus: undefined,
+      preferSelectedState: true,
+    })).toBe("idle");
     expect(resolveCodexMobileTaskStatusFromSignals({
       runtimeStatus: { type: "idle" },
       hasPendingApproval: false,

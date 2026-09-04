@@ -5111,14 +5111,10 @@ export class CodexPtyAdapter extends AbstractPtyAdapter {
       (!reconciliation.liveStateActive ||
         reconciliation.liveSummary?.turnId === reconciliation.terminalTurnId),
     );
-    const taskRunning = runSummary?.status === "running" && !persistedTerminalIsCurrent;
     return {
       currentPermission: current,
       options: CODEX_PERMISSION_OPTIONS.map((option) => ({ ...option })),
-      canChange: !taskRunning,
-      ...(taskRunning
-        ? { unavailableReason: "任务正在处理，完成或停止后再切换权限范围。" }
-        : {}),
+      canChange: true,
     };
   }
 

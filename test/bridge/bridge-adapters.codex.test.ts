@@ -39,26 +39,22 @@ function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Windows 上 SQLite 句柄在 close() 后可能长时间延迟释放（bun:sqlite 的
-// 只读映射不会立即解锁），立即递归删除临时目录会触发 EBUSY。先短暂重试；
-// 若目录仍被锁，说明只剩系统句柄延迟释放，此时目录位于操作系统临时目录、
-// 由运行环境回收，忽略删除失败以保持测试判定稳定。
-function removeTempDirectory(directory: string): void {
-  for (let attempt = 0; attempt < 10; attempt += 1) {
+// Windows 上 SQLite 句柄在 close() 后可能延迟释放，立即递归删除临时目录
+// 会触发 EBUSY。每次失败后真正等待再重试，避免同步重试在句柄释放前立即耗尽。
+async function removeTempDirectory(directory: string): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
     try {
       fs.rmSync(directory, { recursive: true, force: true });
       return;
     } catch (error) {
+      lastError = error;
       const code = (error as NodeJS.ErrnoException).code;
       if (code !== "EBUSY" && code !== "ENOTEMPTY" && code !== "EPERM") throw error;
-      try {
-        fs.rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
-        return;
-      } catch {
-        // 继续下一轮外层重试。
-      }
+      if (attempt < 19) await wait(Math.min(500, 50 * (attempt + 1)));
     }
   }
+  throw lastError;
 }
 
 describe("Codex desktop permission alignment", () => {
@@ -357,7 +353,7 @@ describe("Codex desktop thread listing", () => {
       expect(catalog?.rolloutPathByThreadId.get("thread-new"))
         .toBe(path.join(directory, "new.jsonl"));
     } finally {
-      removeTempDirectory(directory);
+      await removeTempDirectory(directory);
     }
   });
 
@@ -440,7 +436,7 @@ describe("Codex desktop thread listing", () => {
     } finally {
       if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
       else process.env.CODEX_HOME = previousCodexHome;
-      removeTempDirectory(directory);
+      await removeTempDirectory(directory);
     }
   });
 
