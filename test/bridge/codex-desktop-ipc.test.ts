@@ -429,7 +429,7 @@ describe("Codex desktop IPC client", () => {
           request: {
             threadId: "thread-1",
             input: [
-              { type: "text", text: "真实桌面消息" },
+              { type: "text", text: "真实桌面消息", text_elements: [] },
               { type: "localImage", path: "/tmp/mobile-image.png" },
             ],
             model: "gpt-5.6-terra",
@@ -445,6 +445,7 @@ describe("Codex desktop IPC client", () => {
   });
 
   test("accepts a desktop turn when live state confirms it before the owner replies", async () => {
+    const requests: Record<string, unknown>[] = [];
     const { socketPath } = await createMockRouter((socket, message) => {
       if (message.type !== "request") {
         return;
@@ -460,6 +461,7 @@ describe("Codex desktop IPC client", () => {
         return;
       }
       if (message.method === "thread-follower-start-turn") {
+        requests.push(message);
         setTimeout(() => {
           sendFrame(socket, {
             type: "broadcast",
@@ -503,6 +505,15 @@ describe("Codex desktop IPC client", () => {
     expect(turn).toMatchObject({
       id: "turn-confirmed",
       status: "inProgress",
+    });
+    expect(requests[0]).toMatchObject({
+      params: {
+        turnStart: {
+          request: {
+            input: [{ type: "text", text: "已经被桌面端接收", text_elements: [] }],
+          },
+        },
+      },
     });
     await client.dispose();
   });
@@ -580,12 +591,53 @@ describe("Codex desktop IPC client", () => {
       version: 1,
       params: {
         conversationId: "thread-1",
-        input: [{ type: "text", text: "等待发送" }],
+        input: [{ type: "text", text: "等待发送", text_elements: [] }],
         restoreMessage: queuedMessage,
         clientUserMessageId: "queued-1",
       },
     });
     await client.dispose();
+  });
+
+  test("preserves text elements and image inputs without mutating caller data", async () => {
+    const requests: Record<string, unknown>[] = [];
+    const { socketPath } = await createMockRouter((socket, message) => {
+      if (message.type !== "request") return;
+      requests.push(message);
+      sendFrame(socket, {
+        type: "response",
+        requestId: message.requestId,
+        resultType: "success",
+        method: message.method,
+        result: message.method === "initialize"
+          ? { clientId: "bridge-client" }
+          : { result: { turn: { id: "turn-metadata", status: "inProgress", items: [] } } },
+      });
+    });
+    const client = new CodexDesktopIpcClient({ socketPath });
+    const input = [
+      { type: "text" as const, text: "hello", text_elements: [
+        { byteRange: { start: 0, end: 5 }, placeholder: "attachment" },
+      ] },
+      { type: "text" as const, text: "plain" },
+      { type: "localImage" as const, path: "/tmp/input.png" },
+      { type: "image" as const, url: "https://example.com/input.png" },
+    ];
+    const original = structuredClone(input);
+    try {
+      await client.startTurn("thread-metadata", input);
+      await client.steerTurn("thread-metadata", input, { id: "steer-metadata" });
+      const expected = original.map((item) => item.type === "text"
+        ? { ...item, text_elements: item.text_elements ?? [] }
+        : item);
+      expect(requests.find((request) => request.method === "thread-follower-start-turn"))
+        .toMatchObject({ params: { turnStart: { request: { input: expected } } } });
+      expect(requests.find((request) => request.method === "thread-follower-steer-turn"))
+        .toMatchObject({ params: { input: expected } });
+      expect(input).toEqual(original);
+    } finally {
+      await client.dispose();
+    }
   });
 
   test("routes approval, MCP elicitation, and user input responses to the desktop owner", async () => {

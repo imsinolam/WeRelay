@@ -195,7 +195,7 @@ function resolveWorkspaceRoot(value: string): string {
   return resolved;
 }
 
-function resolveWorkspaceFile(value: string, workspaceRoot: string): string {
+function resolvePreviewFile(value: string, resourceRoot?: string): string {
   const absolute = path.resolve(value);
   let resolved: string;
   try {
@@ -203,13 +203,24 @@ function resolveWorkspaceFile(value: string, workspaceRoot: string): string {
   } catch {
     throw new LocalPreviewError(404, "本地文件不存在或已经移动。");
   }
-  if (!isWithinRoot(workspaceRoot, resolved)) {
-    throw new LocalPreviewError(403, "为保护电脑文件，只能预览当前工作区内的文件。");
+  if (resourceRoot && !isWithinRoot(resourceRoot, resolved)) {
+    throw new LocalPreviewError(403, "页面引用了预览目录之外的资源，请直接打开该文件预览。");
   }
   if (!fs.statSync(resolved).isFile()) {
     throw new LocalPreviewError(400, "请选择一个具体文件，暂不支持直接预览目录。");
   }
   return resolved;
+}
+
+function selectedFileSource(value: string, workspaceRoot: string): FileSource {
+  // The authenticated user may explicitly select a file anywhere. Only implicit
+  // dependencies are bounded, so an HTML file cannot silently collect the disk.
+  const filePath = resolvePreviewFile(value);
+  return {
+    kind: "file",
+    filePath,
+    workspaceRoot: isWithinRoot(workspaceRoot, filePath) ? workspaceRoot : path.dirname(filePath),
+  };
 }
 
 function parseRootSource(target: string, workspaceRoot: string): PreviewSource {
@@ -239,24 +250,16 @@ function parseRootSource(target: string, workspaceRoot: string): PreviewSource {
     } catch {
       throw new LocalPreviewError(400, "本地文件地址无效。");
     }
-    return {
-      kind: "file",
-      filePath: resolveWorkspaceFile(filePath, workspaceRoot),
-      workspaceRoot,
-    };
+    return selectedFileSource(filePath, workspaceRoot);
   }
 
   if (path.isAbsolute(trimmed)) {
-    return {
-      kind: "file",
-      filePath: resolveWorkspaceFile(trimmed, workspaceRoot),
-      workspaceRoot,
-    };
+    return selectedFileSource(trimmed, workspaceRoot);
   }
 
   throw new LocalPreviewError(
     400,
-    "只支持 127.0.0.1、localhost、file:// 或当前工作区内的绝对文件路径。",
+    "只支持 127.0.0.1、localhost、file:// 或本机绝对文件路径。",
   );
 }
 
@@ -409,7 +412,7 @@ function readFileSource(
   source: FileSource,
   context: CaptureContext,
 ): { body: Buffer; contentType: string; effectiveSource: FileSource } {
-  const filePath = resolveWorkspaceFile(source.filePath, source.workspaceRoot);
+  const filePath = resolvePreviewFile(source.filePath, source.workspaceRoot);
   const stat = fs.statSync(filePath);
   if (stat.size > context.maxFileBytes) {
     throw new LocalPreviewError(413, "本地文件过大，无法部署到手机预览。");
@@ -477,7 +480,7 @@ function resolveReference(reference: string, base: PreviewSource): PreviewSource
   try {
     return {
       ...base,
-      filePath: resolveWorkspaceFile(candidate, base.workspaceRoot),
+      filePath: resolvePreviewFile(candidate, base.workspaceRoot),
     };
   } catch {
     return null;

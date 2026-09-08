@@ -3,6 +3,7 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 import {
   createLocalPreviewPackage,
@@ -43,7 +44,7 @@ async function startHttpFixture(
 }
 
 describe("local preview capture", () => {
-  test("rejects remote URLs and files outside the active workspace", async () => {
+  test("rejects remote URLs but accepts explicitly selected files outside the workspace", async () => {
     const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "deskrelay-preview-root-"));
     const outside = fs.mkdtempSync(path.join(os.tmpdir(), "deskrelay-preview-outside-"));
     const outsideFile = path.join(outside, "secret.html");
@@ -56,9 +57,34 @@ describe("local preview capture", () => {
     await expect(createLocalPreviewPackage("https://example.com", {
       workspaceRoot: workspace,
     })).rejects.toBeInstanceOf(LocalPreviewError);
-    await expect(createLocalPreviewPackage(outsideFile, {
-      workspaceRoot: workspace,
-    })).rejects.toMatchObject({ statusCode: 403 });
+    fs.writeFileSync(path.join(outside, "style.css"), "h1{color:red}");
+    fs.writeFileSync(outsideFile, '<link rel="stylesheet" href="./style.css"><h1>outside preview</h1>');
+    for (const target of [outsideFile, pathToFileURL(outsideFile).href]) {
+      const preview = await createLocalPreviewPackage(target, { workspaceRoot: workspace });
+      const contents = preview.files.map(file => Buffer.from(file.bodyBase64, "base64").toString()).join("\n");
+      expect(contents).toContain("outside preview");
+      expect(contents).toContain("h1{color:red}");
+    }
+  });
+
+  test("outside preview does not collect unreferenced files or follow escaping resource symlinks", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "werelay-preview-scope-"));
+    const workspace = path.join(root, "workspace");
+    const previewDir = path.join(root, "preview");
+    fs.mkdirSync(workspace);
+    fs.mkdirSync(previewDir);
+    fs.writeFileSync(path.join(root, "private.txt"), "DO_NOT_COLLECT_PRIVATE_DATA");
+    fs.writeFileSync(path.join(previewDir, "unreferenced.txt"), "DO_NOT_COLLECT_UNUSED_DATA");
+    fs.symlinkSync(path.join(root, "private.txt"), path.join(previewDir, "escape.txt"));
+    fs.writeFileSync(path.join(previewDir, "index.html"), '<h1>outside</h1><iframe src="./escape.txt"></iframe><iframe src="../private.txt"></iframe>');
+    cleanups.push(() => fs.rmSync(root, {recursive: true, force: true}));
+    const preview = await createLocalPreviewPackage(path.join(previewDir, "index.html"), { workspaceRoot: workspace });
+    const contents = preview.files.map(file => Buffer.from(file.bodyBase64, "base64").toString()).join("\n");
+    expect(contents).toContain("outside");
+    expect(contents).not.toContain("DO_NOT_COLLECT_PRIVATE_DATA");
+    expect(contents).not.toContain("DO_NOT_COLLECT_UNUSED_DATA");
+    // Explicitly choosing the other file remains supported.
+    expect((await createLocalPreviewPackage(path.join(root, "private.txt"), {workspaceRoot: workspace})).files).toHaveLength(1);
   });
 
   test("captures a loopback page and rewrites local HTML, CSS and module resources", async () => {

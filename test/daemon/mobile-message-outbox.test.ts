@@ -3,6 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { FailedMobileMessageSweep } from "../../src/daemon/failed-mobile-message-reconciliation.ts";
+
 import {
   MobileMessageOutbox,
   computeMobileMessageRetryDelayMs,
@@ -24,6 +26,68 @@ function createStateFile(): string {
 }
 
 describe("MobileMessageOutbox", () => {
+  test("returns durable delivered ids scoped to the adapter and task, and changes the content revision", () => {
+    const stateFile = createStateFile();
+    const outbox = new MobileMessageOutbox({stateFile});
+    outbox.accept({clientId: "receipt", adapter: "codex", threadId: "thread", text: "请求", images: [], createdAtMs: 1});
+    const before = outbox.contentRevision("codex", "thread");
+    outbox.markSubmitted("codex", "thread", "receipt", {turnId: "turn", submittedAtMs: 2});
+    outbox.reconcile("codex", "thread", {messages: [{role: "user", text: "请求", turnId: "turn"}], queuedMessages: []});
+    expect(outbox.contentRevision("codex", "thread")).not.toBe(before);
+    const restored = new MobileMessageOutbox({stateFile});
+    expect(restored.deliveredClientIds("codex", "thread")).toEqual(["receipt"]);
+    expect(restored.list("codex", "thread")).toEqual([]);
+    expect(restored.deliveredClientIds("claude", "thread")).toEqual([]);
+    expect(restored.deliveredClientIds("codex", "other")).toEqual([]);
+    expect(restored.contentRevision("codex", "thread")).toBe(outbox.contentRevision("codex", "thread"));
+  });
+
+  test("scans only matching projects in the background, throttles reads and preserves offline failures", async () => {
+    const outbox = new MobileMessageOutbox({stateFile: createStateFile()});
+    const text = "请修复网页任务台中的消息重复显示问题";
+    outbox.accept({clientId: "failed-scan", adapter: "codex", threadId: "source", text, images: [], createdAtMs: 10_000});
+    outbox.markFailed("codex", "source", "failed-scan", "连接超时");
+    const sweep = new FailedMobileMessageSweep();
+    const reads: string[] = [];
+    let offline = true;
+    const params = {
+      adapter: "codex", outbox, nowMs: 20_000,
+      listTasks: async () => [{threadId: "source", projectId: "project"}, {threadId: "actual", projectId: "project"}, {threadId: "unrelated", projectId: "other"}],
+      readMessages: async (threadId: string) => {
+        reads.push(threadId);
+        if (offline) throw new Error("offline");
+        return threadId === "actual" ? [{role: "user" as const, text, createdAtMs: 11_000, turnId: "turn"}, {role: "assistant" as const, text: "开始处理", turnId: "turn"}] : [];
+      },
+    };
+    await Promise.all([sweep.run(params), sweep.run(params)]);
+    expect(reads.sort()).toEqual(["actual", "source"]);
+    expect(outbox.failedEntries()).toHaveLength(1);
+    await sweep.run({...params, nowMs: 21_000});
+    expect(reads).toHaveLength(2);
+    offline = false;
+    await sweep.run({...params, nowMs: 81_000});
+    expect(outbox.failedEntries()).toHaveLength(0);
+    expect(outbox.pendingFailureNotifications()).toHaveLength(0);
+  });
+
+  test("persists automatic recovery of failed records and suppresses stale failures and retries", () => {
+    const stateFile = createStateFile();
+    const outbox = new MobileMessageOutbox({ stateFile });
+    const text = "请修复网页任务台中的消息重复显示问题";
+    outbox.accept({clientId: "failed", adapter: "codex", threadId: "source", text, images: [], createdAtMs: 10_000});
+    outbox.markFailed("codex", "source", "failed", "连接超时");
+    const tasks = [{threadId: "source", projectId: "project"}, {threadId: "actual", projectId: "project"}];
+    const messages = [{role: "user" as const, text: "请检查以下问题\n" + text, turnId: "turn", createdAtMs: 11_000},
+      {role: "assistant" as const, text: "已开始检查", turnId: "turn"}];
+    expect(outbox.reconcileFailedExecution("claude", tasks[1]!, tasks, messages)).toBe(0);
+    expect(outbox.reconcileFailedExecution("codex", tasks[1]!, tasks, messages)).toBe(1);
+    const restored = new MobileMessageOutbox({stateFile});
+    expect(restored.list("codex", "source")).toEqual([]);
+    expect(restored.pendingFailureNotifications()).toEqual([]);
+    expect(restored.retry("codex", "source", "failed")).toBe(false);
+    expect(restored.readyEntries()).toEqual([]);
+  });
+
   test("persists accepted messages and deduplicates browser retries by adapter, task, and client id", () => {
     const stateFile = createStateFile();
     const outbox = new MobileMessageOutbox({ stateFile });

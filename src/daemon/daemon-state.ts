@@ -37,6 +37,20 @@ export type DaemonRecentTaskCompletion = {
 
 const MAX_RECENT_TASK_COMPLETIONS = 80;
 
+export type DaemonAdapterMessageActivity = {
+  adapter: DaemonAdapterKind;
+  occurredAt: string;
+  eventKey: string;
+};
+
+export type DaemonAdapterUsageOrder = {
+  adapters: DaemonAdapterKind[];
+  updatedAt: string;
+};
+
+const MAX_ADAPTER_MESSAGE_ACTIVITIES = 2_000;
+const ADAPTER_MESSAGE_ACTIVITY_RETENTION_MS = 48 * 60 * 60_000;
+
 export type DaemonMobileApprovalResultAction =
   | "confirm"
   | "confirm_session"
@@ -83,6 +97,8 @@ export type DaemonWorkspaceState = {
   codexWechatReplyMode?: CodexWechatReplyMode;
   restartNoticeSentAt?: string;
   recentTaskCompletions?: DaemonRecentTaskCompletion[];
+  adapterMessageActivities?: DaemonAdapterMessageActivity[];
+  adapterUsageOrder?: DaemonAdapterUsageOrder;
   mobileApprovalResults?: DaemonMobileApprovalResult[];
   taskApprovalAutoApprovals?: DaemonTaskApprovalAutoApproveEntry[];
   codexCompletionDeliveries?: CodexCompletionDeliveryState;
@@ -184,6 +200,81 @@ function normalizeRecentTaskCompletions(
     .sort((left, right) => Date.parse(right.completedAt) - Date.parse(left.completedAt))
     .slice(0, MAX_RECENT_TASK_COMPLETIONS);
   return normalized.length > 0 ? normalized : undefined;
+}
+
+function normalizeAdapterMessageActivity(
+  value: unknown,
+): DaemonAdapterMessageActivity | null {
+  if (
+    !isRecord(value) ||
+    !isDaemonAdapterKind(value.adapter) ||
+    typeof value.occurredAt !== "string" ||
+    !Number.isFinite(Date.parse(value.occurredAt)) ||
+    typeof value.eventKey !== "string" ||
+    !value.eventKey.trim()
+  ) {
+    return null;
+  }
+  return {
+    adapter: value.adapter,
+    occurredAt: value.occurredAt.trim(),
+    eventKey: value.eventKey.trim(),
+  };
+}
+
+function normalizeAdapterMessageActivities(
+  value: unknown,
+): DaemonAdapterMessageActivity[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const newestByEventKey = new Map<string, DaemonAdapterMessageActivity>();
+  for (const entry of value) {
+    const activity = normalizeAdapterMessageActivity(entry);
+    if (!activity) {
+      continue;
+    }
+    const previous = newestByEventKey.get(activity.eventKey);
+    if (
+      !previous ||
+      Date.parse(activity.occurredAt) > Date.parse(previous.occurredAt)
+    ) {
+      newestByEventKey.set(activity.eventKey, activity);
+    }
+  }
+  const normalized = Array.from(newestByEventKey.values())
+    .sort((left, right) => Date.parse(right.occurredAt) - Date.parse(left.occurredAt))
+    .slice(0, MAX_ADAPTER_MESSAGE_ACTIVITIES);
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+function normalizeAdapterUsageOrder(
+  value: unknown,
+): DaemonAdapterUsageOrder | undefined {
+  if (
+    !isRecord(value) ||
+    !Array.isArray(value.adapters) ||
+    typeof value.updatedAt !== "string" ||
+    !Number.isFinite(Date.parse(value.updatedAt))
+  ) {
+    return undefined;
+  }
+  const seen = new Set<DaemonAdapterKind>();
+  const adapters: DaemonAdapterKind[] = [];
+  for (const adapter of value.adapters) {
+    if (!isDaemonAdapterKind(adapter) || seen.has(adapter)) {
+      continue;
+    }
+    seen.add(adapter);
+    adapters.push(adapter);
+  }
+  if (adapters.length === 0) {
+    return undefined;
+  }
+  return {
+    adapters,
+    updatedAt: value.updatedAt.trim(),
+  };
 }
 
 function isDaemonMobileApprovalResultAction(
@@ -394,6 +485,10 @@ function normalizeDaemonWorkspaceState(
   const recentTaskCompletions = normalizeRecentTaskCompletions(
     value.recentTaskCompletions,
   );
+  const adapterMessageActivities = normalizeAdapterMessageActivities(
+    value.adapterMessageActivities,
+  );
+  const adapterUsageOrder = normalizeAdapterUsageOrder(value.adapterUsageOrder);
   const latestWechatTaskTarget = normalizeWechatTaskTarget(
     value.latestWechatTaskTarget,
   );
@@ -434,6 +529,8 @@ function normalizeDaemonWorkspaceState(
         ? value.restartNoticeSentAt.trim()
         : undefined,
     recentTaskCompletions,
+    adapterMessageActivities,
+    adapterUsageOrder,
     mobileApprovalResults,
     taskApprovalAutoApprovals,
     codexCompletionDeliveries,
@@ -498,6 +595,17 @@ export class DaemonWorkspaceStateStore {
       ...this.state,
       ...(this.state.recentTaskCompletions
         ? { recentTaskCompletions: this.state.recentTaskCompletions.map((entry) => ({ ...entry })) }
+        : {}),
+      ...(this.state.adapterMessageActivities
+        ? { adapterMessageActivities: this.state.adapterMessageActivities.map((entry) => ({ ...entry })) }
+        : {}),
+      ...(this.state.adapterUsageOrder
+        ? {
+            adapterUsageOrder: {
+              adapters: [...this.state.adapterUsageOrder.adapters],
+              updatedAt: this.state.adapterUsageOrder.updatedAt,
+            },
+          }
         : {}),
       ...(this.state.latestWechatTaskTarget
         ? { latestWechatTaskTarget: { ...this.state.latestWechatTaskTarget } }
@@ -662,6 +770,65 @@ export class DaemonWorkspaceStateStore {
     ]
       .sort((left, right) => Date.parse(right.completedAt) - Date.parse(left.completedAt))
       .slice(0, MAX_RECENT_TASK_COMPLETIONS);
+    this.persist();
+  }
+
+  getAdapterMessageActivities(): DaemonAdapterMessageActivity[] {
+    return (this.state.adapterMessageActivities ?? []).map((entry) => ({ ...entry }));
+  }
+
+  recordAdapterMessageActivity(
+    entry: DaemonAdapterMessageActivity,
+    nowMs = Date.now(),
+  ): void {
+    const normalized = normalizeAdapterMessageActivity(entry);
+    if (!normalized) {
+      throw new Error("终端消息活动记录无效。");
+    }
+    const cutoffMs = nowMs - ADAPTER_MESSAGE_ACTIVITY_RETENTION_MS;
+    const occurredAtMs = Date.parse(normalized.occurredAt);
+    const current = this.state.adapterMessageActivities ?? [];
+    const duplicate = current.find((candidate) => candidate.eventKey === normalized.eventKey);
+    const hasExpiredEntries = current.some(
+      (candidate) => Date.parse(candidate.occurredAt) < cutoffMs,
+    );
+    if (
+      duplicate?.adapter === normalized.adapter &&
+      duplicate.occurredAt === normalized.occurredAt &&
+      !hasExpiredEntries
+    ) {
+      return;
+    }
+    const retained = current.filter(
+      (candidate) =>
+        candidate.eventKey !== normalized.eventKey &&
+        Date.parse(candidate.occurredAt) >= cutoffMs,
+    );
+    if (occurredAtMs >= cutoffMs) {
+      retained.push(normalized);
+    }
+    const next = retained
+      .sort((left, right) => Date.parse(right.occurredAt) - Date.parse(left.occurredAt))
+      .slice(0, MAX_ADAPTER_MESSAGE_ACTIVITIES);
+    this.state.adapterMessageActivities = next.length > 0 ? next : undefined;
+    this.persist();
+  }
+
+  getAdapterUsageOrder(): DaemonAdapterUsageOrder | null {
+    return this.state.adapterUsageOrder
+      ? {
+          adapters: [...this.state.adapterUsageOrder.adapters],
+          updatedAt: this.state.adapterUsageOrder.updatedAt,
+        }
+      : null;
+  }
+
+  setAdapterUsageOrder(order: DaemonAdapterUsageOrder): void {
+    const normalized = normalizeAdapterUsageOrder(order);
+    if (!normalized) {
+      throw new Error("终端使用排序记录无效。");
+    }
+    this.state.adapterUsageOrder = normalized;
     this.persist();
   }
 

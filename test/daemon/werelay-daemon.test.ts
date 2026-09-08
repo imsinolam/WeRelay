@@ -81,7 +81,9 @@ import {
   shouldSendCodexMobileTaskLink,
   shouldSendCodexCompletionNotification,
   shouldSendDaemonRestartNotice,
+  shouldRefreshAdapterUsageOrder,
   shouldResolveTaskTargetAgainstGlobalSnapshot,
+  sortAdaptersByRecentMessageActivity,
   retrySwitchedAdapterTaskList,
   waitForVisibleClientConnection,
 } from "../../src/daemon/werelay-daemon.ts";
@@ -388,7 +390,7 @@ describe("daemon startup resilience", () => {
   test("retries undelivered approvals before handling the inbound message that refreshed WeChat context", () => {
     const source = readRepoFile("src/daemon/werelay-daemon.ts").replace(/\r\n?/g, "\n");
     const loopStart = source.indexOf(
-      "      for (const message of pollResult.messages) {",
+      "      for (const [messageIndex, message] of pollResult.messages.entries()) {",
     );
     const loopEnd = source.indexOf("\n      }\n    }\n  }\n\n  async shutdown", loopStart);
     expect(loopStart).toBeGreaterThan(-1);
@@ -401,7 +403,7 @@ describe("daemon startup resilience", () => {
     const retryApprovals = loopBody.indexOf(
       "await this.retryUndeliveredApprovalNotifications(message.senderId);",
     );
-    const handleInbound = loopBody.indexOf("await this.handleInboundMessage(message);");
+    const handleInbound = loopBody.indexOf("await this.handleInboundMessage(message, inboundTargets[messageIndex]);");
     expect(retryCompletions).toBeGreaterThan(-1);
     expect(retryApprovals).toBeGreaterThan(-1);
     expect(handleInbound).toBeGreaterThan(-1);
@@ -574,6 +576,41 @@ describe("werelay-daemon helpers", () => {
       title: "检查全部 Agent 聚合",
       completedAt: "2026-08-07T02:01:00.000Z",
     }]);
+  });
+
+  test("sorts adapters by completed message activity from the latest 24 hours", () => {
+    const nowMs = Date.parse("2026-09-05T08:00:00.000Z");
+    expect(sortAdaptersByRecentMessageActivity(
+      ["codex", "claude", "grok", "workbuddy"],
+      [
+        { adapter: "grok", occurredAt: "2026-09-05T07:00:00.000Z", eventKey: "grok-1" },
+        { adapter: "grok", occurredAt: "2026-09-05T06:00:00.000Z", eventKey: "grok-2" },
+        { adapter: "codex", occurredAt: "2026-09-05T05:00:00.000Z", eventKey: "codex-1" },
+        { adapter: "claude", occurredAt: "2026-09-04T05:00:00.000Z", eventKey: "old-claude" },
+      ],
+      nowMs,
+    )).toEqual(["grok", "codex", "claude", "workbuddy"]);
+    expect(shouldRefreshAdapterUsageOrder(undefined, nowMs)).toBe(true);
+    expect(shouldRefreshAdapterUsageOrder(nowMs - 23 * 60 * 60_000, nowMs)).toBe(false);
+    expect(shouldRefreshAdapterUsageOrder(nowMs - 24 * 60 * 60_000, nowMs)).toBe(true);
+    expect(shouldRefreshAdapterUsageOrder(nowMs + 60_000, nowMs)).toBe(true);
+  });
+
+  test("refreshes the persisted adapter usage order only during an idle daily window", () => {
+    const source = readRepoFile("src/daemon/werelay-daemon.ts");
+    const refreshStart = source.indexOf("  private scheduleMobileAdapterUsageOrderRefresh(");
+    const refreshEnd = source.indexOf("\n  private async listMobileAdapters(", refreshStart);
+    const refreshBlock = source.slice(refreshStart, refreshEnd);
+    const adaptersStart = source.indexOf("  private async listMobileAdapters(");
+    const adaptersEnd = source.indexOf("\n  private async buildMobileSettings", adaptersStart);
+    const adaptersBlock = source.slice(adaptersStart, adaptersEnd);
+
+    expect(refreshBlock).toContain("shouldRefreshAdapterUsageOrder");
+    expect(refreshBlock).toContain("this.hasBusyAdapterForUsageRefresh()");
+    expect(refreshBlock).toContain("MOBILE_ADAPTER_USAGE_BUSY_RETRY_MS");
+    expect(refreshBlock).toContain("this.stateStore.setAdapterUsageOrder");
+    expect(source).toContain("this.recordAdapterMessageActivity({");
+    expect(adaptersBlock).toContain("orderedAdapters.map");
   });
 
   test("collects running task state across terminal catalogs", () => {
@@ -1228,7 +1265,7 @@ describe("werelay-daemon helpers", () => {
     const inboundStart = source.indexOf("  private async handleInboundMessage(");
     const inboundEnd = source.indexOf("\n  private async handleDaemonTaskTargetedMessage(", inboundStart);
     const inboundBlock = source.slice(inboundStart, inboundEnd);
-    const earlyGlobalIndex = inboundBlock.indexOf("await this.handleGlobalTaskInputWithoutActiveSlot(message)");
+    const earlyGlobalIndex = inboundBlock.indexOf("await this.handleGlobalTaskInputWithoutActiveSlot(message, receivedTaskTarget)");
     const activeSlotGuardIndex = inboundBlock.indexOf("const slot = this.getActiveSlot()");
 
     expect(earlyGlobalIndex).toBeGreaterThan(-1);

@@ -1354,15 +1354,16 @@ function loadMobilePendingMessageReconciler(): (
     role: string;
     text: string;
   }>,
+  deliveredClientIds?: string[],
 ) => Array<{ clientId: string }> {
   const start = CODEX_MOBILE_JS.indexOf("  function reconcilePendingMessages");
   const end = CODEX_MOBILE_JS.indexOf("\n  function runHeaderInsertIndex", start);
   if (start < 0 || end < 0) throw new Error("Mobile pending-message reconciler not found");
   const source = CODEX_MOBILE_JS.slice(start, end);
-  return new Function("pendingMessages", "messages", `
+  return new Function("pendingMessages", "messages", "deliveredClientIds", `
 var state = { pendingMessages: pendingMessages };
 ${source}
-reconcilePendingMessages(messages);
+reconcilePendingMessages(messages, [], deliveredClientIds);
 return state.pendingMessages;
 `) as ReturnType<typeof loadMobilePendingMessageReconciler>;
 }
@@ -1977,6 +1978,7 @@ describe("Codex mobile persistent cache", () => {
       conversationSnapshots: {
         [runtime.conversationStateKey("codex", "task-a")]: {
           serverMessages: [{ role: "assistant", text: "缓存中的最近回复" }],
+          deliveredClientIds: ["mobile-completed", null, 123],
           historyMessages: [],
           latestMessages: [{ role: "assistant", text: "缓存中的最近回复" }],
           oldestMessageCursor: null,
@@ -2026,6 +2028,7 @@ describe("Codex mobile persistent cache", () => {
     expect(state.serverMessages).toEqual([
       { role: "assistant", text: "缓存中的最近回复" },
     ]);
+    expect(state.deliveredClientIds).toEqual(["mobile-completed"]);
     expect(runtime.composerInput.value).toBe("跨刷新草稿");
     expect(state.boardTasks).toEqual([
       { adapter: "codex", threadId: "task-a", title: "缓存看板任务" },
@@ -2319,6 +2322,27 @@ describe("Codex mobile web rendering", () => {
     expect(CODEX_MOBILE_CSS).toContain(
       ".composer-permission-option .composer-model-option-label { white-space: nowrap; overflow-wrap: normal; }",
     );
+  });
+
+  test("keeps both model menu levels wide and model names on one line", () => {
+    expect(CODEX_MOBILE_CSS).toContain(
+      ".composer-model-menu { position: absolute; left: 0; bottom: calc(100% + 8px); width: min(360px, calc(100vw - 64px)); min-width: min(300px, calc(100vw - 64px)); max-width: calc(100vw - 64px);",
+    );
+    expect(CODEX_MOBILE_CSS).toContain(
+      ".composer-model-option-label { display: block; overflow: hidden; overflow-wrap: normal; white-space: nowrap; text-overflow: ellipsis;",
+    );
+    expect(CODEX_MOBILE_CSS).toContain(
+      ".composer-session-menu { left: auto; right: 0; width: fit-content;",
+    );
+  });
+
+  test("reveals the current task whenever the mobile task list opens", () => {
+    expect(CODEX_MOBILE_JS).toContain("function revealCurrentTaskInSidebar()");
+    expect(CODEX_MOBILE_JS).toContain('button.scrollIntoView({ behavior: "auto", block: "nearest", inline: "nearest" })');
+    expect(CODEX_MOBILE_JS).toContain('state.collapsedProjectGroups[groupKey] = false');
+    expect(CODEX_MOBILE_JS).toContain('document.getElementById("menu-button").addEventListener("click", openSidebar)');
+    expect(CODEX_MOBILE_JS).toContain('taskBoardMenuButton.addEventListener("click", openSidebar)');
+    expect(CODEX_MOBILE_JS).toContain('settingsMenuButton.addEventListener("click", openSidebar)');
   });
 
   test("keeps a cascading model menu open when its clicked row is rerendered", () => {
@@ -2802,6 +2826,30 @@ describe("Codex mobile web rendering", () => {
     ])).toEqual([]);
   });
 
+  test("reconciles restored optimistic messages against the merged transcript", () => {
+    const loadStart = CODEX_MOBILE_JS.indexOf("  async function loadMessages(");
+    const loadEnd = CODEX_MOBILE_JS.indexOf("\n  function temporaryTaskTitle", loadStart);
+    const loadBlock = CODEX_MOBILE_JS.slice(loadStart, loadEnd);
+
+    expect(loadBlock).toContain("var messages = state.serverMessages;");
+    expect(loadBlock).toContain(
+      "reconcilePendingMessages(messages, state.outboundMessages, state.deliveredClientIds);",
+    );
+    expect(loadBlock).not.toContain(
+      "reconcilePendingMessages(payload.messages || [], state.outboundMessages);",
+    );
+    expect(CODEX_MOBILE_JS).not.toContain("message-deliveries");
+  });
+
+  test("clears restored failed image bubbles from explicit delivered ids even without the user transcript page", () => {
+    const reconcile = loadMobilePendingMessageReconciler();
+    const pending = [{ clientId: "mobile-confirmed", text: "图片和文字都已提交", imageCount: 1,
+      status: "failed", baselineUserCount: 20, baselineUserKeys: ["id:already-in-cache"] }];
+    expect(reconcile(pending.map(message => ({...message})), [{id: "result", role: "assistant", text: "已经处理完了"}], ["mobile-confirmed"])).toEqual([]);
+    expect(reconcile([{...pending[0]!, clientId: "mobile-unconfirmed"}], [], ["mobile-confirmed"])).toHaveLength(1);
+    expect(reconcile([{...pending[0]!, status: "delivered"}], [], [])).toEqual([]);
+  });
+
   test("removes an optimistic message as soon as the real user message appears", () => {
     const reconcilePendingMessages = loadMobilePendingMessageReconciler();
     const pending = [{
@@ -2816,6 +2864,62 @@ describe("Codex mobile web rendering", () => {
     expect(reconcilePendingMessages(pending, [
       { id: "new-user", role: "user", text: "只发送一次" },
     ])).toEqual([]);
+  });
+
+  test("hides a cached optimistic bubble immediately and makes retry a no-op after acknowledgement", () => {
+    const reconcileStart = CODEX_MOBILE_JS.indexOf("  function reconcilePendingMessages");
+    const reconcileEnd = CODEX_MOBILE_JS.indexOf("  function runHeaderInsertIndex", reconcileStart);
+    const visibleStart = CODEX_MOBILE_JS.indexOf("  function visiblePendingMessages");
+    const visibleEnd = CODEX_MOBILE_JS.indexOf("  function currentVisibleRunSummary", visibleStart);
+    const retryStart = CODEX_MOBILE_JS.indexOf("  function retryPendingMessage");
+    const retryEnd = CODEX_MOBILE_JS.indexOf('  composerForm.addEventListener', retryStart);
+    const pending = { clientId: "mobile-cached", threadId: "task", text: "只发送一次", imageCount: 0,
+      status: "forwarding_to_agent", baselineUserKeys: [], baselineUserCount: 0 };
+    const state = { pendingMessages: [pending], serverMessages: [{id: "actual", role: "user", text: pending.text}] };
+    let posts = 0;
+    const actions = new Function("state", "submitPendingMessage", `
+      function taskById() { return {}; }
+      function isTemporaryTask() { return false; }
+      function renderMessages() {}
+      ${CODEX_MOBILE_JS.slice(reconcileStart, reconcileEnd)}
+      ${CODEX_MOBILE_JS.slice(visibleStart, visibleEnd)}
+      ${CODEX_MOBILE_JS.slice(retryStart, retryEnd)}
+      return { visiblePendingMessages, retryPendingMessage };
+    `)(state, () => { posts++; });
+    expect(actions.visiblePendingMessages()).toEqual([]);
+    expect(state.serverMessages).toHaveLength(1);
+    expect(pending).toMatchObject({ deliveryConfirmed: true });
+    actions.retryPendingMessage("mobile-cached");
+    expect(posts).toBe(0);
+    // A restored stale pending item also must not be reposted by retry.
+    state.pendingMessages = [{...pending}];
+    actions.retryPendingMessage("mobile-cached");
+    expect(posts).toBe(0);
+  });
+
+  test("reconciles text normalized the same way as visible bubbles", () => {
+    const reconcile = loadMobilePendingMessageReconciler();
+    expect(reconcile([{
+      clientId: "mobile-normalized", text: "字体用常规粗细\r\n\r\n\r\n不要加粗", imageCount: 0,
+      status: "forwarding_to_agent", baselineUserCount: 0, baselineUserKeys: [],
+    }], [{ id: "new-user", role: "user", text: "字体用常规粗细\n\n不要加粗" }])).toEqual([]);
+  });
+
+  test("does not consume a different pending message from the same turn", () => {
+    const reconcile = loadMobilePendingMessageReconciler();
+    const pending = [{ clientId: "mobile-followup", turnId: "running-turn", text: "新的补充",
+      imageCount: 0, status: "sending", baselineUserCount: 1, baselineUserKeys: ["id:old-user"] }];
+    expect(reconcile(pending, [{ id: "old-user", turnId: "running-turn", role: "user", text: "原来的指令" }])).toHaveLength(1);
+  });
+
+  test("does not reuse a confirmed user bubble for a second identical pending send", () => {
+    const reconcile = loadMobilePendingMessageReconciler();
+    const pending = ["first", "second"].map(clientId => ({clientId, text: "继续", imageCount: 0,
+      status: "sending", baselineUserCount: 0, baselineUserKeys: []}));
+    const messages = [{id: "real-first", role: "user", text: "继续"}];
+    const remaining = reconcile(pending, messages);
+    expect(remaining).toHaveLength(1);
+    expect(reconcile(remaining, messages)).toHaveLength(1);
   });
 
   test("keeps the local running state while the desktop status is unknown", () => {
@@ -4066,6 +4170,7 @@ describe("Codex mobile server", () => {
       readMessages: async (threadId) => ({
         threadId,
         resolvedThreadId: "real-thread",
+        deliveredClientIds: ["mobile-already-delivered"],
         messages: [{ role: "assistant", text: "已有回复" }],
         outboundMessages: [{
           id: "mobile-outbox:codex:mobile-persisted",
@@ -4101,6 +4206,7 @@ describe("Codex mobile server", () => {
       expect(await readResponse.json()).toMatchObject({
         threadId: "local-new-1",
         resolvedThreadId: "real-thread",
+        deliveredClientIds: ["mobile-already-delivered"],
         outboundMessages: [{
           clientId: "mobile-persisted",
           text: "离页后继续提交",
@@ -4366,7 +4472,17 @@ describe("Codex mobile server", () => {
       expect(html).toContain('id="composer-image-input"');
       expect(html).toContain('id="composer-model-button"');
       expect(html).toContain('id="composer-model-menu"');
-      expect(html).toContain('<div class="composer-beam" aria-hidden="true"><span class="composer-beam-bloom"></span></div>');
+      expect(html).toContain('<div class="composer-beam" data-beam="composer" data-active aria-hidden="true"><span data-beam-bloom></span></div>');
+      expect(CODEX_MOBILE_CSS).toContain('[data-beam="composer"] {\n  position: relative;\n  border-radius: 28px;\n  overflow: hidden;');
+      expect(CODEX_MOBILE_CSS).toContain("mask-composite: intersect, add;");
+      expect(CODEX_MOBILE_CSS).toContain("transparent 28px, transparent calc(100% - 28px)");
+      expect(CODEX_MOBILE_CSS).toContain("radial-gradient(ellipse 70px 40px at 33% -7.4%");
+      expect(CODEX_MOBILE_CSS).toContain("beam-spin-composer 1.96s linear infinite");
+      expect(CODEX_MOBILE_CSS).toContain("blur(8px) brightness(1.30) saturate(1.50)");
+      expect(CODEX_MOBILE_CSS).toContain("blur(8px) brightness(1.30) saturate(1.20)");
+      expect(CODEX_MOBILE_CSS).not.toContain("blur(19px)");
+      expect(CODEX_MOBILE_CSS).not.toContain("composer-beam-core");
+      expect(CODEX_MOBILE_CSS).toContain("--beam-opacity-composer: 1;");
       const composerStart = html.indexOf('<div class="composer">');
       const composerEnd = html.indexOf("</div>\n      </form>", composerStart);
       const composerMediaIndex = html.indexOf('id="composer-media"');

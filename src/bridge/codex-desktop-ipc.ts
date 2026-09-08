@@ -78,6 +78,21 @@ function cloneValue<T>(value: T): T {
   return structuredClone(value);
 }
 
+function toCodexDesktopInput(input: string | BridgeTurnInputItem[]) {
+  const items = typeof input === "string"
+    ? [{ type: "text" as const, text: input }]
+    : input;
+  // Desktop renders this input before app-server can supply protocol defaults.
+  return items.map((item) => item.type === "text"
+    ? {
+        ...item,
+        text_elements: "text_elements" in item && Array.isArray(item.text_elements)
+          ? cloneValue(item.text_elements)
+          : [],
+      }
+    : { ...item });
+}
+
 export function isCodexDesktopMainProcessCommandLine(commandLine: string): boolean {
   const normalized = commandLine.trim();
   return CODEX_DESKTOP_MAIN_PROCESS_PATHS.some(
@@ -487,9 +502,7 @@ export class CodexDesktopIpcClient {
     } = {},
   ): Promise<Record<string, unknown>> {
     const normalizedThreadId = threadId.trim();
-    const items = typeof input === "string"
-      ? [{ type: "text" as const, text: input }]
-      : input.map((item) => ({ ...item }));
+    const items = toCodexDesktopInput(input);
     const previousTurn = extractCodexDesktopActiveTurn(
       this.getThreadStateView(normalizedThreadId),
     );
@@ -597,7 +610,7 @@ export class CodexDesktopIpcClient {
       1,
       {
         conversationId: threadId.trim(),
-        input: input.map((item) => ({ ...item })),
+        input: toCodexDesktopInput(input),
         restoreMessage: cloneValue(restoreMessage),
         clientUserMessageId:
           typeof restoreMessage.id === "string" ? restoreMessage.id : undefined,

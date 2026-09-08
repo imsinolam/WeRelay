@@ -1,3 +1,5 @@
+import { COMPOSER_BEAM_CSS } from "./codex-mobile-composer-beam.ts";
+
 export const CODEX_MOBILE_HTML = `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -170,7 +172,7 @@ export const CODEX_MOBILE_HTML = `<!doctype html>
         <div class="composer-queue" id="composer-queue" aria-live="polite" hidden></div>
         <input id="composer-image-input" type="file" hidden accept="image/png,image/jpeg,image/webp,image/gif" multiple>
         <div class="composer">
-          <div class="composer-beam" aria-hidden="true"><span class="composer-beam-bloom"></span></div>
+          <div class="composer-beam" data-beam="composer" data-active aria-hidden="true"><span data-beam-bloom></span></div>
           <div class="composer-media" id="composer-media" hidden></div>
           <textarea id="composer-input" rows="1" maxlength="20000" placeholder="有问题，尽管问"></textarea>
           <button class="composer-image-button" id="composer-image-button" type="button" aria-label="添加图片">
@@ -1077,7 +1079,7 @@ body.image-viewer-open { overflow: hidden; }
 .composer-model-button span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .composer-model-chevron { width: 14px; height: 14px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.6; }
 .composer-model-button.is-readonly .composer-model-chevron { display: none; }
-.composer-model-menu { position: absolute; left: 0; bottom: calc(100% + 8px); width: fit-content; max-width: min(420px, calc(100vw - 48px)); min-width: 148px; max-height: min(360px, 52vh); overflow: auto; padding: 5px; border: 1px solid var(--border); border-radius: 13px; background: var(--page); box-shadow: var(--shadow); z-index: 30; }
+.composer-model-menu { position: absolute; left: 0; bottom: calc(100% + 8px); width: min(360px, calc(100vw - 64px)); min-width: min(300px, calc(100vw - 64px)); max-width: calc(100vw - 64px); max-height: min(360px, 52vh); overflow: auto; padding: 5px; border: 1px solid var(--border); border-radius: 13px; background: var(--page); box-shadow: var(--shadow); z-index: 30; }
 .composer-session-menu { left: auto; right: 0; width: fit-content; max-width: min(360px, calc(100vw - 48px)); min-width: 188px; }
 .composer-permission-option .composer-model-option-label { white-space: nowrap; overflow-wrap: normal; }
 .composer-model-menu[hidden] { display: none; }
@@ -1091,7 +1093,7 @@ body.image-viewer-open { overflow: hidden; }
 .composer-model-option:hover { background: var(--surface); }
 .composer-model-option:disabled { opacity: .48; cursor: wait; }
 .composer-model-option-copy { min-width: 0; }
-.composer-model-option-label { display: block; overflow-wrap: anywhere; white-space: normal; font-size: 13px; font-weight: 560; }
+.composer-model-option-label { display: block; overflow: hidden; overflow-wrap: normal; white-space: nowrap; text-overflow: ellipsis; font-size: 13px; font-weight: 560; }
 .composer-model-option-description { display: block; margin-top: 2px; overflow-wrap: anywhere; white-space: normal; color: var(--muted); font-size: 11px; font-weight: 430; }
 .composer-model-option-check { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
 .queued-followup { min-width: 0; background: var(--page); }
@@ -1110,16 +1112,8 @@ body.image-viewer-open { overflow: hidden; }
 .queued-followup-action:focus-visible { box-shadow: inset 0 0 0 2px rgba(16,163,127,.24); }
 .queued-followup-action:disabled { opacity: .42; cursor: default; }
 .queued-followup-action svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.7; }
-@property --composer-beam-angle {
-  syntax: "<angle>";
-  initial-value: 0deg;
-  inherits: true;
-}
 .composer {
   display: grid;
-  --composer-beam-stroke-opacity: .12;
-  --composer-beam-inner-opacity: .26;
-  --composer-beam-bloom-opacity: .34;
   position: relative;
   isolation: isolate;
   grid-template-columns: 36px minmax(0, 1fr) 36px;
@@ -1134,84 +1128,8 @@ body.image-viewer-open { overflow: hidden; }
   transition: box-shadow .16s ease;
 }
 .composer > :not(.composer-beam) { position: relative; z-index: 2; }
-.composer-beam {
-  --composer-beam-angle: 0deg;
-  --composer-beam-gradient: conic-gradient(
-    from var(--composer-beam-angle),
-    transparent 0%,
-    transparent 52%,
-    rgba(255, 50, 100, .52) 56%,
-    rgb(255, 50, 100) 59%,
-    rgb(40, 140, 255) 63%,
-    rgb(50, 200, 80) 67%,
-    rgb(30, 185, 170) 70%,
-    rgb(100, 70, 255) 74%,
-    rgb(240, 50, 180) 78%,
-    rgb(255, 120, 40) 81%,
-    transparent 85%,
-    transparent 100%
-  );
-  position: absolute;
-  inset: 0;
-  z-index: 1;
-  overflow: hidden;
-  border-radius: inherit;
-  pointer-events: none;
-  contain: paint;
-  opacity: .78;
-  filter: hue-rotate(-30deg) brightness(1.3) saturate(1.5);
-  animation: composer-beam-spin 1.96s linear infinite, composer-beam-hue 12s ease-in-out infinite;
-  transition: opacity .2s cubic-bezier(.16, 1, .3, 1);
-}
-.composer-beam::before,
-.composer-beam::after,
-.composer-beam-bloom {
-  content: "";
-  position: absolute;
-  border-radius: inherit;
-  background: var(--composer-beam-gradient);
-  pointer-events: none;
-}
-.composer-beam::before {
-  inset: -2px;
-  padding: 5px;
-  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-  -webkit-mask-composite: xor;
-  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-  mask-composite: exclude;
-  filter: blur(4px);
-  opacity: var(--composer-beam-inner-opacity);
-}
-.composer-beam::after {
-  inset: 0;
-  padding: 1px;
-  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-  -webkit-mask-composite: xor;
-  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-  mask-composite: exclude;
-  opacity: var(--composer-beam-stroke-opacity);
-}
-.composer-beam-bloom {
-  inset: -3px;
-  padding: 4px;
-  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-  -webkit-mask-composite: xor;
-  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-  mask-composite: exclude;
-  filter: blur(9px);
-  opacity: var(--composer-beam-bloom-opacity);
-}
+${COMPOSER_BEAM_CSS}
 .composer:focus-within { box-shadow: 0 0 0 1px rgba(0,0,0,.08), 0 2px 10px rgba(0,0,0,.055), 0 8px 80px 10px rgba(0,0,0,.03); }
-.composer:focus-within .composer-beam { opacity: 1; }
-@keyframes composer-beam-spin { to { --composer-beam-angle: 360deg; } }
-@keyframes composer-beam-hue {
-  0%, 100% { filter: hue-rotate(-30deg) brightness(1.3) saturate(1.5); }
-  50% { filter: hue-rotate(30deg) brightness(1.3) saturate(1.5); }
-}
-@media (prefers-reduced-motion: reduce) {
-  .composer-beam { animation: none; filter: none; --composer-beam-angle: 68deg; opacity: .62; }
-  .composer:focus-within .composer-beam { opacity: .82; }
-}
 .composer-image-button, .send-button { width: 36px; height: 36px; flex: 0 0 auto; display: grid; place-items: center; margin: 0; padding: 0; border: 0; border-radius: 50%; cursor: pointer; }
 .composer-image-button { grid-column: 1; background: transparent; color: var(--text); }
 .composer-settings-controls { grid-column: 2; min-width: 0; display: flex; align-items: center; gap: 6px; }
@@ -1508,7 +1426,7 @@ body.task-rename-open { overflow: hidden; }
   .icon-button:active { background: #333; }
   .message-content pre, .message-content code { background: #2b2b2b; }
   .message-content pre code { background: transparent; }
-  .composer { --composer-beam-stroke-opacity: .26; --composer-beam-inner-opacity: .42; --composer-beam-bloom-opacity: .24; background: #303030; box-shadow: 0 0 0 1px rgba(255,255,255,.06), 0 2px 12px rgba(0,0,0,.22); }
+  .composer { background: #303030; box-shadow: 0 0 0 1px rgba(255,255,255,.06), 0 2px 12px rgba(0,0,0,.22); }
   .composer-wrap { background: linear-gradient(to bottom, rgba(33,33,33,0), rgba(33,33,33,.94) 32%, #212121 62%); }
   .composer-image-button:hover { background: #3a3a3a; }
   .message-content a { color: #7ab7ff; }
@@ -1616,6 +1534,7 @@ export const CODEX_MOBILE_JS = String.raw`
     projectVisibleLimits: Object.create(null),
     recentVisibleLimit: 20,
     recentMoreNode: null,
+    revealCurrentTaskOnSidebarOpen: false,
     boardOpen: false,
     settingsOpen: false,
     boardView: "active",
@@ -1639,6 +1558,7 @@ export const CODEX_MOBILE_JS = String.raw`
     permissionChanging: false,
     serverMessages: [],
     outboundMessages: [],
+    deliveredClientIds: [],
     historyMessages: [],
     latestMessages: [],
     oldestMessageCursor: null,
@@ -2093,12 +2013,17 @@ export const CODEX_MOBILE_JS = String.raw`
     return sanitized;
   }
 
+  function sanitizeDeliveredClientIds(ids) {
+    return Array.isArray(ids) ? ids.filter(function (id) { return typeof id === "string" && id.length <= 128; }).slice(-500) : [];
+  }
+
   function sanitizePersistentConversationSnapshot(snapshot) {
     if (!snapshot || typeof snapshot !== "object") return null;
     var messages = sanitizePersistentMessages(snapshot.serverMessages);
     return {
       serverMessages: messages,
       outboundMessages: sanitizePersistentMessages(snapshot.outboundMessages),
+      deliveredClientIds: sanitizeDeliveredClientIds(snapshot.deliveredClientIds),
       historyMessages: [],
       latestMessages: messages,
       oldestMessageCursor: snapshot.oldestMessageCursor === null
@@ -2540,6 +2465,7 @@ export const CODEX_MOBILE_JS = String.raw`
       key,
       {
         serverMessages: state.serverMessages.slice(),
+        deliveredClientIds: sanitizeDeliveredClientIds(state.deliveredClientIds),
         outboundMessages: Array.isArray(state.outboundMessages)
           ? state.outboundMessages.slice()
           : [],
@@ -2581,6 +2507,7 @@ export const CODEX_MOBILE_JS = String.raw`
     );
     if (!snapshot) return false;
     state.serverMessages = snapshot.serverMessages.slice();
+    state.deliveredClientIds = sanitizeDeliveredClientIds(snapshot.deliveredClientIds);
     state.outboundMessages = Array.isArray(snapshot.outboundMessages)
       ? snapshot.outboundMessages.slice()
       : [];
@@ -3918,6 +3845,7 @@ export const CODEX_MOBILE_JS = String.raw`
     renderModelControl();
     state.serverMessages = [];
     state.outboundMessages = [];
+    state.deliveredClientIds = [];
     state.historyMessages = [];
     state.latestMessages = [];
     state.oldestMessageCursor = null;
@@ -4240,6 +4168,8 @@ export const CODEX_MOBILE_JS = String.raw`
   }
 
   function visiblePendingMessages() {
+    applyDeliveredMessageReceipts(state.deliveredClientIds);
+    reconcilePendingMessages(state.serverMessages, state.outboundMessages);
     var outbound = Array.isArray(state.outboundMessages)
       ? state.outboundMessages.slice()
       : [];
@@ -4609,7 +4539,52 @@ export const CODEX_MOBILE_JS = String.raw`
     return Boolean(hit && button.contains(hit));
   }
 
+  function revealCurrentTaskInSidebar() {
+    if (
+      !state.revealCurrentTaskOnSidebarOpen ||
+      !app.classList.contains("sidebar-open") ||
+      !state.currentThreadId
+    ) return;
+    var currentTask = taskById(state.currentThreadId);
+    if (!currentTask) {
+      if (!state.loadingTasks && !state.switchingAdapter) {
+        state.revealCurrentTaskOnSidebarOpen = false;
+      }
+      return;
+    }
+    var query = searchInput.value.trim().toLowerCase();
+    if (
+      query &&
+      !(currentTask.title + " " + (currentTask.projectName || "")).toLowerCase().includes(query)
+    ) {
+      state.revealCurrentTaskOnSidebarOpen = false;
+      return;
+    }
+    if (state.taskView === "projects") {
+      var groupKey = taskGroupKey(currentTask);
+      if (state.collapsedProjectGroups[groupKey]) {
+        state.collapsedProjectGroups[groupKey] = false;
+        renderTasks();
+        return;
+      }
+    }
+    var button = state.taskNodes[state.currentThreadId];
+    if (!button || !button.isConnected) return;
+    state.revealCurrentTaskOnSidebarOpen = false;
+    requestAnimationFrame(function () {
+      if (!button.isConnected || !app.classList.contains("sidebar-open")) return;
+      button.scrollIntoView({ behavior: "auto", block: "nearest", inline: "nearest" });
+    });
+  }
+
+  function openSidebar() {
+    state.revealCurrentTaskOnSidebarOpen = true;
+    app.classList.add("sidebar-open");
+    revealCurrentTaskInSidebar();
+  }
+
   function closeSidebar() {
+    state.revealCurrentTaskOnSidebarOpen = false;
     app.classList.remove("sidebar-open");
     closeTaskContextMenu();
   }
@@ -5042,9 +5017,11 @@ export const CODEX_MOBILE_JS = String.raw`
 
     if (state.taskView === "recent") {
       renderRecentTasks(filtered, Boolean(query));
+      revealCurrentTaskInSidebar();
       return;
     }
     renderProjectTasks(filtered, Boolean(query));
+    revealCurrentTaskInSidebar();
   }
 
   function taskBoardStatusLabel(task) {
@@ -5799,6 +5776,7 @@ export const CODEX_MOBILE_JS = String.raw`
         state.tasks = [];
         state.serverMessages = [];
         state.outboundMessages = [];
+        state.deliveredClientIds = [];
         state.historyMessages = [];
         state.latestMessages = [];
         state.progressItems = [];
@@ -6796,15 +6774,21 @@ export const CODEX_MOBILE_JS = String.raw`
     }
   }
 
-  function reconcilePendingMessages(messages, outboundMessages) {
+  function reconcilePendingMessages(messages, outboundMessages, deliveredClientIds) {
+    applyDeliveredMessageReceipts(deliveredClientIds);
     var acceptedClientIds = new Set((Array.isArray(outboundMessages) ? outboundMessages : []).map(function (message) {
       return message && message.clientId;
     }).filter(Boolean));
     state.pendingMessages = state.pendingMessages.filter(function (pending) {
-      return !acceptedClientIds.has(pending.clientId);
+      if (acceptedClientIds.has(pending.clientId)) {
+        pending.serverAcknowledged = true;
+        return false;
+      }
+      return true;
     });
     var users = messages.filter(function (message) { return message.role === "user"; });
     var used = {};
+    var confirmedKeys = [];
 
     function userMessageKey(message) {
       if (message && message.id) return "id:" + message.id;
@@ -6817,8 +6801,11 @@ export const CODEX_MOBILE_JS = String.raw`
     }
 
     function matchesPendingText(message, pending) {
-      var actual = String(message && message.text || "").trim();
-      var expected = String(pending && pending.text || "").trim();
+      function normalizedText(value) {
+        return String(value || "").replace(/\r\n?/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+      }
+      var actual = normalizedText(message && message.text);
+      var expected = normalizedText(pending && pending.text);
       if (actual === expected) return true;
       if (!(pending && pending.imageCount > 0)) return false;
       var withoutImages = actual.split("\n").filter(function (line) {
@@ -6839,7 +6826,9 @@ export const CODEX_MOBILE_JS = String.raw`
       }
       if (matchIndex < 0 && pending.turnId) {
         matchIndex = users.findIndex(function (message, index) {
-          return !used[index] && message.turnId === pending.turnId;
+          return !used[index] && message.turnId === pending.turnId &&
+            matchesPendingText(message, pending) &&
+            (!baselineKeys || !baselineKeys.has(userMessageKey(message)));
         });
       }
       if (matchIndex < 0) {
@@ -6869,7 +6858,29 @@ export const CODEX_MOBILE_JS = String.raw`
         state.optimisticProgressTurnId = matchedMessage.turnId;
       }
       used[matchIndex] = true;
+      pending.deliveryConfirmed = true;
+      confirmedKeys.push(userMessageKey(matchedMessage));
       return false;
+    });
+    // A real message can acknowledge only one optimistic send, across renders
+    // too. Otherwise a second intentional "continue" disappears on the next tick.
+    if (confirmedKeys.length) state.pendingMessages.forEach(function (pending) {
+      if (!Array.isArray(pending.baselineUserKeys)) return;
+      pending.baselineUserKeys = Array.from(new Set(pending.baselineUserKeys.concat(confirmedKeys)));
+    });
+  }
+
+  function applyDeliveredMessageReceipts(deliveredClientIds) {
+    var delivered = new Set(Array.isArray(deliveredClientIds) ? deliveredClientIds : []);
+    if (Array.isArray(state.outboundMessages)) {
+      state.outboundMessages = state.outboundMessages.filter(function (message) { return !delivered.has(message.clientId); });
+    }
+    state.pendingMessages = state.pendingMessages.filter(function (pending) {
+      if (pending.serverAcknowledged || pending.status === "delivered" || delivered.has(pending.clientId)) {
+        pending.serverAcknowledged = true;
+        return false;
+      }
+      return true;
     });
   }
 
@@ -7705,7 +7716,8 @@ export const CODEX_MOBILE_JS = String.raw`
       state.outboundMessages = Array.isArray(payload.outboundMessages)
         ? payload.outboundMessages
         : [];
-      reconcilePendingMessages(payload.messages || [], state.outboundMessages);
+      state.deliveredClientIds = sanitizeDeliveredClientIds(payload.deliveredClientIds);
+      reconcilePendingMessages(messages, state.outboundMessages, state.deliveredClientIds);
       var taskIndex = state.tasks.findIndex(function (task) { return task.threadId === payload.threadId; });
       if (taskIndex >= 0 && payload.task) {
         state.tasks[taskIndex] = mergeTasksWithLocalDrafts(
@@ -7970,6 +7982,7 @@ export const CODEX_MOBILE_JS = String.raw`
     if (!restored) {
       state.serverMessages = [];
       state.outboundMessages = [];
+      state.deliveredClientIds = [];
       state.historyMessages = [];
       state.latestMessages = [];
       state.oldestMessageCursor = null;
@@ -8256,7 +8269,7 @@ export const CODEX_MOBILE_JS = String.raw`
   }
 
   async function submitPendingMessage(pending) {
-    if (pending.inFlight) return;
+    if (pending.inFlight || pending.deliveryConfirmed || pending.serverAcknowledged) return;
     var requestedThreadId = pending.threadId;
     var requestedAdapter = pending.adapter || state.currentAdapter;
     if (hasEarlierPendingMessage(pending)) {
@@ -8306,6 +8319,7 @@ export const CODEX_MOBILE_JS = String.raw`
         body: body,
         keepalive: body.length < 60 * 1024
       });
+      if (pending.deliveryConfirmed) return;
       pending.manualRetry = false;
       pending.browserAttempts = 0;
       pending.turnId = result.turnId || pending.turnId || "";
@@ -8332,6 +8346,7 @@ export const CODEX_MOBILE_JS = String.raw`
         }
       }, 180);
     } catch (error) {
+      if (pending.deliveryConfirmed || pending.serverAcknowledged) return;
       pending.browserAttempts = Math.min(6, Number(pending.browserAttempts || 0) + 1);
       pending.lastError = error && error.message || "网络连接暂时中断";
       pending.status = pending.browserAttempts >= 6 ? "failed" : "retrying";
@@ -8396,9 +8411,14 @@ export const CODEX_MOBILE_JS = String.raw`
   }
 
   function retryPendingMessage(clientId) {
+    if ((state.deliveredClientIds || []).includes(clientId)) {
+      reconcilePendingMessages(state.serverMessages, state.outboundMessages, state.deliveredClientIds);
+      renderMessages(false);
+      return;
+    }
     var pending = state.pendingMessages.find(function (message) { return message.clientId === clientId; });
     if (!pending) {
-      var outbound = state.outboundMessages.find(function (message) { return message.clientId === clientId; });
+      var outbound = (state.outboundMessages || []).find(function (message) { return message.clientId === clientId; });
       if (!outbound) return;
       outbound.status = "accepted";
       outbound.attempts = 0;
@@ -8425,16 +8445,14 @@ export const CODEX_MOBILE_JS = String.raw`
       };
       state.pendingMessages.push(pending);
     }
+    reconcilePendingMessages(state.serverMessages);
+    if (pending.deliveryConfirmed) {
+      renderMessages(false);
+      return;
+    }
     var task = taskById(pending.threadId);
-    pending.turnId = "";
     pending.manualRetry = true;
     pending.browserAttempts = 0;
-    pending.baselineUserCount = state.serverMessages.filter(function (message) {
-      return message.role === "user";
-    }).length;
-    pending.baselineUserKeys = state.serverMessages.filter(function (message) {
-      return message.role === "user";
-    }).map(messagePageKey);
     if (!isTemporaryTask(task)) beginOptimisticRunIfNeeded(pending);
     renderMessages(true);
     void submitPendingMessage(pending);
@@ -8600,6 +8618,7 @@ export const CODEX_MOBILE_JS = String.raw`
     state.currentThreadId = "";
     state.serverMessages = [];
     state.outboundMessages = [];
+    state.deliveredClientIds = [];
     state.historyMessages = [];
     state.latestMessages = [];
     state.oldestMessageCursor = null;
@@ -8701,9 +8720,7 @@ export const CODEX_MOBILE_JS = String.raw`
   taskBoardOpen.addEventListener("click", function () {
     setTaskBoardOpen(!state.boardOpen, true);
   });
-  taskBoardMenuButton.addEventListener("click", function () {
-    app.classList.add("sidebar-open");
-  });
+  taskBoardMenuButton.addEventListener("click", openSidebar);
   taskBoardRefresh.addEventListener("click", function () {
     void loadTaskBoard(true);
   });
@@ -8797,13 +8814,13 @@ export const CODEX_MOBILE_JS = String.raw`
       toggleWorkspaceMenu(false);
     }
   });
-  document.getElementById("menu-button").addEventListener("click", function () { app.classList.add("sidebar-open"); });
+  document.getElementById("menu-button").addEventListener("click", openSidebar);
   document.getElementById("sidebar-close").addEventListener("click", closeSidebar);
   document.getElementById("sidebar-overlay").addEventListener("click", closeSidebar);
   settingsOpen.addEventListener("click", function () {
     setSettingsOpen(true, true);
   });
-  settingsMenuButton.addEventListener("click", function () { app.classList.add("sidebar-open"); });
+  settingsMenuButton.addEventListener("click", openSidebar);
 
   function scheduleLiveRefresh(delayMs) {
     if (!state.authenticated) return;

@@ -1,4 +1,6 @@
 import fs from "node:fs";
+import { createHash } from "node:crypto";
+import { findFailedMessageExecution, taskCanCoverFailedMessage, type ReconciliationTask } from "./failed-mobile-message-reconciliation.ts";
 import path from "node:path";
 
 import type { BridgeMessageImage, BridgeSessionMessage } from "../bridge/bridge-types.ts";
@@ -327,6 +329,17 @@ export class MobileMessageOutbox {
       .map(cloneEntry);
   }
 
+  deliveredClientIds(adapter: string, threadId: string): string[] {
+    return this.entries.filter(entry => entry.adapter === adapter && entryMatchesThread(entry, threadId) && entry.status === "delivered")
+      .map(entry => entry.clientId);
+  }
+
+  contentRevision(adapter: string, threadId: string): string {
+    const receipts = this.entries.filter(entry => entry.adapter === adapter && entryMatchesThread(entry, threadId))
+      .map(entry => [entry.clientId, entry.status, entry.attempts, entry.turnId, entry.queuedMessageId, entry.lastError]);
+    return createHash("sha256").update(JSON.stringify(receipts)).digest("hex").slice(0, 16);
+  }
+
   readyEntries(nowMs = this.now()): MobileMessageOutboxEntry[] {
     const firstDispatchableByTask = new Map<string, MobileMessageOutboxEntry>();
     for (const entry of [...this.entries].sort((left, right) => left.sequence - right.sequence)) {
@@ -435,6 +448,29 @@ export class MobileMessageOutbox {
     });
   }
 
+  failedEntries(adapter?: string): MobileMessageOutboxEntry[] {
+    return this.entries.filter(entry => entry.status === "failed" && (!adapter || entry.adapter === adapter)).map(cloneEntry);
+  }
+
+  reconcileFailedExecution(
+    adapter: string,
+    task: ReconciliationTask,
+    tasks: ReconciliationTask[],
+    messages: BridgeSessionMessage[],
+  ): number {
+    let matched = 0;
+    for (const entry of this.entries) {
+      if (entry.adapter !== adapter || !taskCanCoverFailedMessage(entry, task, tasks)) continue;
+      if (!findFailedMessageExecution(entry, task.threadId, messages)) continue;
+      entry.status = "delivered";
+      entry.deliveredAtMs = this.now();
+      delete entry.lastError;
+      matched++;
+    }
+    if (matched) this.persist();
+    return matched;
+  }
+
   pendingFailureNotifications(): MobileMessageOutboxEntry[] {
     return this.entries
       .filter((entry) => entry.status === "failed" && !entry.failureNotifiedAt)
@@ -443,6 +479,7 @@ export class MobileMessageOutbox {
   }
 
   retry(adapter: string, threadId: string, clientId: string, nowMs = this.now()): boolean {
+    if (this.findMutable(adapter, threadId, clientId)?.status === "delivered") return false;
     return this.update(adapter, threadId, clientId, (entry) => {
       entry.status = "accepted";
       entry.attempts = 0;

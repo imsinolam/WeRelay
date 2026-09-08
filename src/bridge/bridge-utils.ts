@@ -1,3 +1,4 @@
+import { formatTaskListInstructions } from "./task-list-instructions.ts";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -1588,23 +1589,6 @@ function formatResumeSessionRuntimeMarkers(
   return markers.length > 0 ? ` · ${markers.join(" · ")}` : "";
 }
 
-function formatResumeSessionInstructions(params: {
-  hasMore: boolean;
-  hasPrevious: boolean;
-}): string[] {
-  const navigation = [
-    "搜索“任务：关键词”",
-    "发送“新建：内容”新建任务",
-  ];
-  if (params.hasMore) navigation.push("“下一页20”查看更多");
-  if (params.hasPrevious) navigation.push("“上一页”返回");
-  return [
-    "回复序号进入；发送“3：内容”可直接下发",
-    navigation.join("；"),
-    "序号保持到下次发送“任务”",
-  ];
-}
-
 export function formatResumeSessionList(params: {
   adapter: BridgeAdapterKind;
   candidates: BridgeResumeSessionCandidate[];
@@ -1623,7 +1607,6 @@ export function formatResumeSessionList(params: {
     page = 1,
     startIndex,
     hasPrevious,
-    hasMore = false,
   } = params;
   const resolvedStartIndex = startIndex ?? (page - 1) * CODEX_TASK_LIST_PAGE_SIZE;
   const resolvedHasPrevious = hasPrevious ?? resolvedStartIndex > 0;
@@ -1647,10 +1630,8 @@ export function formatResumeSessionList(params: {
       );
       return `${resolvedStartIndex + index + 1}. ${formatTaskProjectLabel(candidate)}${formatTaskListDisplayTitle(candidate.title)}${markers}`;
     }),
-    ...formatResumeSessionInstructions({
-      hasMore,
-      hasPrevious: resolvedHasPrevious,
-    }),
+    "",
+    formatTaskListInstructions(),
   ].join("\n");
 }
 

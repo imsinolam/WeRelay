@@ -1,3 +1,4 @@
+import { formatTaskListInstructions } from "../bridge/task-list-instructions.ts";
 import {
   DAEMON_PROVIDER_IDS,
   getBridgeProvider,
@@ -269,17 +270,6 @@ function taskIdentityLabel(
   return parts.length > 0 ? `[${parts.join(" · ")}] ` : "";
 }
 
-function globalTaskInstructionLines(page: GlobalTaskPage): string[] {
-  const navigation: string[] = ["搜索“任务：关键词”"];
-  if (page.hasMore) navigation.push("“下一页20”查看更多");
-  if (page.hasPrevious) navigation.push("“上一页”返回");
-  return [
-    "回复序号进入；发送“3：内容”可直接下发",
-    navigation.join("；"),
-    "序号保持到下次发送“任务”",
-  ];
-}
-
 function candidateProjectLabel(candidate: GlobalTaskCandidate): string {
   const project = candidate.projectName?.trim();
   if (!project) return "";
@@ -306,7 +296,8 @@ export function formatGlobalTaskList(params: {
     ...page.candidates.map((candidate, index) => (
       `${page.startIndex + index + 1}. ${taskIdentityLabel(candidate, showAdapterLabels)}${formatGlobalTaskDisplayTitle(candidate.title)}${runtimeMarker(candidate)}`
     )),
-    ...globalTaskInstructionLines(page),
+    "",
+    formatTaskListInstructions(),
   ].join("\n");
 }
 

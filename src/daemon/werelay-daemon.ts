@@ -182,6 +182,7 @@ import {
 import {
   DaemonWorkspaceStateStore,
   type CodexWechatReplyMode,
+  type DaemonAdapterMessageActivity,
   type DaemonRecentTaskCompletion,
   type DaemonWechatTaskTarget,
   type DaemonWorkspaceState,
@@ -197,6 +198,7 @@ import {
   type PendingApprovalNotificationDelivery,
 } from "./approval-notification-delivery.ts";
 import { CodexMobileAuthStore } from "./codex-mobile-auth.ts";
+import { FailedMobileMessageSweep } from "./failed-mobile-message-reconciliation.ts";
 import { MobileMessageImageStore } from "./mobile-message-image-store.ts";
 import {
   MobileMessageOutbox,
@@ -636,6 +638,10 @@ const MOBILE_CREATED_TASK_CACHE_MAX_SIZE = 256;
 const MOBILE_CREATED_TASK_CACHE_TTL_MS = 15 * 60_000;
 const MOBILE_MESSAGE_OUTBOX_MAX_ATTEMPTS = 5;
 const MOBILE_MESSAGE_FAILURE_NOTIFICATION_RETRY_MS = 30_000;
+const MOBILE_ADAPTER_USAGE_WINDOW_MS = 24 * 60 * 60_000;
+const MOBILE_ADAPTER_USAGE_REFRESH_INTERVAL_MS = 24 * 60 * 60_000;
+const MOBILE_ADAPTER_USAGE_IDLE_DELAY_MS = 30_000;
+const MOBILE_ADAPTER_USAGE_BUSY_RETRY_MS = 5 * 60_000;
 const SINGLE_BRIDGE_STOP_TIMEOUT_MS = 10_000;
 const SINGLE_BRIDGE_FORCE_STOP_TIMEOUT_MS = 3_000;
 const SINGLE_BRIDGE_STOP_POLL_MS = 250;
@@ -649,6 +655,55 @@ const SWITCH_ADAPTER_TASK_LIST_READY_POLL_MS = 250;
 const CODEX_DEFERRED_DRAIN_RETRY_BASE_MS = 1_000;
 const CODEX_DEFERRED_DRAIN_RETRY_MAX_MS = 30_000;
 const DAEMON_ADAPTERS: DaemonAdapterKind[] = [...DAEMON_PROVIDER_IDS];
+
+export function sortAdaptersByRecentMessageActivity(
+  adapters: readonly DaemonAdapterKind[],
+  activities: readonly DaemonAdapterMessageActivity[],
+  nowMs: number,
+  windowMs = MOBILE_ADAPTER_USAGE_WINDOW_MS,
+): DaemonAdapterKind[] {
+  const counts = new Map<DaemonAdapterKind, number>();
+  const cutoffMs = nowMs - windowMs;
+  for (const activity of activities) {
+    const occurredAtMs = Date.parse(activity.occurredAt);
+    if (!Number.isFinite(occurredAtMs) || occurredAtMs < cutoffMs || occurredAtMs > nowMs) {
+      continue;
+    }
+    counts.set(activity.adapter, (counts.get(activity.adapter) ?? 0) + 1);
+  }
+  return adapters
+    .map((adapter, index) => ({ adapter, index, count: counts.get(adapter) ?? 0 }))
+    .sort((left, right) => right.count - left.count || left.index - right.index)
+    .map(({ adapter }) => adapter);
+}
+
+export function shouldRefreshAdapterUsageOrder(
+  updatedAtMs: number | undefined,
+  nowMs: number,
+  intervalMs = MOBILE_ADAPTER_USAGE_REFRESH_INTERVAL_MS,
+): boolean {
+  return updatedAtMs === undefined ||
+    !Number.isFinite(updatedAtMs) ||
+    updatedAtMs > nowMs ||
+    nowMs - updatedAtMs >= intervalMs;
+}
+
+function mergeAdapterUsageOrder(
+  persisted: readonly DaemonAdapterKind[],
+  available: readonly DaemonAdapterKind[],
+): DaemonAdapterKind[] {
+  const availableSet = new Set(available);
+  const seen = new Set<DaemonAdapterKind>();
+  const ordered: DaemonAdapterKind[] = [];
+  for (const adapter of [...persisted, ...available]) {
+    if (!availableSet.has(adapter) || seen.has(adapter)) {
+      continue;
+    }
+    seen.add(adapter);
+    ordered.push(adapter);
+  }
+  return ordered;
+}
 
 function log(message: string): void {
   process.stderr.write(`[werelay-daemon] ${message}\n`);
@@ -2891,6 +2946,10 @@ class WeRelayDaemon {
   private codexTaskMonitorRunning = false;
   private mobileMessageOutboxTimer: ReturnType<typeof setTimeout> | null = null;
   private mobileMessageOutboxRunning = false;
+  private readonly failedMobileMessageSweep = new FailedMobileMessageSweep();
+  private mobileAdapterUsageRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  private mobileAdapterUsageOrder: DaemonAdapterKind[];
+  private mobileAdapterUsageOrderUpdatedAtMs: number | undefined;
   private readonly codexTaskObservations = new BoundedTtlMap<string, CodexTaskObservation>({
     maxSize: CODEX_TASK_OBSERVATION_CACHE_MAX_SIZE,
     ttlMs: DAEMON_TRANSIENT_CACHE_TTL_MS,
@@ -2948,6 +3007,14 @@ class WeRelayDaemon {
     });
     this.codexWechatReplyMode =
       params.stateStore.getState().codexWechatReplyMode ?? "preview";
+    const adapterUsageOrder = params.stateStore.getAdapterUsageOrder();
+    this.mobileAdapterUsageOrder = mergeAdapterUsageOrder(
+      adapterUsageOrder?.adapters ?? [],
+      DAEMON_ADAPTERS,
+    );
+    this.mobileAdapterUsageOrderUpdatedAtMs = adapterUsageOrder
+      ? Date.parse(adapterUsageOrder.updatedAt)
+      : undefined;
     const latestWechatTaskTarget = params.stateStore.getLatestWechatTaskTarget();
     this.latestWechatTaskTarget = latestWechatTaskTarget
       ? {
@@ -3115,7 +3182,8 @@ class WeRelayDaemon {
         setTaskPermission: (threadId, permission, adapter) =>
           this.setMobileTaskPermission(threadId, permission, adapter),
         readContentRevision: (threadId, adapter) => {
-          const memoryRevision = this.mobileConversationRevisions.get(adapter, threadId);
+          const outboxRevision = this.mobileMessageOutbox.contentRevision(this.resolveMobileAdapter(adapter), threadId);
+          const memoryRevision = `${this.mobileConversationRevisions.get(adapter, threadId)}.${outboxRevision}`;
           try {
             const sourceRevision = this.getMobileSlot(adapter).runtime
               .getSessionContentRevision?.(threadId);
@@ -3301,13 +3369,20 @@ class WeRelayDaemon {
         }
       }
 
-      for (const message of pollResult.messages) {
+      // Freeze routing before token refresh can replay completion notifications.
+      const inboundTargets = pollResult.messages.map(() => {
+        const slot = this.getActiveSlot();
+        return this.latestWechatTaskTarget ?? (slot && this.getSlotThreadId(slot)
+          ? { adapter: slot.adapter, sessionId: this.getSlotThreadId(slot)!, title: "", lastUpdatedAt: nowIso() }
+          : null);
+      });
+      for (const [messageIndex, message] of pollResult.messages.entries()) {
         if (message.senderId === this.authorizedUserId) {
           await this.retryPendingCodexCompletionNotifications(message.senderId);
           await this.retryUndeliveredApprovalNotifications(message.senderId);
         }
         try {
-          await this.handleInboundMessage(message);
+          await this.handleInboundMessage(message, inboundTargets[messageIndex]);
         } catch (error) {
           const errorText = error instanceof Error ? error.message : String(error);
           const isUserFacingShellRejection =
@@ -3363,6 +3438,10 @@ class WeRelayDaemon {
     if (this.mobileMessageOutboxTimer) {
       clearTimeout(this.mobileMessageOutboxTimer);
       this.mobileMessageOutboxTimer = null;
+    }
+    if (this.mobileAdapterUsageRefreshTimer) {
+      clearTimeout(this.mobileAdapterUsageRefreshTimer);
+      this.mobileAdapterUsageRefreshTimer = null;
     }
     if (this.deskRelayRelayClient) {
       const relayClient = this.deskRelayRelayClient;
@@ -3887,6 +3966,16 @@ class WeRelayDaemon {
             });
           }
         }
+        this.recordAdapterMessageActivity({
+          adapter: slot.adapter,
+          occurredAt: event.timestamp,
+          eventKey: [
+            "assistant",
+            slot.adapter,
+            event.threadId ?? "unknown",
+            event.turnId ?? event.timestamp,
+          ].join(":"),
+        });
         if (!shouldForwardDaemonFinalReply(slot.adapter)) {
           appendDaemonLog(
             `final_reply_suppressed: adapter=${slot.adapter} thread=${event.threadId ?? "unknown"}`,
@@ -4313,7 +4402,10 @@ class WeRelayDaemon {
     }
   }
 
-  private async handleInboundMessage(initialMessage: InboundWechatMessage): Promise<void> {
+  private async handleInboundMessage(
+    initialMessage: InboundWechatMessage,
+    receivedTaskTarget: GlobalTaskCandidate | null = this.latestWechatTaskTarget,
+  ): Promise<void> {
     let message = initialMessage;
     if (message.senderId !== this.authorizedUserId) {
       await this.queueWechatMessage(
@@ -4489,7 +4581,7 @@ class WeRelayDaemon {
       return;
     }
 
-    if (await this.handleGlobalTaskInputWithoutActiveSlot(message)) {
+    if (await this.handleGlobalTaskInputWithoutActiveSlot(message, receivedTaskTarget)) {
       return;
     }
 
@@ -4675,19 +4767,19 @@ class WeRelayDaemon {
     const replyTarget = resolveDaemonWechatReplyTarget({
       currentAdapter: slot.adapter,
       currentThreadId: currentReplyThreadId,
-      latestTask: this.latestWechatTaskTarget,
+      latestTask: receivedTaskTarget,
     });
     let replySlot = slot;
     if (
-      this.latestWechatTaskTarget &&
+      receivedTaskTarget &&
       (replyTarget.adapter !== slot.adapter || replyTarget.threadId !== currentReplyThreadId)
     ) {
       try {
-        replySlot = await this.activateExactGlobalTask(this.latestWechatTaskTarget);
+        replySlot = await this.activateExactGlobalTask(receivedTaskTarget);
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         appendDaemonLog(
-          `latest_wechat_task_restore_error: adapter=${this.latestWechatTaskTarget.adapter} thread=${this.latestWechatTaskTarget.sessionId} error=${truncatePreview(detail, 400)}`,
+          `latest_wechat_task_restore_error: adapter=${receivedTaskTarget.adapter} thread=${receivedTaskTarget.sessionId} error=${truncatePreview(detail, 400)}`,
         );
         await this.queueWechatMessage(
           message.senderId,
@@ -4755,6 +4847,7 @@ class WeRelayDaemon {
 
   private async handleGlobalTaskInputWithoutActiveSlot(
     message: InboundWechatMessage,
+    receivedTaskTarget: GlobalTaskCandidate | null,
   ): Promise<boolean> {
     if (this.getActiveSlot()) {
       return false;
@@ -4841,18 +4934,18 @@ class WeRelayDaemon {
       });
       return true;
     }
-    if (command || !message.text.trim() || !this.latestWechatTaskTarget) {
+    if (command || !message.text.trim() || !receivedTaskTarget) {
       return false;
     }
     try {
       await this.handleGlobalTaskTargetedMessage(message, {
-        candidate: this.latestWechatTaskTarget,
+        candidate: receivedTaskTarget,
         text: message.text,
       });
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       appendDaemonLog(
-        `latest_wechat_task_restore_error: adapter=${this.latestWechatTaskTarget.adapter} thread=${this.latestWechatTaskTarget.sessionId} error=${truncatePreview(detail, 400)}`,
+        `latest_wechat_task_restore_error: adapter=${receivedTaskTarget.adapter} thread=${receivedTaskTarget.sessionId} error=${truncatePreview(detail, 400)}`,
       );
       await this.queueWechatMessage(
         message.senderId,
@@ -6082,6 +6175,65 @@ class WeRelayDaemon {
     return slot;
   }
 
+  private recordAdapterMessageActivity(activity: DaemonAdapterMessageActivity): void {
+    try {
+      this.stateStore.recordAdapterMessageActivity(activity);
+      this.scheduleMobileAdapterUsageOrderRefresh();
+    } catch (error) {
+      appendDaemonLog(
+        `adapter_message_activity_record_failed: adapter=${activity.adapter} error=${truncatePreview(error instanceof Error ? error.message : String(error), 240)}`,
+      );
+    }
+  }
+
+  private hasBusyAdapterForUsageRefresh(): boolean {
+    for (const slot of this.slots.values()) {
+      const status = slot.runtime.getState().status;
+      if (
+        slot.activeTasks.size > 0 ||
+        status === "starting" ||
+        status === "busy" ||
+        status === "awaiting_approval" ||
+        status === "awaiting_input"
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private scheduleMobileAdapterUsageOrderRefresh(delayMs = MOBILE_ADAPTER_USAGE_IDLE_DELAY_MS): void {
+    if (
+      this.shutdownPromise ||
+      this.mobileAdapterUsageRefreshTimer ||
+      !shouldRefreshAdapterUsageOrder(this.mobileAdapterUsageOrderUpdatedAtMs, Date.now())
+    ) {
+      return;
+    }
+    this.mobileAdapterUsageRefreshTimer = setTimeout(() => {
+      this.mobileAdapterUsageRefreshTimer = null;
+      if (this.shutdownPromise) {
+        return;
+      }
+      if (this.hasBusyAdapterForUsageRefresh()) {
+        this.scheduleMobileAdapterUsageOrderRefresh(MOBILE_ADAPTER_USAGE_BUSY_RETRY_MS);
+        return;
+      }
+      const nowMs = Date.now();
+      const order = sortAdaptersByRecentMessageActivity(
+        DAEMON_ADAPTERS,
+        this.stateStore.getAdapterMessageActivities(),
+        nowMs,
+      );
+      const updatedAt = new Date(nowMs).toISOString();
+      this.mobileAdapterUsageOrder = order;
+      this.mobileAdapterUsageOrderUpdatedAtMs = nowMs;
+      this.stateStore.setAdapterUsageOrder({ adapters: order, updatedAt });
+      appendDaemonLog(`mobile_adapter_usage_order_refreshed: adapters=${order.join(",")}`);
+    }, delayMs);
+    this.mobileAdapterUsageRefreshTimer.unref?.();
+  }
+
   private async listMobileAdapters(
     options: { globalCandidates?: readonly GlobalTaskCandidate[] } = {},
   ): Promise<{
@@ -6096,9 +6248,14 @@ class WeRelayDaemon {
     const globalCandidates = options.globalCandidates ??
       await this.listGlobalTaskCandidates(adapters);
     const runningAdapterIds = collectRunningMobileAdapterIds(globalCandidates);
+    this.scheduleMobileAdapterUsageOrderRefresh();
+    const orderedAdapters = mergeAdapterUsageOrder(
+      this.mobileAdapterUsageOrder,
+      DAEMON_ADAPTERS,
+    );
     return {
       ...(this.activeAdapter ? { activeAdapter: this.activeAdapter } : {}),
-      adapters: DAEMON_ADAPTERS.map((adapter) => {
+      adapters: orderedAdapters.map((adapter) => {
         const slot = this.slots.get(adapter);
         const slotStatus = slot?.runtime.getState().status;
         const cachedCandidates = [
@@ -6592,6 +6749,7 @@ class WeRelayDaemon {
   ): Promise<CodexMobileTranscript> {
     const requestedThreadId = threadId;
     const resolvedAdapter = this.resolveMobileAdapter(adapter);
+    void this.reconcileFailedMobileMessages(resolvedAdapter);
     const resolvedThreadId = this.mobileMessageOutbox.resolveRequestedThread(
       resolvedAdapter,
       requestedThreadId,
@@ -6600,6 +6758,7 @@ class WeRelayDaemon {
       return {
         threadId: requestedThreadId,
         messages: [],
+        deliveredClientIds: this.mobileMessageOutbox.deliveredClientIds(resolvedAdapter, requestedThreadId),
         outboundMessages: this.mobileMessageOutbox
           .list(resolvedAdapter, requestedThreadId)
           .map(mobileMessageOutboxEntryToUserMessage),
@@ -6730,6 +6889,8 @@ class WeRelayDaemon {
       threadId: activeThreadId,
     });
     const queuedMessages = slot.runtime.getQueuedTaskInputs?.(activeThreadId) ?? [];
+    // Older pages also provide valid execution evidence for retained failures.
+    this.mobileMessageOutbox.reconcileFailedExecution(slot.adapter, {threadId: activeThreadId}, [], enrichedMessages);
     if (!historyOnly) {
       this.mobileMessageOutbox.reconcile(slot.adapter, requestedThreadId, {
         messages: enrichedMessages,
@@ -6740,6 +6901,7 @@ class WeRelayDaemon {
       threadId: requestedThreadId,
       ...(resolvedThreadId ? { resolvedThreadId } : {}),
       messages: enrichedMessages,
+      deliveredClientIds: this.mobileMessageOutbox.deliveredClientIds(slot.adapter, requestedThreadId),
       outboundMessages: this.mobileMessageOutbox
         .list(slot.adapter, requestedThreadId)
         .map(mobileMessageOutboxEntryToUserMessage),
@@ -7238,9 +7400,28 @@ class WeRelayDaemon {
     return result;
   }
 
+  private reconcileFailedMobileMessages(adapter: string): Promise<void> {
+    return this.failedMobileMessageSweep.run({
+      adapter,
+      outbox: this.mobileMessageOutbox,
+      listTasks: () => this.listMobileTasks(adapter),
+      readMessages: async (threadId) => {
+        const slot = this.getMobileSlot(adapter);
+        if (slot.runtime.getSessionMessagePage) {
+          return (await slot.runtime.getSessionMessagePage(threadId, {
+            limit: 100, lightweight: true, historyOnly: true,
+          })).messages;
+        }
+        return (await slot.runtime.getSessionMessages?.(threadId) ?? []).slice(-100);
+      },
+    });
+  }
+
   private async deliverMobileMessageFailureNotifications(): Promise<boolean> {
     for (const entry of this.mobileMessageOutbox.pendingFailureNotifications()) {
       const adapter = this.resolveMobileAdapter(entry.adapter);
+      await this.reconcileFailedMobileMessages(adapter);
+      if (this.mobileMessageOutbox.get(entry.adapter, entry.threadId, entry.clientId)?.status !== "failed") continue;
       let title = `${formatDaemonAdapterLabel(adapter)} 任务`;
       try {
         title = (await this.listMobileTasks(adapter)).find(
@@ -7408,6 +7589,7 @@ class WeRelayDaemon {
       slot,
       params.threadId,
       completionTitle,
+      false,
     );
     const texts = formatCodexTaskCompletionMessages({
       title: completionTitle,
@@ -7445,7 +7627,8 @@ class WeRelayDaemon {
       appendDaemonLog(`codex_completion_in_flight: key=${notificationKey}`);
       return;
     }
-    if (deliveryResult.sentCount > 0) {
+    if (deliveryResult.status === "delivered") {
+      this.rememberWechatTaskTarget(slot, params.threadId, completionTitle);
       slot.wechatReplyThreadId = params.threadId;
       this.persistCodexWechatThreadId(params.threadId);
     }
@@ -8157,6 +8340,7 @@ class WeRelayDaemon {
     slot: DaemonSlot,
     threadId: string,
     taskTitle?: string,
+    updateReplyTarget = true,
   ): { candidate: GlobalTaskCandidate; taskNumber: number } {
     const identity = globalTaskIdentityKey(slot.adapter, threadId);
     const existingGlobalCandidate = this.globalTaskListSnapshot?.candidates.find(
@@ -8192,6 +8376,7 @@ class WeRelayDaemon {
     ) ?? candidate;
     const taskNumber = this.globalTaskListSnapshot.numberByIdentity.get(identity) ??
       this.globalTaskListSnapshot.candidates.length;
+    if (updateReplyTarget) {
     this.latestWechatTaskTarget = rememberedCandidate;
     this.stateStore.setLatestWechatTaskTarget({
       adapter: rememberedCandidate.adapter,
@@ -8199,6 +8384,7 @@ class WeRelayDaemon {
       title: rememberedCandidate.title,
       lastUpdatedAt: rememberedCandidate.lastUpdatedAt,
     } satisfies DaemonWechatTaskTarget);
+    }
     return { candidate: rememberedCandidate, taskNumber };
   }
 
@@ -8391,7 +8577,7 @@ class WeRelayDaemon {
     const previousActiveTask = this.getSlotActiveTask(slot, initialThreadId);
     this.setSlotActiveTask(slot, activeTask, initialThreadId);
     appendDaemonLog(
-      `forwarded_input: adapter=${slot.adapter} text=${truncatePreview(preview)}`,
+      `forwarded_input: adapter=${slot.adapter} thread=${initialThreadId ?? "unknown"} text=${truncatePreview(preview)}`,
     );
     let sendResult: BridgeSessionSendResult | void = undefined;
     try {
@@ -8714,9 +8900,10 @@ class WeRelayDaemon {
       if (result.status === "in_flight") {
         continue;
       }
-      if (result.sentCount > 0) {
+      if (result.status === "delivered") {
         const slot = this.slots.get("codex");
         if (slot) {
+          this.rememberWechatTaskTarget(slot, pending.threadId, pending.title);
           slot.wechatReplyThreadId = pending.threadId;
         }
         this.persistCodexWechatThreadId(pending.threadId);

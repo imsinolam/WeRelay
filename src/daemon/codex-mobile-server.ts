@@ -260,6 +260,8 @@ export type CodexMobilePendingApproval = {
 export type CodexMobileTranscript = {
   threadId: string;
   resolvedThreadId?: string;
+  /** Retained delivery acknowledgements, independent of transcript pagination. */
+  deliveredClientIds?: string[];
   messages: BridgeSessionMessage[];
   outboundMessages?: Array<BridgeSessionMessage & {
     clientId: string;
@@ -291,6 +293,7 @@ export function createCodexMobileTranscriptRevision(
     | "threadId"
     | "messages"
     | "outboundMessages"
+    | "deliveredClientIds"
     | "progressItems"
     | "queuedMessages"
     | "runSummary"
@@ -302,6 +305,7 @@ export function createCodexMobileTranscriptRevision(
   const runSummary = transcript.runSummary;
   const payload = {
     threadId: transcript.threadId,
+    deliveredClientIds: transcript.deliveredClientIds ?? [],
     latestMessage: latestMessage
       ? {
           id: latestMessage.id ?? "",
@@ -1913,6 +1917,7 @@ function createRequestHandler(
               : {}),
             messages,
             outboundMessages,
+            deliveredClientIds: transcript.deliveredClientIds ?? [],
             messagePage,
             progressItems: transcript.progressItems ?? [],
             queuedMessages: transcript.queuedMessages,

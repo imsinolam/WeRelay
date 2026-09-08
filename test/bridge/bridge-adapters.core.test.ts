@@ -145,9 +145,13 @@ describe("local companion proxy lifecycle", () => {
           pid: 54_321,
         },
       });
-      await new Promise((resolve) => setTimeout(resolve, 0));
-
-      const updated = readLocalCompanionEndpoint(cwd, { adapter: "claude" });
+      // A timer tick does not guarantee that the TCP state frame was consumed.
+      const deadline = Date.now() + 2_000;
+      let updated = readLocalCompanionEndpoint(cwd, { adapter: "claude" });
+      while (updated?.companionWorkerPid !== 54_321 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        updated = readLocalCompanionEndpoint(cwd, { adapter: "claude" });
+      }
       expect(updated?.companionPid).toBe(12_345);
       expect(updated?.companionWorkerPid).toBe(54_321);
       expect(updated?.companionStatus).toBe("idle");

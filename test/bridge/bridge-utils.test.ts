@@ -1170,9 +1170,9 @@ describe("formatResumeThreadList", () => {
 
     expect(output).toContain("1. Fix the bridge resume flow");
     expect(output).toContain("当前");
-    expect(output).toContain("回复序号进入；发送“3：内容”可直接下发");
-    expect(output).toContain("序号保持到下次发送“任务”");
-    expect(output).toContain("搜索“任务：关键词”");
+    expect(output).toContain("[3] 进入任务 3");
+    expect(output).toContain("任务序号在下次发送 [任务] 前保持不变。");
+    expect(output).toContain("[任务：关键词] 搜索任务");
     expect(output).not.toContain("/t2");
     expect(output).not.toContain("03/23");
   });
@@ -1231,9 +1231,10 @@ describe("formatResumeSessionList", () => {
 
     expect(output).toContain("Claude Code 最近任务");
     expect(output).not.toContain("session_1");
-    expect(output).toContain("当前");
-    expect(output).toContain("回复序号进入；发送“3：内容”可直接下发");
-    expect(output).toContain("3：内容");
+    expect(output).toContain(" · 当前");
+    expect(output).toContain("[3] 进入任务 3");
+    expect(output).toContain("[3：内容]");
+    expect(output).toContain("[3：内容] 进入任务 3 并发消息");
     expect(output).not.toContain("/resume");
   });
 
@@ -1753,12 +1754,12 @@ describe("formatResumeSessionList for Codex desktop tasks", () => {
     expect(output).toContain("运行完整测试 · 处理中 🟢");
     expect(output).toContain("🟢");
     expect(output).not.toContain("[进行中]");
-    expect(output).toContain("回复序号进入；发送“3：内容”可直接下发");
-    expect(output).toContain("搜索“任务：关键词”");
-    expect(output).toContain("发送“新建：内容”新建任务");
+    expect(output).toContain("[3] 进入任务 3");
+    expect(output).toContain("任务序号在下次发送 [任务] 前保持不变。");
+    expect(output).toContain("[3：内容] 进入任务 3 并发消息");
     expect(output).not.toContain("上一页");
-    expect(output).toContain("序号保持到下次发送“任务”");
-    expect(output).not.toContain("切换任务不会中断后台运行");
+    expect(output).toContain("中英文冒号均可，指令间可加空格。");
+    expect(output).toContain("任务序号在下次发送 [任务] 前保持不变");
   });
 
   test("shows global task numbers and next-page instructions", () => {
@@ -1792,11 +1793,11 @@ describe("formatResumeSessionList for Codex desktop tasks", () => {
     expect(output).toContain("11. 第十六个任务 · 处理中");
     expect(output).not.toContain("11. 第十六个任务\u3000运行中");
     expect(output).toContain("12. 第十七个任务");
-    expect(output).toContain("“下一页20”查看更多");
-    expect(output).toContain("“上一页”返回");
-    expect(output).toContain("回复序号进入；发送“3：内容”可直接下发");
-    expect(output).toContain("搜索“任务：关键词”");
-    expect(output).toContain("发送“新建：内容”新建任务");
+    expect(output).toContain("[下一页] 再看 10 条，可带数量如[下一页20]");
+    expect(output).not.toContain("发送“上一页”返回");
+    expect(output).toContain("[3] 进入任务 3");
+    expect(output).toContain("任务序号在下次发送 [任务] 前保持不变。");
+    expect(output).toContain("[3：内容] 进入任务 3 并发消息");
   });
 
   test("supports a custom next-page size without skipping tasks", () => {

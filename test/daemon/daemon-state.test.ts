@@ -36,6 +36,54 @@ describe("daemon workspace state", () => {
     }
   });
 
+  test("persists recent adapter message activity and daily usage order", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "werelay-daemon-state-"));
+    const stateFile = path.join(directory, "daemon-state.json");
+    const cwd = path.join(directory, "workspace");
+    const nowMs = Date.parse("2026-09-05T08:00:00.000Z");
+
+    try {
+      const store = new DaemonWorkspaceStateStore(cwd, { stateFile });
+      store.recordAdapterMessageActivity({
+        adapter: "grok",
+        occurredAt: "2026-09-05T07:00:00.000Z",
+        eventKey: "grok-turn-1",
+      }, nowMs);
+      store.recordAdapterMessageActivity({
+        adapter: "grok",
+        occurredAt: "2026-09-05T07:00:00.000Z",
+        eventKey: "grok-turn-1",
+      }, nowMs);
+      store.recordAdapterMessageActivity({
+        adapter: "codex",
+        occurredAt: "2026-09-02T07:00:00.000Z",
+        eventKey: "expired-codex-turn",
+      }, nowMs);
+      store.setAdapterUsageOrder({
+        adapters: ["grok", "codex", "workbuddy"],
+        updatedAt: "2026-09-05T08:00:00.000Z",
+      });
+
+      expect(store.getAdapterMessageActivities()).toEqual([{
+        adapter: "grok",
+        occurredAt: "2026-09-05T07:00:00.000Z",
+        eventKey: "grok-turn-1",
+      }]);
+      expect(store.getAdapterUsageOrder()).toEqual({
+        adapters: ["grok", "codex", "workbuddy"],
+        updatedAt: "2026-09-05T08:00:00.000Z",
+      });
+
+      const restored = new DaemonWorkspaceStateStore(cwd, { stateFile });
+      expect(restored.getAdapterMessageActivities()).toEqual(
+        store.getAdapterMessageActivities(),
+      );
+      expect(restored.getAdapterUsageOrder()).toEqual(store.getAdapterUsageOrder());
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   test("persists task-scoped auto-approval across daemon restarts", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "werelay-daemon-state-"));
     const stateFile = path.join(directory, "daemon-state.json");
@@ -77,6 +125,10 @@ describe("daemon workspace state", () => {
     const stateFile = path.join(directory, "daemon-state.json");
     const cwd = path.join(directory, "workspace");
 
+    // Keep this persistence fixture within retention regardless of the calendar date.
+    const createdAt = new Date(Date.now() - 60_000).toISOString();
+    const deliveredAt = new Date(Date.now() - 120_000).toISOString();
+
     try {
       const store = new DaemonWorkspaceStateStore(cwd, { stateFile });
       store.setCodexCompletionDeliveryState({
@@ -87,13 +139,13 @@ describe("daemon workspace state", () => {
             turnId: "turn-pending",
             texts: ["完成摘要", "链接"],
             nextTextIndex: 1,
-            createdAt: "2026-08-08T10:00:00.000Z",
+            createdAt,
           },
         ],
         delivered: [
           {
             key: "thread:turn-delivered",
-            deliveredAt: "2026-08-08T09:00:00.000Z",
+            deliveredAt,
           },
         ],
       });
@@ -107,13 +159,13 @@ describe("daemon workspace state", () => {
             turnId: "turn-pending",
             texts: ["完成摘要", "链接"],
             nextTextIndex: 1,
-            createdAt: "2026-08-08T10:00:00.000Z",
+            createdAt,
           },
         ],
         delivered: [
           {
             key: "thread:turn-delivered",
-            deliveredAt: "2026-08-08T09:00:00.000Z",
+            deliveredAt,
           },
         ],
       });
