@@ -1,3 +1,4 @@
+import { ContextSendGuard, type ContextSendGuardState } from "./context-send-guard.ts";
 import crypto from "node:crypto";
 import { createCipheriv, createDecipheriv } from "node:crypto";
 import fs from "node:fs";
@@ -204,6 +205,7 @@ type ResolvedRecipient = {
 };
 
 type UploadPreparation = {
+  contentDigest: string;
   rawsize: number;
   filesize: number;
   aeskey: Buffer;
@@ -1235,6 +1237,10 @@ export class WeChatTransport {
   private readonly recentMessageOrder: string[] = [];
   private readonly contextTokenCache: Map<string, string>;
   private syncBuffer = "";
+  private readonly contextSendGuard = new ContextSendGuard({
+    initial: readJsonFile<ContextSendGuardState>(path.join(path.dirname(CONTEXT_CACHE_FILE), "context-send-recovery.json")),
+    persist: (state) => writeJsonFile(path.join(path.dirname(CONTEXT_CACHE_FILE), "context-send-recovery.json"), state),
+  });
 
   constructor(logger: TransportLogger) {
     this.logger = logger;
@@ -1499,7 +1505,7 @@ export class WeChatTransport {
           mid_size: upload.filesize,
         },
       },
-    ]);
+    ], `sendImage:${upload.contentDigest}`);
 
     return resolved.recipientId;
   }
@@ -1528,7 +1534,7 @@ export class WeChatTransport {
           },
         },
       },
-    ]);
+    ], `sendFile:${upload.contentDigest}`);
 
     return resolved.recipientId;
   }
@@ -1554,7 +1560,7 @@ export class WeChatTransport {
           },
         },
       },
-    ]);
+    ], `sendVoice:${upload.contentDigest}`);
 
     return resolved.recipientId;
   }
@@ -1592,7 +1598,7 @@ export class WeChatTransport {
           video_size: upload.filesize,
         },
       },
-    ]);
+    ], `sendVideo:${upload.contentDigest}`);
 
     return resolved.recipientId;
   }
@@ -1652,26 +1658,39 @@ export class WeChatTransport {
     recipientId: string,
     contextToken: string,
     itemList: unknown[],
+    requestKey?: string,
   ): Promise<void> {
-    const raw = await apiFetch({
-      baseUrl: account.baseUrl,
-      endpoint: "ilink/bot/sendmessage",
-      body: JSON.stringify({
-        msg: {
-          from_user_id: "",
-          to_user_id: recipientId,
-          client_id: this.generateClientId(),
-          message_type: MSG_TYPE_BOT,
-          message_state: MSG_STATE_FINISH,
-          item_list: itemList,
-          context_token: contextToken,
-        },
-        base_info: { channel_version: CHANNEL_VERSION },
-      }),
-      token: account.token,
-      timeoutMs: SEND_TIMEOUT_MS,
+    await this.contextSendGuard.send({
+      // Account scope prevents rejection state crossing a re-login.
+      recipient: `${account.token}\0${recipientId}`,
+      requestKey: requestKey ?? JSON.stringify(itemList),
+      getToken: () => this.contextTokenCache.get(recipientId) ?? contextToken,
+      // Only an explicit prepare rejection is eligible for automatic recovery.
+      // Other ret=-2 variants remain uncertain; no claim about token lifetime.
+      isExplicitRejection: (error) => isWechatContextTokenStaleError(error) &&
+        error.errmsg.trim().toLowerCase() === "prepare failed",
+      send: async (sentToken) => {
+        const raw = await apiFetch({
+          baseUrl: account.baseUrl,
+          endpoint: "ilink/bot/sendmessage",
+          body: JSON.stringify({
+            msg: {
+              from_user_id: "",
+              to_user_id: recipientId,
+              client_id: this.generateClientId(),
+              message_type: MSG_TYPE_BOT,
+              message_state: MSG_STATE_FINISH,
+              item_list: itemList,
+              context_token: sentToken,
+            },
+            base_info: { channel_version: CHANNEL_VERSION },
+          }),
+          token: account.token,
+          timeoutMs: SEND_TIMEOUT_MS,
+        });
+        assertWechatApiResponseOk("sendmessage", raw);
+      },
     });
-    assertWechatApiResponseOk("sendmessage", raw);
   }
 
   private async prepareUpload(
@@ -1726,6 +1745,7 @@ export class WeChatTransport {
     );
 
     return {
+      contentDigest: crypto.createHash("sha256").update(plaintext).digest("hex"),
       rawsize,
       filesize,
       aeskey,

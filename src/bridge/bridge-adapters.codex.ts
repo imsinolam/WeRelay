@@ -1751,6 +1751,9 @@ function progressActionText(
 function summarizeCodexMcpTool(item: Record<string, unknown>): string {
   const server = typeof item.server === "string" ? item.server.trim().toLowerCase() : "";
   const tool = typeof item.tool === "string" ? item.tool.trim().toLowerCase() : "";
+  if (/memory|remember|memorize/.test(tool)) {
+    return /save|write|update|add|remember|memorize/.test(tool) ? "保存记忆" : "读取记忆";
+  }
   if (tool.includes("image") || tool.includes("view_image")) {
     return "查看图像";
   }
@@ -1772,7 +1775,9 @@ function summarizeCodexProgressItem(
   itemIndex: number,
 ): BridgeSessionProgressItem | null {
   const id = codexProgressItemId(item, turnId, itemIndex);
-  const base = { id, ...(turnId ? { turnId } : {}) };
+  const itemTimestamp = item.createdAtMs ?? item.startedAtMs ?? item.createdAt ?? item.startedAt;
+  const createdAtMs = typeof itemTimestamp === "number" ? itemTimestamp : typeof itemTimestamp === "string" ? Date.parse(itemTimestamp) : NaN;
+  const base = { id, ...(turnId ? { turnId } : {}), ...(Number.isFinite(createdAtMs) ? {createdAtMs} : {}) };
   if (item.type === "reasoning") {
     const summaries = Array.isArray(item.summary) ? item.summary : [];
     const text = [...summaries].reverse().map(cleanCodexReasoningSummary).find(Boolean);
@@ -1812,10 +1817,13 @@ function summarizeCodexProgressItem(
     const status = normalizeCodexProgressStatus(item.status);
     return { ...base, kind: "image", status, text: progressActionText(["生成图像"], status) };
   }
+  if (item.type === "dynamicToolCall") {
+    const status = normalizeCodexProgressStatus(item.status);
+    return { ...base, kind: "tool", status, text: progressActionText([summarizeCodexMcpTool(item)], status) };
+  }
   if (
     item.type === "collabAgentToolCall" ||
-    item.type === "subAgentActivity" ||
-    item.type === "dynamicToolCall"
+    item.type === "subAgentActivity"
   ) {
     const status = normalizeCodexProgressStatus(item.status);
     return { ...base, kind: "tool", status, text: progressActionText(["处理子任务"], status) };
@@ -1970,6 +1978,9 @@ function rolloutToolProgress(
       ? payload.call_id.trim()
       : `${turnId ?? "turn"}:rollout-tool`;
   const base = { id, ...(turnId ? { turnId } : {}), status };
+  if (/memory|remember|memorize/.test(name)) {
+    return { ...base, kind: "tool", text: progressActionText([/save|write|update|add|remember|memorize/.test(name) ? "保存记忆" : "读取记忆"], status) };
+  }
   if (
     name.includes("apply_patch") ||
     name.includes("write_file") ||

@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
@@ -203,6 +203,7 @@ import { MobileMessageImageStore } from "./mobile-message-image-store.ts";
 import {
   MobileMessageOutbox,
   computeMobileMessageRetryDelayMs,
+  classifyMobileSendFailure,
   formatMobileMessageFailureNotice,
   mobileMessageOutboxEntryToUserMessage,
   type MobileMessageOutboxEntry,
@@ -236,6 +237,7 @@ import { WeRelayRelayTaskLinkClient } from "../relay/relay-task-links.ts";
 import {
   activateGlobalTaskCandidate,
   buildGlobalTaskSnapshot,
+  createGlobalTaskCatalogCache,
   formatGlobalTaskList,
   formatGlobalTaskSearchResults,
   globalTaskIdentityKey,
@@ -627,6 +629,12 @@ const WECHAT_SEND_MAX_ATTEMPTS = 3;
 const WECHAT_SEND_RETRY_BASE_MS = 750;
 const CODEX_TASK_MONITOR_INTERVAL_MS = 2_000;
 const CODEX_TASK_CANDIDATE_CACHE_MAX_AGE_MS = 3_000;
+// Relay 预热在缓存超过 5 秒时刷新 task-board，移动网页每 8 秒轮询一次。
+// 目录缓存取 6 秒，使一次预热刷新只触发一次真实扫描，同时新建或重命名
+// 任务会主动失效缓存，用户仍能立即看到结果。
+const GLOBAL_TASK_CATALOG_CACHE_MAX_AGE_MS = 6_000;
+// 已打开终端的进程快照变化不频繁，短时复用即可满足“刚打开就显示”的体验。
+const OPEN_MOBILE_ADAPTERS_CACHE_MAX_AGE_MS = 3_000;
 const CODEX_COMPLETION_SUMMARY_RETRY_MS = 250;
 const CODEX_COMPLETION_SUMMARY_RETRY_COUNT = 3;
 const DAEMON_TRANSIENT_CACHE_TTL_MS = 24 * 60 * 60_000;
@@ -2950,6 +2958,16 @@ class WeRelayDaemon {
   private mobileAdapterUsageRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private mobileAdapterUsageOrder: DaemonAdapterKind[];
   private mobileAdapterUsageOrderUpdatedAtMs: number | undefined;
+  // 全终端目录扫描会同步遍历各终端会话目录，必须与 Codex 候选一样做短时
+  // 复用与并发合并，否则移动轮询与 Relay 预热会把主线程反复占满。
+  private readonly globalTaskCatalogCache = createGlobalTaskCatalogCache<
+    BridgeResumeSessionCandidate[]
+  >({ maxAgeMs: GLOBAL_TASK_CATALOG_CACHE_MAX_AGE_MS });
+  // 判断“哪些终端已打开”需要同步执行一次 ps 快照；该结果在一次任务看板
+  // 读取里会被多次使用，短时复用可避免重复的同步进程调用。
+  private readonly openMobileAdaptersCache = createGlobalTaskCatalogCache<
+    Set<DaemonAdapterKind>
+  >({ maxAgeMs: OPEN_MOBILE_ADAPTERS_CACHE_MAX_AGE_MS });
   private readonly codexTaskObservations = new BoundedTtlMap<string, CodexTaskObservation>({
     maxSize: CODEX_TASK_OBSERVATION_CACHE_MAX_SIZE,
     ttlMs: DAEMON_TRANSIENT_CACHE_TTL_MS,
@@ -3198,6 +3216,8 @@ class WeRelayDaemon {
           this.readMobileMessages(threadId, options, adapter),
         sendMessage: (threadId, input, adapter) =>
           Promise.resolve(this.acceptMobileMessage(threadId, input, adapter)),
+        submitUserInput: (threadId, requestId, answers, adapter) =>
+          this.submitMobileUserInput(threadId, requestId, answers, adapter),
         resolveApproval: (threadId, action, adapter) =>
           this.resolveMobileApproval(threadId, action, adapter),
         updateQueuedMessage: (threadId, messageId, text, adapter) =>
@@ -3318,6 +3338,7 @@ class WeRelayDaemon {
 
     await this.retryPendingCodexCompletionNotifications(this.authorizedUserId);
 
+    let nextOutboundRecoveryAt = Date.now() + 60_000;
     while (!this.shutdownPromise) {
       let pollResult: Awaited<ReturnType<WeChatTransport["pollMessages"]>>;
       try {
@@ -3419,6 +3440,12 @@ class WeRelayDaemon {
           );
         }
       }
+      if (Date.now() >= nextOutboundRecoveryAt) {
+        nextOutboundRecoveryAt = Date.now() + 60_000;
+        await this.retryPendingCodexCompletionNotifications(this.authorizedUserId);
+        await this.retryUndeliveredApprovalNotifications(this.authorizedUserId);
+      }
+
     }
   }
 
@@ -4178,10 +4205,12 @@ class WeRelayDaemon {
           }
         }));
         break;
-      case "user_input_required":
+      case "user_input_required": {
+        const pending = toPendingUserInput({ ...event.request, threadId: event.threadId ?? event.request.threadId ?? this.getSlotThreadId(slot) });
+        slot.pendingUserInputs = slot.pendingUserInputs.filter((request) => request.threadId !== pending.threadId);
+        slot.pendingUserInputs.push(pending);
+        if (pending.threadId) this.mobileConversationRevisions.touch(slot.adapter, pending.threadId);
         this.trackWechatForwardTask(slot.outputBatcher.flushNow().then(async () => {
-          const pending = toPendingUserInput(event.request);
-          slot.pendingUserInputs.push(pending);
           appendDaemonLog(
             `user_input_required: adapter=${slot.adapter} questions=${pending.questions.length}`,
           );
@@ -4196,6 +4225,7 @@ class WeRelayDaemon {
           );
         }));
         break;
+      }
       case "mirrored_user_input":
         appendDaemonLog(
           `mirrored_local_input: adapter=${slot.adapter} text=${truncatePreview(event.text)}`,
@@ -5310,6 +5340,7 @@ class WeRelayDaemon {
         activeSlot.controller.syncLocalClientEndpoint();
         activeSlot.taskCandidatesCache = null;
         activeSlot.taskCandidatesCachedAtMs = 0;
+        this.globalTaskCatalogCache.invalidate(activeSlot.adapter);
 
         const persistCreatedThread = (createdThreadId: string | undefined): void => {
           if (!createdThreadId) return;
@@ -6234,13 +6265,20 @@ class WeRelayDaemon {
     this.mobileAdapterUsageRefreshTimer.unref?.();
   }
 
+  private async readOpenMobileAdaptersCached(): Promise<Set<DaemonAdapterKind>> {
+    return await this.openMobileAdaptersCache.load(
+      "open-adapters",
+      async () => readOpenMobileAdapters(this.cwd),
+    );
+  }
+
   private async listMobileAdapters(
     options: { globalCandidates?: readonly GlobalTaskCandidate[] } = {},
   ): Promise<{
     activeAdapter?: string;
     adapters: Array<{ id: string; label: string; status: string; active: boolean }>;
   }> {
-    const openAdapters = readOpenMobileAdapters(this.cwd);
+    const openAdapters = await this.readOpenMobileAdaptersCached();
     const adapters = selectRunningGlobalTaskAdapters({
       connectedAdapters: this.slots.keys(),
       openAdapters,
@@ -6562,6 +6600,7 @@ class WeRelayDaemon {
     const normalizedThreadId = threadId.trim();
     const normalizedTitle = title.trim();
     await renameSession.call(slot.runtime, normalizedThreadId, normalizedTitle);
+    this.globalTaskCatalogCache.invalidate(slot.adapter);
     appendDaemonLog(
       `mobile_task_renamed: adapter=${slot.adapter} thread=${normalizedThreadId}`,
     );
@@ -6953,10 +6992,56 @@ class WeRelayDaemon {
       : null;
   }
 
+  private getMobilePendingQuestion(slot: DaemonSlot, threadId: string): PendingUserInputRequest | null {
+    const state = slot.runtime.getState();
+    const selected = (state.sharedThreadId ?? state.sharedSessionId) === threadId;
+    const tracked = slot.pendingUserInputs.find((request) => request.threadId === threadId);
+    if (tracked) return tracked;
+    if (!selected || !state.pendingUserInput) return null;
+    // Some runtimes omit createdAt. Materialize the request once, not on every
+    // read/answer, so its identity remains stable until an actual new event.
+    const recovered = toPendingUserInput({ ...state.pendingUserInput, threadId });
+    slot.pendingUserInputs.push(recovered);
+    return recovered;
+  }
+
+  private mobileQuestionId(request: PendingUserInputRequest): string {
+    return createHash("sha256").update(JSON.stringify([
+      request.threadId, request.turnId, request.createdAt, request.questions,
+    ])).digest("hex").slice(0, 24);
+  }
+
+  private async submitMobileUserInput(threadId: string, requestId: string, answers: Record<string, string[]>, adapter?: string): Promise<boolean> {
+    const slot = this.getMobileSlot(adapter);
+    const pending = this.getMobilePendingQuestion(slot, threadId);
+    if (!pending || this.mobileQuestionId(pending) !== requestId) return false;
+    if (Object.keys(answers).length !== pending.questions.length) return false;
+    for (const question of pending.questions) {
+      const values = answers[question.id];
+      if (!values?.length || (!question.multiSelect && values.length !== 1) || values.some((value) => !value.trim())) return false;
+      if (question.options?.length && !question.isOther && values.some((value) => !question.options!.some((option) => option.label === value))) return false;
+    }
+    const submitted = slot.runtime.submitTaskUserInput
+      ? await slot.runtime.submitTaskUserInput(threadId, answers)
+      : this.getSlotThreadId(slot) === threadId ? await slot.runtime.submitUserInput(answers) : false;
+    if (!submitted) return false;
+    slot.pendingUserInputs = slot.pendingUserInputs.filter((request) => request !== pending);
+    this.mobileConversationRevisions.touch(slot.adapter, threadId);
+    this.setSlotActiveTask(slot, { startedAt: Date.now(), inputPreview: "已回答问题", ...(pending.turnId ? {turnId: pending.turnId} : {}) }, threadId);
+    return true;
+  }
+
   private getMobilePendingApproval(
     slot: DaemonSlot,
     threadId: string,
   ): CodexMobilePendingApproval | null {
+    const question = this.getMobilePendingQuestion(slot, threadId);
+    if (question) return {
+      kind: "question", questions: question.questions,
+      requestId: this.mobileQuestionId(question), summary: question.summary,
+      commandPreview: "", ...(question.turnId ? {turnId: question.turnId} : {}),
+      createdAtMs: Date.parse(question.createdAt),
+    };
     const runtimeState = slot.runtime.getState();
     return resolveCodexMobilePendingApprovalFromSignals({
       threadId,
@@ -7156,6 +7241,9 @@ class WeRelayDaemon {
       return this.mobileMessageAcceptanceResult(current, true);
     }
 
+    if (!input.text.trim() && !input.images.length) {
+      throw new Error("未找到可重试的原消息，请重新添加文字或图片。");
+    }
     const images = this.persistMobileImages(input);
     const accepted = this.mobileMessageOutbox.accept({
       clientId: input.clientId,
@@ -7324,7 +7412,9 @@ class WeRelayDaemon {
         entry.clientId,
       );
       const attempts = current?.attempts ?? entry.attempts + 1;
-      if (attempts >= MOBILE_MESSAGE_OUTBOX_MAX_ATTEMPTS) {
+      const failureKind = classifyMobileSendFailure(errorText);
+      if (failureKind === "permanent" || failureKind === "unconfirmed" ||
+        (failureKind === "unknown" && attempts >= MOBILE_MESSAGE_OUTBOX_MAX_ATTEMPTS)) {
         this.mobileMessageOutbox.markFailed(
           entry.adapter,
           entry.threadId,
@@ -7605,6 +7695,9 @@ class WeRelayDaemon {
       url,
       mode: this.codexWechatReplyMode,
     });
+    const completionImages = collectAssistantMessageImages(sessionMessages, {
+      ...(resolvedTurnId ? { turnId: resolvedTurnId } : {}), cwd: this.cwd, fallbackText: replyText,
+    }).filter((image) => image.source === "local").map((image) => image.path);
     const enqueueResult = this.codexCompletionDeliveries.enqueue({
       key: notificationKey,
       threadId: params.threadId,
@@ -7614,6 +7707,7 @@ class WeRelayDaemon {
       ...(url ? { url } : {}),
       ...(params.outcome ? { outcome: params.outcome } : {}),
       texts,
+      images: completionImages,
     });
     if (enqueueResult.status === "delivered") {
       appendDaemonLog(`codex_completion_duplicate: key=${notificationKey}`);
@@ -7639,26 +7733,6 @@ class WeRelayDaemon {
       return;
     }
 
-    const completionImages = collectAssistantMessageImages(sessionMessages, {
-      ...(resolvedTurnId ? { turnId: resolvedTurnId } : {}),
-      cwd: this.cwd,
-      fallbackText: replyText,
-    });
-    for (const image of completionImages) {
-      if (image.source !== "local") continue;
-      try {
-        await this.sendWechatGeneratedImage(slot, {
-          threadId: params.threadId,
-          ...(resolvedTurnId ? { turnId: resolvedTurnId } : {}),
-          rawText: replyText ?? "",
-          imagePath: image.path,
-        });
-      } catch (error) {
-        appendDaemonLog(
-          `codex_completion_image_error: thread=${params.threadId} path=${image.path} error=${truncatePreview(error instanceof Error ? error.message : String(error), 400)}`,
-        );
-      }
-    }
     appendDaemonLog(
       `codex_completion_sent: thread=${params.threadId} mode=${this.codexWechatReplyMode} messages=${deliveryResult.totalCount}`,
     );
@@ -8013,7 +8087,7 @@ class WeRelayDaemon {
   private async listWechatGlobalTaskCandidates(): Promise<GlobalTaskCandidate[]> {
     const adapters = selectRunningGlobalTaskAdapters({
       connectedAdapters: this.slots.keys(),
-      openAdapters: readOpenMobileAdapters(this.cwd),
+      openAdapters: await this.readOpenMobileAdaptersCached(),
     });
     appendDaemonLog(
       `wechat_global_task_adapters: adapters=${adapters.join(",") || "none"}`,
@@ -8037,11 +8111,12 @@ class WeRelayDaemon {
           } else if (slot.adapter === "deepseek") {
             // DSH Desktop and `dsh web` may expose different Harness hosts.
             // Rediscover the current host for this read-only catalog request,
-            // then merge pending interaction signals from the live slot.
-            const freshCandidates = await listLightweightAdapterSessions(
+            // then merge pending interaction signals from the live slot. The
+            // host discovery performs a network probe, so it shares the same
+            // short-lived cache as the other catalog reads.
+            const freshCandidates = await this.globalTaskCatalogCache.load(
               adapter,
-              this.cwd,
-              100,
+              () => listLightweightAdapterSessions(adapter, this.cwd, 100),
             );
             candidates = mergeSessionRuntimeSignals(freshCandidates, {
               pendingApprovalIds: slot.pendingConfirmations
@@ -8052,10 +8127,20 @@ class WeRelayDaemon {
                 .filter((id): id is string => Boolean(id)),
             });
           } else {
-            candidates = await slot.runtime.listResumeSessions(100);
+            // 已连接终端的历史枚举同样包含同步目录扫描与文件读取，
+            // 与无 slot 的目录读取共用同一份短时缓存。
+            candidates = await this.globalTaskCatalogCache.load(
+              adapter,
+              () => slot.runtime.listResumeSessions(100),
+            );
           }
         } else {
-          candidates = await listLightweightAdapterSessions(adapter, this.cwd, 100);
+          // 该路径的会话枚举包含同步目录扫描；用短时缓存与并发合并，
+          // 避免移动轮询和 Relay 预热反复触发全量遍历。
+          candidates = await this.globalTaskCatalogCache.load(
+            adapter,
+            () => listLightweightAdapterSessions(adapter, this.cwd, 100),
+          );
         }
         return candidates.map((candidate): GlobalTaskCandidate => ({
           ...candidate,
@@ -8731,7 +8816,7 @@ class WeRelayDaemon {
         return true;
       } catch (error) {
         if (isWechatContextTokenStaleError(error)) {
-          this.transport.clearCachedContextToken(senderId);
+          // A prepare rejection does not establish token expiry. Keep it for bounded recovery.
           appendDaemonLog(
             formatWechatContextTokenStaleLogEntry({
               context,
@@ -8855,11 +8940,27 @@ class WeRelayDaemon {
   ): Promise<CodexCompletionDeliveryResult> {
     return this.codexCompletionDeliveries.deliver(
       notificationKey,
-      (_delivery, remainingTexts) => this.queueWechatMessages(
-        senderId,
-        remainingTexts,
-        "mobile_link",
-      ),
+      async (_delivery, remainingTexts, checkpoint) => {
+        let count = 0;
+        for (const text of remainingTexts) {
+          if (!await this.queueWechatMessage(senderId, text, "mobile_link")) break;
+          checkpoint();
+          count++;
+        }
+        return count;
+      },
+      async (delivery, imagePath) => {
+        const slot = this.slots.get("codex");
+        if (!slot) throw new Error("等待 Codex 连接恢复后补发图片。");
+        try {
+          await this.sendWechatGeneratedImage(slot, {
+            threadId: delivery.threadId, turnId: delivery.turnId, rawText: "", imagePath,
+          });
+        } catch (error) {
+          appendDaemonLog(`codex_completion_image_pending: thread=${delivery.threadId} text_sent=${delivery.nextTextIndex}/${delivery.texts.length} images_sent=${delivery.nextImageIndex ?? 0}/${delivery.images?.length ?? 0}`);
+          throw error;
+        }
+      },
     );
   }
 
@@ -8867,7 +8968,7 @@ class WeRelayDaemon {
     senderId: string,
   ): Promise<void> {
     const backlog = selectCodexCompletionBacklogBatch(
-      this.codexCompletionDeliveries.getPending(),
+      this.codexCompletionDeliveries.getPending().filter((delivery) => !delivery.images?.length),
     );
     if (backlog.length > 0) {
       const summarySent = await this.queueWechatMessage(
@@ -8918,7 +9019,8 @@ class WeRelayDaemon {
       appendDaemonLog(
         `codex_completion_retry_pending: thread=${pending.threadId} sent=${result.delivery?.nextTextIndex ?? pending.nextTextIndex}/${result.totalCount}`,
       );
-      break;
+      // An uncertain image/text must not block unrelated task notifications.
+      continue;
     }
   }
 

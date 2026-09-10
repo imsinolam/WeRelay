@@ -276,3 +276,33 @@ describe("Codex completion delivery queue", () => {
     expect(persisted?.pending).toEqual([]);
   });
 });
+
+test("persists text/link/image checkpoints and only retries the missing image after restart", async () => {
+  const snapshots: CodexCompletionDeliveryState[] = [];
+  const queue = buildQueue(undefined, snapshots);
+  queue.enqueue({ key: "t:1", threadId: "t", texts: ["正文", "任务链接"], images: ["/tmp/a.png", "/tmp/b.png"] });
+  const sent: string[] = [];
+  const result = await queue.deliver("t:1", async (_delivery, texts, checkpoint) => {
+    for (const text of texts) { sent.push(text); checkpoint(); }
+    return texts.length;
+  }, async (_delivery, image) => { if (image.endsWith("b.png")) throw new Error("rejected"); sent.push(image); });
+  expect(result.status).toBe("pending");
+  expect(queue.hasDelivered("t:1")).toBe(false);
+  expect(queue.acknowledge(["t:1"])).toEqual([]);
+  const restored = buildQueue(snapshots.at(-1));
+  const done = await restored.deliver("t:1", async () => { throw new Error("must not repeat text"); }, async (_delivery, image) => { sent.push(image); });
+  expect(done.status).toBe("delivered");
+  expect(sent).toEqual(["正文", "任务链接", "/tmp/a.png", "/tmp/b.png"]);
+  await restored.deliver("t:1", async () => { throw new Error("already delivered"); });
+});
+
+test("a crash after the first text checkpoint does not repeat that text", async () => {
+  const snapshots: CodexCompletionDeliveryState[] = [];
+  const queue = buildQueue(undefined, snapshots);
+  queue.enqueue({ key: "t:crash", threadId: "t", texts: ["正文", "链接"] });
+  await expect(queue.deliver("t:crash", async (_delivery, _texts, checkpoint) => {
+    checkpoint(); throw new Error("process stopped");
+  })).rejects.toThrow("process stopped");
+  const restored = buildQueue(snapshots.at(-1));
+  await restored.deliver("t:crash", async (_delivery, texts) => { expect(texts).toEqual(["链接"]); return 1; });
+});

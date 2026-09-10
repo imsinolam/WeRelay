@@ -124,7 +124,6 @@ describe("daemon workspace state", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "werelay-daemon-state-"));
     const stateFile = path.join(directory, "daemon-state.json");
     const cwd = path.join(directory, "workspace");
-
     // Keep this persistence fixture within retention regardless of the calendar date.
     const createdAt = new Date(Date.now() - 60_000).toISOString();
     const deliveredAt = new Date(Date.now() - 120_000).toISOString();
@@ -181,6 +180,9 @@ describe("daemon workspace state", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "werelay-daemon-state-"));
     const stateFile = path.join(directory, "daemon-state.json");
     const cwd = path.join(directory, "workspace");
+    // 审批通知同样有 30 天保留期，使用相对当前时间的时刻避免时间炸弹。
+    const deliveredAt = new Date(Date.now() - 60 * 60_000).toISOString();
+    const pendingCreatedAt = new Date(Date.now() - 30 * 60_000).toISOString();
 
     try {
       const store = new DaemonWorkspaceStateStore(cwd, { stateFile });
@@ -193,11 +195,11 @@ describe("daemon workspace state", () => {
           requestId: "request",
           text: "需要确认",
           commandPreview: "ssh example",
-          createdAt: "2026-08-13T03:00:00.000Z",
+          createdAt: pendingCreatedAt,
         }],
         delivered: [{
           key: "codex:thread:old:request",
-          deliveredAt: "2026-08-13T02:00:00.000Z",
+          deliveredAt,
         }],
       });
 
@@ -211,11 +213,11 @@ describe("daemon workspace state", () => {
           requestId: "request",
           text: "需要确认",
           commandPreview: "ssh example",
-          createdAt: "2026-08-13T03:00:00.000Z",
+          createdAt: pendingCreatedAt,
         }],
         delivered: [{
           key: "codex:thread:old:request",
-          deliveredAt: "2026-08-13T02:00:00.000Z",
+          deliveredAt,
         }],
       });
     } finally {

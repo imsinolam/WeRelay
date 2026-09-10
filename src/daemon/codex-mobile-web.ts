@@ -940,6 +940,7 @@ svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.75; stro
 .message-row.assistant .message-card { width: 100%; color: var(--text); font-size: 15px; line-height: 1.62; }
 .message-row.assistant.commentary .message-card { padding-left: 0; border-left: 0; color: var(--text); }
 .message-model { margin-top: 10px; color: var(--muted); font-size: 11px; font-weight: 430; line-height: 1.4; }
+.message-time { margin-top: 6px; color: var(--muted); font-size: 11px; font-weight: 400; line-height: 1.4; }
 .run-header { width: min(100%, var(--thread-max)); display: flex; align-items: center; gap: 9px; margin: -4px auto 13px; color: var(--muted-strong); font-size: 13px; font-weight: 560; }
 .run-header-dot { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: var(--green); }
 .run-header.running .run-header-dot { animation: run-pulse 1.4s ease-in-out infinite; }
@@ -1721,6 +1722,24 @@ export const CODEX_MOBILE_JS = String.raw`
     return (date.getMonth() + 1) + " 月 " + date.getDate() + " 日";
   }
 
+  function formatClockTime(timestampMs, nowMs) {
+    if (!Number.isFinite(timestampMs)) return "";
+    var date = new Date(timestampMs);
+    var now = new Date(Number(nowMs || Date.now()));
+    var clock = ("0" + date.getHours()).slice(-2) + ":" + ("0" + date.getMinutes()).slice(-2);
+    var sameDay = date.getFullYear() === now.getFullYear() &&
+      date.getMonth() === now.getMonth() &&
+      date.getDate() === now.getDate();
+    if (sameDay) return clock;
+    var yesterday = new Date(now.getTime());
+    yesterday.setDate(yesterday.getDate() - 1);
+    var isYesterday = date.getFullYear() === yesterday.getFullYear() &&
+      date.getMonth() === yesterday.getMonth() &&
+      date.getDate() === yesterday.getDate();
+    if (isYesterday) return "昨天 " + clock;
+    return (date.getMonth() + 1) + " 月 " + date.getDate() + " 日 " + clock;
+  }
+
   function resolveTaskSelector(tasks, selector) {
     var normalized = String(selector || "").trim();
     if (!normalized) return null;
@@ -1983,7 +2002,8 @@ export const CODEX_MOBILE_JS = String.raw`
     [
       "id", "role", "text", "turnId", "phase", "model", "createdAt", "createdAtMs",
       "status", "pending", "clientId", "imageCount", "attempts", "browserAttempts",
-      "lastError", "waitingForTaskCreation", "createTaskSourceThreadId", "displayInTranscript"
+      "lastError", "waitingForTaskCreation", "createTaskSourceThreadId", "displayInTranscript",
+      "adapter", "threadId", "imageStoreKey", "retryAtMs", "retryBlocked", "serverAcknowledged"
     ].forEach(function (key) {
       if (message[key] !== undefined) sanitized[key] = message[key];
     });
@@ -2035,9 +2055,10 @@ export const CODEX_MOBILE_JS = String.raw`
       progressItems: [],
       optimisticProgressTurnId: null,
       pendingMessages: sanitizePersistentMessages(snapshot.pendingMessages).map(function (message) {
-        if (Number(message.imageCount) > 0 && (!Array.isArray(message.images) || !message.images.length)) {
+        if (Number(message.imageCount) > 0 && !message.imageStoreKey && (!Array.isArray(message.images) || !message.images.length)) {
           message.status = "failed";
-          message.lastError = "页面关闭前图片尚未上传，请重新添加图片后提交。";
+          message.retryBlocked = true;
+          message.lastError = "旧版缓存未保留图片原件，请重新添加图片；后续消息仍可发送。";
         }
         return message;
       }),
@@ -2519,7 +2540,14 @@ export const CODEX_MOBILE_JS = String.raw`
     state.historyCaughtUp = snapshot.historyCaughtUp !== false;
     state.progressItems = snapshot.progressItems.slice();
     state.optimisticProgressTurnId = snapshot.optimisticProgressTurnId || null;
-    state.pendingMessages = snapshot.pendingMessages.slice();
+    state.pendingMessages = snapshot.pendingMessages.map(function (message) {
+      return Object.assign({}, message, { adapter: message.adapter || adapterId, threadId: message.threadId || threadId, inFlight: false });
+    });
+    state.pendingMessages.forEach(function (pending) {
+      void restorePendingMessageImages(pending).then(function () {
+        if (state.currentAdapter === adapterId && state.currentThreadId === threadId) renderMessages(false);
+      }).catch(function () {});
+    });
     state.transcriptSignature = snapshot.transcriptSignature || "";
     state.contentRevision = snapshot.contentRevision || "";
     state.queueSignature = snapshot.queueSignature || "";
@@ -3581,7 +3609,7 @@ export const CODEX_MOBILE_JS = String.raw`
   }
 
   async function loadCurrentTaskModel(force) {
-    if (!state.currentThreadId) {
+    if (!state.currentThreadId || taskNeedsCreation(currentTask())) {
       renderModelControl();
       return null;
     }
@@ -3629,7 +3657,7 @@ export const CODEX_MOBILE_JS = String.raw`
   }
 
   async function loadCurrentTaskPermission(force) {
-    if (!state.currentThreadId) {
+    if (!state.currentThreadId || taskNeedsCreation(currentTask())) {
       renderSessionControl();
       return null;
     }
@@ -4142,7 +4170,7 @@ export const CODEX_MOBILE_JS = String.raw`
   function taskStatusLabel(status) {
     if (status === "running") return "运行中";
     if (status === "approval") return "待审批";
-    if (status === "input") return "待输入";
+    if (status === "input") return "等待回答";
     if (status === "error") return "异常";
     return "空闲";
   }
@@ -4150,11 +4178,10 @@ export const CODEX_MOBILE_JS = String.raw`
   function reconcileTaskApprovalStatus(task, pendingApproval, runSummary) {
     if (!task) return task;
     if (pendingApproval) {
-      return task.status === "approval"
-        ? task
-        : Object.assign({}, task, { status: "approval" });
+      var waitingStatus = pendingApproval.kind === "question" ? "input" : "approval";
+      return task.status === waitingStatus ? task : Object.assign({}, task, { status: waitingStatus });
     }
-    if (task.status !== "approval") return task;
+    if (task.status !== "approval" && task.status !== "input") return task;
     var nextStatus = runSummary && runSummary.status === "running"
       ? "running"
       : runSummary && runSummary.status === "failed"
@@ -6373,7 +6400,7 @@ export const CODEX_MOBILE_JS = String.raw`
 
   function runHeaderLabel(summary, stopping) {
     var duration = formatRunDuration(runDurationMs(summary));
-    if (state.pendingApproval) return "等待确认 · " + duration;
+    if (state.pendingApproval) return (state.pendingApproval.kind === "question" ? "等待回答 · " : "等待确认 · ") + duration;
     if (summary.status === "running") {
       return (stopping ? "正在停止" : "正在处理") + " · " + duration;
     }
@@ -6494,7 +6521,91 @@ export const CODEX_MOBILE_JS = String.raw`
     return list;
   }
 
+  function renderQuestionCard(request) {
+    var existing = document.getElementById("pending-approval");
+    if (existing && existing.getAttribute("data-question-id") === request.requestId) return existing;
+    var card = document.createElement("form");
+    card.className = "approval-card";
+    card.id = "pending-approval";
+    card.setAttribute("data-question-id", request.requestId);
+    var title = document.createElement("div");
+    title.className = "approval-card-title";
+    title.textContent = request.summary || "需要你回答问题";
+    card.appendChild(title);
+    (request.questions || []).forEach(function (question, index) {
+      var field = document.createElement("fieldset");
+      field.style.cssText = "border:0;padding:12px 0;margin:0;min-width:0";
+      var legend = document.createElement("legend");
+      legend.textContent = question.question;
+      field.appendChild(legend);
+      (question.options || []).forEach(function (option) {
+        var label = document.createElement("label");
+        label.style.cssText = "display:block;padding:8px 0;cursor:pointer";
+        var input = document.createElement("input");
+        input.type = question.multiSelect ? "checkbox" : "radio";
+        input.name = "question-" + index;
+        input.value = option.label;
+        input.disabled = state.resolvingApproval;
+        label.appendChild(input);
+        label.appendChild(document.createTextNode(" " + option.label + (option.description ? " · " + option.description : "")));
+        field.appendChild(label);
+      });
+      if (question.isOther || !(question.options || []).length) {
+        var other = document.createElement("input");
+        other.type = question.isSecret ? "password" : "text";
+        other.name = "other-" + index;
+        other.placeholder = (question.options || []).length ? "或填写其他答案" : "填写答案";
+        other.autocomplete = "off";
+        other.style.cssText = "width:100%;box-sizing:border-box;padding:10px;font:inherit";
+        field.appendChild(other);
+      }
+      card.appendChild(field);
+    });
+    var button = document.createElement("button");
+    button.type = "submit";
+    button.className = "approval-action primary";
+    button.disabled = state.resolvingApproval;
+    button.textContent = state.resolvingApproval ? "提交中…" : "提交答案";
+    card.appendChild(button);
+    card.addEventListener("submit", async function (event) {
+      event.preventDefault();
+      if (state.resolvingApproval) return;
+      var data = new FormData(card);
+      var answers = Object.create(null);
+      var valid = (request.questions || []).every(function (question, index) {
+        var values = data.getAll("question-" + index).map(String);
+        var other = String(data.get("other-" + index) || "").trim();
+        if (other) values = question.multiSelect ? values.concat([other]) : [other];
+        answers[question.id] = values;
+        return values.length > 0;
+      });
+      if (!valid) { showToast("请回答所有问题后再提交"); return; }
+      var threadId = state.currentThreadId;
+      var adapter = state.currentAdapter;
+      state.resolvingApproval = true;
+      button.disabled = true;
+      button.textContent = "提交中…";
+      try {
+        await api(adapterApiPath("/api/tasks/" + encodeURIComponent(threadId) + "/user-input", adapter), {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ requestId: request.requestId, answers: answers })
+        });
+        if (state.currentThreadId === threadId && state.currentAdapter === adapter) {
+          state.pendingApproval = null;
+          await loadMessages(false);
+        }
+      } catch (error) { showToast(error.message || "答案未提交，请重试"); }
+      finally {
+        state.resolvingApproval = false;
+        button.disabled = false;
+        button.textContent = "提交答案";
+      }
+    });
+    return card;
+  }
+
   function renderApprovalCard(approval) {
+    if (approval.kind === "question") return renderQuestionCard(approval);
     var card = document.createElement("section");
     card.className = "approval-card";
     card.id = "pending-approval";
@@ -6532,8 +6643,9 @@ export const CODEX_MOBILE_JS = String.raw`
   }
 
   function timelineOccurredAtMs(value, fallbackField) {
-    var direct = Number(value && value.createdAtMs);
-    if (Number.isFinite(direct)) return direct;
+    var raw = value && value.createdAtMs;
+    var direct = typeof raw === "number" ? raw : NaN;
+    if (Number.isFinite(direct) && direct > 0) return direct;
     var fallback = value && value[fallbackField];
     if (typeof fallback === "string") {
       var parsed = Date.parse(fallback);
@@ -6550,7 +6662,16 @@ export const CODEX_MOBILE_JS = String.raw`
   }
 
   function buildConversationTimeline(params) {
-    var messages = Array.isArray(params && params.messages) ? params.messages : [];
+    var messages = Array.isArray(params && params.messages) ? params.messages.slice() : [];
+    var segmentStart = 0;
+    for (var cursor = 0; cursor <= messages.length; cursor += 1) {
+      if (cursor < messages.length && timelineOccurredAtMs(messages[cursor], "createdAt") !== null) continue;
+      var segment = messages.slice(segmentStart, cursor).sort(function (left, right) {
+        return timelineOccurredAtMs(left, "createdAt") - timelineOccurredAtMs(right, "createdAt");
+      });
+      messages.splice.apply(messages, [segmentStart, segment.length].concat(segment));
+      segmentStart = cursor + 1;
+    }
     var results = Array.isArray(params && params.approvalResults) ? params.approvalResults : [];
     var progressItems = Array.isArray(params && params.progressItems) ? params.progressItems : [];
     var pendingApproval = params && params.pendingApproval || null;
@@ -6782,6 +6903,7 @@ export const CODEX_MOBILE_JS = String.raw`
     state.pendingMessages = state.pendingMessages.filter(function (pending) {
       if (acceptedClientIds.has(pending.clientId)) {
         pending.serverAcknowledged = true;
+        if (pending.imageStoreKey) void pendingImageStoreOperation(pending.imageStoreKey, null).catch(function () {});
         return false;
       }
       return true;
@@ -6878,6 +7000,7 @@ export const CODEX_MOBILE_JS = String.raw`
     state.pendingMessages = state.pendingMessages.filter(function (pending) {
       if (pending.serverAcknowledged || pending.status === "delivered" || delivered.has(pending.clientId)) {
         pending.serverAcknowledged = true;
+        if (pending.imageStoreKey) void pendingImageStoreOperation(pending.imageStoreKey, null).catch(function () {});
         return false;
       }
       return true;
@@ -7096,19 +7219,39 @@ export const CODEX_MOBILE_JS = String.raw`
     ]);
   }
 
-  function getMessageNode(message, index, nextMessage, nodeKey) {
-    var renderKey = messageRowRenderKey(message, nextMessage);
+  function getMessageNode(message, index, nextMessage, nodeKey, isLatest) {
+    var renderKey = messageRowRenderKey(message, nextMessage) + "\u0000" + (isLatest ? "1" : "0");
     var existing = state.messageNodes[nodeKey];
     if (existing && existing.__deskRelayMessageRenderKey === renderKey) {
       return existing;
     }
-    var row = renderMessageRow(message, index, nextMessage, nodeKey);
+    var row = renderMessageRow(message, index, nextMessage, nodeKey, isLatest);
     row.__deskRelayMessageRenderKey = renderKey;
     state.messageNodes[nodeKey] = row;
     return row;
   }
 
-  function renderMessageRow(message, index, nextMessage, nodeKey) {
+  function resolveMessageTimeLabel(message, summary, isLatest, nowMs) {
+    if (!message || message.role !== "assistant") return "";
+    var running = Boolean(summary && summary.status === "running");
+    var sameTurn = Boolean(
+      summary && summary.turnId && message.turnId &&
+      String(summary.turnId) === String(message.turnId)
+    );
+    var createdMs = Number(message.createdAtMs);
+    // 正在进行的那一轮显示最近更新时间，已经结束的显示完成时间。
+    if (running && (sameTurn || isLatest)) {
+      var updatedMs = Number(summary && summary.receivedAtMs) || createdMs || nowMs;
+      return "更新于 " + formatClockTime(updatedMs, nowMs);
+    }
+    if (sameTurn && Number(summary && summary.completedAtMs)) {
+      return "完成于 " + formatClockTime(Number(summary.completedAtMs), nowMs);
+    }
+    if (!Number.isFinite(createdMs)) return "";
+    return "完成于 " + formatClockTime(createdMs, nowMs);
+  }
+
+  function renderMessageRow(message, index, nextMessage, nodeKey, isLatest) {
     var row = document.createElement("article");
     var pendingClass = message.pending ? " " + (message.status === "failed" ? "failed" : "pending") : "";
     var continues = messageContinues(message, nextMessage);
@@ -7137,9 +7280,11 @@ export const CODEX_MOBILE_JS = String.raw`
               : message.status === "sending"
                 ? "正在提交到 " + adapterName(message.adapter || state.currentAdapter)
                 : message.status === "retrying"
-                  ? "提交未成功，正在自动重试（第 " + Math.max(1, Number(message.attempts || message.browserAttempts || 1)) + " 次）"
+                  ? "已保留，等待连接恢复"
                   : message.status === "failed"
-                    ? "提交失败，消息已保留"
+                    ? (message.lastError && /does not support image|attachment-error/.test(message.lastError)
+                      ? "当前模型不支持图片，请换用支持图片的模型后重试；文字和图片已保留"
+                      : message.lastError || "提交失败，消息已保留")
                     : message.status === "unconfirmed"
                       ? "提交状态暂未确认，消息已保留"
                       : message.status === "queued"
@@ -7166,7 +7311,16 @@ export const CODEX_MOBILE_JS = String.raw`
     var modelHtml = model
       ? '<div class="message-model">' + escapeHtml(model) + "</div>"
       : "";
-    row.innerHTML = '<div class="message-card">' + imagesHtml + textHtml + modelHtml + deliveryHtml + "</div>";
+    var timeLabel = resolveMessageTimeLabel(
+      message,
+      effectiveRunSummary(),
+      Boolean(isLatest),
+      Date.now()
+    );
+    var timeHtml = timeLabel
+      ? '<div class="message-time">' + escapeHtml(timeLabel) + "</div>"
+      : "";
+    row.innerHTML = '<div class="message-card">' + imagesHtml + textHtml + modelHtml + timeHtml + deliveryHtml + "</div>";
     var retryButton = row.querySelector("[data-retry]");
     if (retryButton) retryButton.addEventListener("click", function () { retryPendingMessage(message.clientId); });
     var copyButton = row.querySelector("[data-copy-message]");
@@ -7291,6 +7445,13 @@ export const CODEX_MOBILE_JS = String.raw`
     var usedMessageNodeKeys = Object.create(null);
     var messageKeyCounts = Object.create(null);
     var runHeaderRendered = false;
+    var latestAssistantIndex = -1;
+    for (var scanIndex = messages.length - 1; scanIndex >= 0; scanIndex -= 1) {
+      if (messages[scanIndex].role === "assistant" && !messages[scanIndex].pending) {
+        latestAssistantIndex = scanIndex;
+        break;
+      }
+    }
     var timeline = buildConversationTimeline({
       messages: messages,
       approvalResults: state.approvalResults,
@@ -7314,7 +7475,13 @@ export const CODEX_MOBILE_JS = String.raw`
         messageKeyCounts[baseKey] = duplicateIndex + 1;
         var nodeKey = messageNodeKey(message, duplicateIndex);
         usedMessageNodeKeys[nodeKey] = true;
-        nodes.push(getMessageNode(message, index, messages[index + 1], nodeKey));
+        nodes.push(getMessageNode(
+          message,
+          index,
+          messages[index + 1],
+          nodeKey,
+          index === latestAssistantIndex
+        ));
         return;
       }
       if (item.kind === "progress") {
@@ -7873,7 +8040,20 @@ export const CODEX_MOBILE_JS = String.raw`
     };
   }
 
-  function migrateTemporaryConversation(temporaryThreadId, realThreadId) {
+  function migrateTemporaryConversation(temporaryThreadId, realThreadId, requestedAdapter) {
+    var adapter = requestedAdapter || state.currentAdapter;
+    if (state.currentAdapter !== adapter || state.currentThreadId !== temporaryThreadId) {
+      var oldKey = conversationStateKey(adapter, temporaryThreadId);
+      var newKey = conversationStateKey(adapter, realThreadId);
+      var snapshot = state.conversationSnapshots[oldKey];
+      if (snapshot) (snapshot.pendingMessages || []).forEach(function (message) { message.threadId = realThreadId; });
+      moveConversationValue(state.conversationSnapshots, state.conversationSnapshotOrder, oldKey, newKey, MAX_CONVERSATION_SNAPSHOTS);
+      moveConversationValue(state.composerDrafts, state.composerDraftOrder, oldKey, newKey, MAX_COMPOSER_DRAFTS);
+      var tasks = state.currentAdapter === adapter ? state.tasks : (state.taskSnapshots[adapter] || {}).tasks || [];
+      tasks.forEach(function (task) { if (task.threadId === temporaryThreadId) { task.threadId = realThreadId; task.localCreationState = "ready"; } });
+      schedulePersistentMobileCacheWrite();
+      return;
+    }
     var temporaryKey = conversationStateKey(state.currentAdapter, temporaryThreadId);
     var realKey = conversationStateKey(state.currentAdapter, realThreadId);
     saveComposerDraft(state.currentAdapter, temporaryThreadId);
@@ -8223,6 +8403,59 @@ export const CODEX_MOBILE_JS = String.raw`
     requestAnimationFrame(syncComposerInset);
   }
 
+  var pendingImageDatabase = null;
+  function openPendingImageDatabase() {
+    if (pendingImageDatabase) return pendingImageDatabase;
+    pendingImageDatabase = new Promise(function (resolve, reject) {
+      var request = indexedDB.open("werelay-pending-images", 1);
+      request.onupgradeneeded = function () { request.result.createObjectStore("images"); };
+      request.onsuccess = function () { resolve(request.result); };
+      request.onerror = function () { reject(request.error); };
+      request.onblocked = function () { reject(new Error("图片存储暂时被其他页面占用")); };
+    }).catch(function (error) { pendingImageDatabase = null; throw error; });
+    return pendingImageDatabase;
+  }
+
+  async function pendingImageStoreOperation(key, images) {
+    var database = await openPendingImageDatabase();
+    return new Promise(function (resolve, reject) {
+      var writing = images !== undefined;
+      var transaction = database.transaction("images", writing ? "readwrite" : "readonly");
+      var store = transaction.objectStore("images");
+      var request = images === null ? store.delete(key) : writing ? store.put(images, key) : store.get(key);
+      transaction.oncomplete = function () { resolve(request.result); };
+      transaction.onerror = transaction.onabort = function () { reject(transaction.error || new Error("图片保存失败")); };
+    });
+  }
+
+  async function persistPendingMessageImages(pending) {
+    if (!pending.imageCount || pending.imagesPersisted) return;
+    // Do not clear or send partial image messages. A quota error retains the original composer data.
+    if ((pending.images || []).length !== Number(pending.imageCount) || pending.images.some(function (image) { return !image.dataBase64; })) {
+      var error = new Error("图片原件不在此浏览器缓存中，请重新添加；后续消息仍可发送。");
+      error.attachmentMissing = true;
+      throw error;
+    }
+    pending.imageStoreKey = pending.imageStoreKey || pending.clientId;
+    try {
+      await pendingImageStoreOperation(pending.imageStoreKey, pending.images);
+    } catch (_) {
+      var storageError = new Error("浏览器无法保存图片原件，请释放存储空间后重试；本页图片仍保留，暂勿关闭网页。");
+      storageError.attachmentMissing = true;
+      throw storageError;
+    }
+    pending.imagesPersisted = true;
+  }
+
+  async function restorePendingMessageImages(pending) {
+    if (!pending.imageStoreKey || (pending.images || []).some(function (image) { return Boolean(image.dataBase64); })) return;
+    var images = await pendingImageStoreOperation(pending.imageStoreKey);
+    if (Array.isArray(images) && images.length === Number(pending.imageCount)) {
+      pending.images = images;
+      pending.imagesPersisted = true;
+    }
+  }
+
   function makePendingMessage(text, images) {
     return {
       clientId: "mobile-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8),
@@ -8248,22 +8481,41 @@ export const CODEX_MOBILE_JS = String.raw`
     };
   }
 
+  function pendingMessagesForTarget(pending) {
+    if ((!pending.adapter || pending.adapter === state.currentAdapter) && pending.threadId === state.currentThreadId) return state.pendingMessages;
+    var key = conversationStateKey(pending.adapter || state.currentAdapter, pending.threadId);
+    var snapshot = state.conversationSnapshots && state.conversationSnapshots[key];
+    return snapshot && snapshot.pendingMessages || [];
+  }
+
   function pendingMessageNeedsServerAcceptance(pending) {
-    return !["accepted", "queued", "submitted", "delivered"].includes(pending.status);
+    return !pending.retryBlocked && !pending.serverAcknowledged && !["accepted", "queued", "submitted", "delivered"].includes(pending.status);
   }
 
   function hasEarlierPendingMessage(pending) {
-    var pendingIndex = state.pendingMessages.findIndex(function (message) {
+    var collection = pendingMessagesForTarget(pending);
+    var pendingIndex = collection.findIndex(function (message) {
       return message.clientId === pending.clientId;
     });
     if (pendingIndex <= 0) return false;
-    return state.pendingMessages.slice(0, pendingIndex).some(pendingMessageNeedsServerAcceptance);
+    return collection.slice(0, pendingIndex).some(function (message) {
+      return message.adapter === pending.adapter && message.threadId === pending.threadId && pendingMessageNeedsServerAcceptance(message);
+    });
   }
 
   function submitNextWaitingMessage() {
-    if (state.sending) return;
-    var next = state.pendingMessages.find(function (message) {
-      return message.status === "waiting_to_send" && !hasEarlierPendingMessage(message);
+    if (state.sending || !state.authenticated || navigator.onLine === false) return;
+    var candidates = state.pendingMessages.slice();
+    Object.keys(state.conversationSnapshots || {}).forEach(function (key) {
+      var snapshot = state.conversationSnapshots[key];
+      (snapshot.pendingMessages || []).forEach(function (message) {
+        if (message.adapter && message.threadId && !candidates.some(function (candidate) { return candidate.clientId === message.clientId; })) candidates.push(message);
+      });
+    });
+    var next = candidates.find(function (message) {
+      return pendingMessageNeedsServerAcceptance(message) && !message.inFlight &&
+        !message.deliveryConfirmed && !message.serverAcknowledged &&
+        Number(message.retryAtMs || 0) <= Date.now() && !hasEarlierPendingMessage(message);
     });
     if (next) void submitPendingMessage(next);
   }
@@ -8272,16 +8524,17 @@ export const CODEX_MOBILE_JS = String.raw`
     if (pending.inFlight || pending.deliveryConfirmed || pending.serverAcknowledged) return;
     var requestedThreadId = pending.threadId;
     var requestedAdapter = pending.adapter || state.currentAdapter;
+    function targetVisible() { return pending.threadId === state.currentThreadId && requestedAdapter === state.currentAdapter; }
     if (hasEarlierPendingMessage(pending)) {
       pending.status = "waiting_to_send";
-      renderMessages(true);
+      if (targetVisible()) renderMessages(true);
       updateHeader();
       saveCurrentConversationSnapshot();
       return;
     }
     if (state.sending) {
       pending.status = "waiting_to_send";
-      renderMessages(true);
+      if (targetVisible()) renderMessages(true);
       updateHeader();
       return;
     }
@@ -8290,9 +8543,19 @@ export const CODEX_MOBILE_JS = String.raw`
     pending.status = pending.browserAttempts > 0 ? "retrying" : (
       pending.waitingForTaskCreation ? "creating_task" : "sending"
     );
-    renderMessages(true);
+    if (targetVisible()) renderMessages(true);
     updateHeader();
     try {
+      var retainedByServer = pending.manualRetry && (state.outboundMessages || []).some(function (message) {
+        return message.clientId === pending.clientId;
+      });
+      if (!retainedByServer) {
+        await restorePendingMessageImages(pending);
+        await persistPendingMessageImages(pending);
+      }
+      saveCurrentConversationSnapshot();
+      persistMobileCacheNow();
+      if (pending.deliveryConfirmed || pending.serverAcknowledged) return;
       var images = (pending.images || []).map(function (image) {
         return {
           fileName: image.fileName,
@@ -8320,6 +8583,7 @@ export const CODEX_MOBILE_JS = String.raw`
         keepalive: body.length < 60 * 1024
       });
       if (pending.deliveryConfirmed) return;
+      pending.serverAcknowledged = true;
       pending.manualRetry = false;
       pending.browserAttempts = 0;
       pending.turnId = result.turnId || pending.turnId || "";
@@ -8327,47 +8591,39 @@ export const CODEX_MOBILE_JS = String.raw`
       pending.queued = Boolean(result.queued || result.status === "queued");
       pending.status = result.status || (pending.queued ? "queued" : "accepted");
       if (result.threadId && result.threadId !== requestedThreadId) {
-        migrateTemporaryConversation(requestedThreadId, result.threadId);
+        migrateTemporaryConversation(requestedThreadId, result.threadId, requestedAdapter);
       }
-      if (pending.queued && pending.optimisticRun) {
+      if (pending.queued && pending.optimisticRun && requestedThreadId === state.currentThreadId && requestedAdapter === state.currentAdapter) {
         state.localRunSummary = null;
         state.optimisticProgressTurnId = null;
         pending.optimisticRun = false;
       }
       renderQueuedMessages(state.queuedMessages);
-      renderMessages(true);
-      showToast(result.duplicate
-        ? "消息已由后台接收，无需重复提交"
-        : "消息已接收，将在后台继续提交");
+      if (targetVisible()) renderMessages(true);
       setTimeout(function () {
         var activeThreadId = result.threadId || requestedThreadId;
-        if (activeThreadId === state.currentThreadId || requestedThreadId === state.currentThreadId) {
+        if (requestedAdapter === state.currentAdapter && (activeThreadId === state.currentThreadId || requestedThreadId === state.currentThreadId)) {
           void loadMessages(true);
         }
       }, 180);
     } catch (error) {
       if (pending.deliveryConfirmed || pending.serverAcknowledged) return;
-      pending.browserAttempts = Math.min(6, Number(pending.browserAttempts || 0) + 1);
+      pending.browserAttempts = Math.min(30, Number(pending.browserAttempts || 0) + 1);
       pending.lastError = error && error.message || "网络连接暂时中断";
-      pending.status = pending.browserAttempts >= 6 ? "failed" : "retrying";
+      pending.retryBlocked = Boolean(error && error.attachmentMissing) || [400, 413, 422].includes(error && error.status);
+      pending.status = pending.retryBlocked ? "failed" : "retrying";
+      pending.retryAtMs = Date.now() + Math.min(30000, 1000 * Math.pow(2, pending.browserAttempts - 1));
       pending.displayInTranscript = true;
-      if (pending.optimisticRun) {
+      if (pending.optimisticRun && requestedThreadId === state.currentThreadId && requestedAdapter === state.currentAdapter) {
         state.localRunSummary = null;
         state.optimisticProgressTurnId = null;
         pending.optimisticRun = false;
       }
-      renderMessages(true);
-      if (pending.browserAttempts < 6) {
-        var retryDelay = Math.min(30000, 1000 * Math.pow(2, pending.browserAttempts - 1));
-        showToast("连接暂时中断，正在自动重试");
-        setTimeout(function () {
-          if (state.pendingMessages.some(function (message) { return message.clientId === pending.clientId; })) {
-            void submitPendingMessage(pending);
-          }
-        }, retryDelay);
-      } else {
-        showToast("暂时无法提交，消息已保留");
+      if (targetVisible()) renderMessages(true);
+      if (!pending.retryBlocked) {
+        setTimeout(function () { submitNextWaitingMessage(); }, Math.max(1000, pending.retryAtMs - Date.now()));
       }
+
     } finally {
       state.sending = false;
       pending.inFlight = false;
@@ -8452,14 +8708,18 @@ export const CODEX_MOBILE_JS = String.raw`
     }
     var task = taskById(pending.threadId);
     pending.manualRetry = true;
+    pending.serverAcknowledged = false;
+    pending.retryBlocked = false;
+    pending.retryAtMs = 0;
     pending.browserAttempts = 0;
     if (!isTemporaryTask(task)) beginOptimisticRunIfNeeded(pending);
     renderMessages(true);
     void submitPendingMessage(pending);
   }
 
-  composerForm.addEventListener("submit", function (event) {
+  composerForm.addEventListener("submit", async function (event) {
     event.preventDefault();
+    if (state.preparingMessage) return;
     var text = composerInput.value;
     var images = state.pendingImages.slice();
     if (state.editingQueuedMessageId) {
@@ -8491,14 +8751,33 @@ export const CODEX_MOBILE_JS = String.raw`
       pending.waitingForTaskCreation = true;
       pending.createTaskSourceThreadId = task.localSourceThreadId || "";
       pending.status = "creating_task";
-    } else if (!likelyQueued) {
-      beginOptimisticRunIfNeeded(pending);
     }
+    // Persist before clearing the composer or waiting behind another send.
+    // Otherwise a queued image only exists in RAM and disappears on reload.
+    state.preparingMessage = true;
+    try {
+      await persistPendingMessageImages(pending);
+    } catch (error) {
+      showToast(error.message || "图片未保存，请保留本页并重试");
+      return;
+    } finally { state.preparingMessage = false; }
+    if (pending.adapter !== state.currentAdapter || pending.threadId !== state.currentThreadId) {
+      var original = state.conversationSnapshots[conversationStateKey(pending.adapter, pending.threadId)];
+      if (original) {
+        original.pendingMessages.push(pending);
+        original.pendingImages = [];
+        clearComposerDraft(pending.adapter, pending.threadId);
+        schedulePersistentMobileCacheWrite();
+        void submitPendingMessage(pending);
+      }
+      return;
+    }
+    if (!waitingForTaskCreation && !likelyQueued) beginOptimisticRunIfNeeded(pending);
     state.composerRevision += 1;
     state.pendingMessages.push(pending);
-    composerInput.value = "";
+    if (composerInput.value === text) composerInput.value = "";
     clearComposerDraft(state.currentAdapter, state.currentThreadId);
-    state.pendingImages = [];
+    state.pendingImages = state.pendingImages.filter(function (image) { return !images.includes(image); });
     renderPendingImages();
     resizeComposer();
     renderQueuedMessages(state.queuedMessages);
@@ -8842,9 +9121,15 @@ export const CODEX_MOBILE_JS = String.raw`
         refreshes.push(loadTasks(false));
       }
       await Promise.all(refreshes);
+      submitNextWaitingMessage();
       scheduleLiveRefresh(document.hidden ? 10000 : 2200);
     }, delayMs);
   }
+
+  window.addEventListener("online", function () {
+    state.pendingMessages.forEach(function (pending) { pending.retryAtMs = 0; });
+    submitNextWaitingMessage();
+  });
 
   window.addEventListener("pageshow", function () {
     void checkForAppUpdate(true);

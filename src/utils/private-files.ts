@@ -78,16 +78,23 @@ export function repairPrivateTreePermissions(root: string): void {
     return;
   }
   if (stat.isDirectory()) {
-    chmodPrivate(root, PRIVATE_DIR_MODE);
+    // 只在权限确实不符时才调用 chmod：运行时目录会随附件和历史增长到上万个
+    // 文件，无条件逐个 chmod 会让每次启动都长时间不可用。这里比较完整的
+    // 权限位（含 setuid/setgid/sticky），确保特殊位仍会被清理。
+    if ((stat.mode & 0o7777) !== PRIVATE_DIR_MODE) {
+      chmodPrivate(root, PRIVATE_DIR_MODE);
+    }
     for (const entry of fs.readdirSync(root)) {
       repairPrivateTreePermissions(path.join(root, entry));
     }
     return;
   }
   if (stat.isFile()) {
-    chmodPrivate(
-      root,
-      (stat.mode & 0o111) !== 0 ? PRIVATE_EXECUTABLE_MODE : PRIVATE_FILE_MODE,
-    );
+    const expectedMode = (stat.mode & 0o111) !== 0
+      ? PRIVATE_EXECUTABLE_MODE
+      : PRIVATE_FILE_MODE;
+    if ((stat.mode & 0o7777) !== expectedMode) {
+      chmodPrivate(root, expectedMode);
+    }
   }
 }

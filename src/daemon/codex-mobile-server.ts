@@ -24,6 +24,7 @@ import {
 
 import type {
   BridgeSessionMessage,
+  UserInputRequestQuestion,
   BridgeSessionModelState,
   BridgeSessionPermissionState,
   BridgeSessionProgressItem,
@@ -246,6 +247,8 @@ export type CodexMobileApprovalResolution = {
 };
 
 export type CodexMobilePendingApproval = {
+  kind?: "approval" | "question";
+  questions?: UserInputRequestQuestion[];
   summary: string;
   commandPreview: string;
   requestId?: string;
@@ -476,6 +479,7 @@ export type StartCodexMobileServerOptions = {
     input: CodexMobileMessageInput,
     adapter?: string,
   ) => Promise<CodexMobileSendResult>;
+  submitUserInput?: (threadId: string, requestId: string, answers: Record<string, string[]>, adapter?: string) => Promise<boolean>;
   resolveApproval?: (
     threadId: string,
     action: CodexMobileApprovalAction,
@@ -1935,6 +1939,9 @@ function createRequestHandler(
                 requestedThreadId,
               ).threadId
             : requestedThreadId;
+          if (!threadId.trim() || threadId === "undefined" || threadId === "null") {
+            throw new HttpError(400, "任务标识已失效，请重新打开目标任务；消息和图片已保留。");
+          }
           const body = await readJsonBody(request, MOBILE_MESSAGE_BODY_BYTES_LIMIT);
           const text = typeof body.text === "string" ? body.text : "";
           const images = parseCodexMobileImages(body.images);
@@ -1945,7 +1952,7 @@ function createRequestHandler(
           if (clientId.length > 160 || !/^[A-Za-z0-9._~-]+$/.test(clientId)) {
             throw new HttpError(400, "消息标识无效，请刷新页面后重试。");
           }
-          if (!text.trim() && images.length === 0) {
+          if (!text.trim() && images.length === 0 && body.retry !== true) {
             throw new HttpError(400, "请输入文字或添加图片。");
           }
           if (Array.from(text).length > 20_000) {
@@ -2038,6 +2045,27 @@ function createRequestHandler(
           sendJson(response, 200, { ok: true });
           return;
         }
+      }
+
+      const questionRoute = url.pathname.match(/^\/api\/tasks\/([^/]+)\/user-input$/);
+      if (questionRoute?.[1] && method === "POST") {
+        if (!options.submitUserInput) throw new HttpError(409, "当前终端暂不支持在网页回答问题。");
+        const body = await readJsonBody(request, 32_768);
+        if (typeof body.requestId !== "string" || !body.requestId || !body.answers ||
+          typeof body.answers !== "object" || Array.isArray(body.answers)) {
+          throw new HttpError(400, "问题标识或答案格式不正确。");
+        }
+        const answers: Record<string, string[]> = Object.create(null);
+        for (const [key, value] of Object.entries(body.answers)) {
+          if (!Array.isArray(value) || !value.length || !value.every((answer) => typeof answer === "string" && answer.trim().length > 0)) {
+            throw new HttpError(400, "请填写每道问题的答案。");
+          }
+          answers[key] = value as string[];
+        }
+        const submitted = await options.submitUserInput(decodeURIComponent(questionRoute[1]), body.requestId, answers, requestedAdapter);
+        if (!submitted) throw new HttpError(409, "此问题已更新或处理，请刷新后确认当前问题。");
+        sendJson(response, 200, { ok: true });
+        return;
       }
 
       const approvalRoute = url.pathname.match(/^\/api\/tasks\/([^/]+)\/approval$/);

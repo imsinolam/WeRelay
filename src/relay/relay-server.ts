@@ -76,12 +76,20 @@ const DEFAULT_COMMAND_LEASE_MS = 35_000;
 const DEFAULT_DEVICE_OFFLINE_MS = 45_000;
 const DEFAULT_WARM_CACHE_FRESH_MS = 5_000;
 const DEFAULT_WARM_CACHE_TTL_MS = 30 * 60_000;
+// 设备级预热刷新周期：每个周期轮转刷新一个缓存路径。
+const DEFAULT_WARM_REFRESH_INTERVAL_MS = 5_000;
+// 设备级预热失败后的退避，避免电脑未授权时反复空转。
+const DEFAULT_WARM_FAILURE_RETRY_MS = 30_000;
 const MAX_WARM_SESSIONS = 4;
 const MAX_WARM_PATHS_PER_SESSION = 24;
 const MAX_WARM_PENDING_COMMANDS = 4;
 const MAX_WARM_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_WARM_SESSION_BYTES = 12 * 1024 * 1024;
 const MAX_PENDING_COMMANDS = 64;
+// 无浏览器访问时也要提前缓存的任务条数：最近 10 个任务 + 当前任务。
+const DEVICE_WARM_TASK_LIMIT = 10;
+// 设备级预热会话不绑定浏览器 Cookie，用固定键复用同一份缓存。
+const GLOBAL_WARM_SESSION_KEY = "__device_warm_cache__";
 
 export type StartWeRelayRelayServerOptions = {
   host?: string;
@@ -94,6 +102,7 @@ export type StartWeRelayRelayServerOptions = {
   deviceOfflineMs?: number;
   warmCacheFreshMs?: number;
   warmCacheTtlMs?: number;
+  warmRefreshIntervalMs?: number;
   taskLinkStateFile?: string;
   now?: () => number;
   logger?: (message: string) => void;
@@ -134,6 +143,9 @@ type WarmSession = {
   entries: Map<string, WarmCacheEntry>;
   refreshing: Set<string>;
   lastUserActivityAtMs: number;
+  /** 设备级预热用：当前终端与轮转刷新游标。 */
+  activeAdapter: string;
+  refreshCursor: number;
 };
 
 class RelayHttpError extends Error {
@@ -298,6 +310,10 @@ function isWarmCacheablePath(method: string, url: URL): boolean {
   if (pathname === "/api/auth/status" || pathname === "/api/adapters" ||
       pathname === "/api/task-board" || pathname === "/api/tasks") return true;
   if (/^\/api\/tasks\/[^/]+\/model$/.test(pathname)) return true;
+  // 任务消息尾页也可以预热：翻页请求（before）不缓存，避免缓存体积失控。
+  if (/^\/api\/tasks\/[^/]+\/messages$/.test(pathname)) {
+    return !url.searchParams.has("before");
+  }
   return false;
 }
 
@@ -406,6 +422,10 @@ export async function startWeRelayRelayServer(
   const warmCacheTtlMs = Math.max(
     warmCacheFreshMs,
     options.warmCacheTtlMs ?? DEFAULT_WARM_CACHE_TTL_MS,
+  );
+  const warmRefreshIntervalMs = Math.max(
+    250,
+    options.warmRefreshIntervalMs ?? DEFAULT_WARM_REFRESH_INTERVAL_MS,
   );
   const logger = options.logger ?? (() => undefined);
   const taskLinks = new WeRelayRelayTaskLinkStore({
@@ -601,11 +621,31 @@ export async function startWeRelayRelayServer(
       entries: new Map(),
       refreshing: new Set(),
       lastUserActivityAtMs: now(),
+      activeAdapter: "",
+      refreshCursor: 0,
     };
     warmSessions.set(key, session);
     touchWarmSession(session);
     return session;
   };
+
+  // 设备级预热会话：不依赖浏览器 Cookie，电脑在线时就持续刷新任务列表与
+  // 最近任务的消息尾页，使用户打开公网页面时直接命中最新快照。
+  const globalWarmSession: WarmSession = {
+    key: GLOBAL_WARM_SESSION_KEY,
+    cookieHeader: "",
+    expiresAtMs: Number.MAX_SAFE_INTEGER,
+    paths: [],
+    entries: new Map(),
+    refreshing: new Set(),
+    lastUserActivityAtMs: now(),
+    activeAdapter: "",
+    refreshCursor: 0,
+  };
+  for (const path of ["/api/adapters", "/api/task-board", "/api/tasks"]) {
+    addWarmPath(globalWarmSession, path);
+  }
+  let globalWarmRetryAtMs = 0;
 
 
   const warmSessionFromRequest = (request: IncomingMessage): WarmSession | null => {
@@ -625,6 +665,44 @@ export async function startWeRelayRelayServer(
     return session;
   };
 
+
+  const learnWarmPaths = (
+    session: WarmSession,
+    path: string,
+    response: WeRelayRelayCommandResponse,
+  ) => {
+    const payload = responseJson(response);
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) return;
+    const record = payload as Record<string, unknown>;
+    let url: URL;
+    try {
+      url = new URL(path, "http://werelay-relay.local");
+    } catch {
+      return;
+    }
+    if (url.pathname === "/api/adapters" && typeof record.activeAdapter === "string") {
+      session.activeAdapter = record.activeAdapter;
+      addWarmPath(session, `/api/tasks?adapter=${encodeURIComponent(record.activeAdapter)}`);
+    }
+    const isTaskList = url.pathname === "/api/tasks";
+    const isTaskBoard = url.pathname === "/api/task-board";
+    if ((!isTaskList && !isTaskBoard) || !Array.isArray(record.tasks)) return;
+    const fallbackAdapter = url.searchParams.get("adapter")?.trim() || session.activeAdapter;
+    // 最近 10 个任务 + 当前任务的消息尾页：用户打开页面即可直接看到内容。
+    for (const task of record.tasks.slice(0, DEVICE_WARM_TASK_LIMIT)) {
+      if (!task || typeof task !== "object" || Array.isArray(task)) continue;
+      const taskRecord = task as Record<string, unknown>;
+      const threadId = taskRecord.threadId;
+      const adapter = isTaskBoard && typeof taskRecord.adapter === "string"
+        ? taskRecord.adapter.trim()
+        : fallbackAdapter;
+      if (typeof threadId !== "string" || !threadId || !adapter) continue;
+      addWarmPath(session, `/api/tasks?adapter=${encodeURIComponent(adapter)}`);
+      const base = `/api/tasks/${encodeURIComponent(threadId)}/messages`;
+      addWarmPath(session, `${base}?limit=40&history=1&adapter=${encodeURIComponent(adapter)}`);
+      addWarmPath(session, `${base}?limit=5&adapter=${encodeURIComponent(adapter)}`);
+    }
+  };
 
   const storeWarmResponse = (
     session: WarmSession,
@@ -654,6 +732,7 @@ export async function startWeRelayRelayServer(
       session.entries.delete(oldest[0]);
       totalBytes -= oldest[1].sizeBytes;
     }
+    learnWarmPaths(session, path, response);
   };
 
   const responseAuthenticatesSession = (
@@ -673,8 +752,11 @@ export async function startWeRelayRelayServer(
   };
 
   const invalidateWarmResponses = () => {
+    globalWarmSession.entries.clear();
+    globalWarmSession.refreshCursor = 0;
     for (const warmSession of warmSessions.values()) {
       warmSession.entries.clear();
+      warmSession.refreshCursor = 0;
     }
   };
 
@@ -740,22 +822,33 @@ export async function startWeRelayRelayServer(
   };
 
   const refreshWarmPath = async (session: WarmSession, path: string) => {
+    const isDeviceSession = session.key === GLOBAL_WARM_SESSION_KEY;
     if (
       session.refreshing.has(path) ||
       session.expiresAtMs <= now() ||
-      pendingCommands.size >= MAX_WARM_PENDING_COMMANDS
+      pendingCommands.size >= MAX_WARM_PENDING_COMMANDS ||
+      (isDeviceSession && now() < globalWarmRetryAtMs)
     ) return;
     session.refreshing.add(path);
     try {
       const response = await enqueueRelayRequest({
         method: "GET",
         path,
-        headers: { cookie: session.cookieHeader },
+        headers: isDeviceSession
+          ? { "x-werelay-prewarm": "1" }
+          : { cookie: session.cookieHeader },
         clientAddress: "relay-cache",
         forwardedProto: "https",
       });
       if (response.statusCode === 401 || response.statusCode === 403) {
-        deleteWarmSession(session.key);
+        if (isDeviceSession) {
+          // 电脑未授权预热：清空并退避，避免反复空转。
+          session.entries.clear();
+          session.refreshCursor = 0;
+          globalWarmRetryAtMs = now() + DEFAULT_WARM_FAILURE_RETRY_MS;
+        } else {
+          deleteWarmSession(session.key);
+        }
         return;
       }
       const pathname = new URL(path, "http://werelay-relay.local").pathname;
@@ -765,6 +858,7 @@ export async function startWeRelayRelayServer(
       }
       if (responseAuthenticatesSession(path, response) ||
           !pathname.startsWith("/api/auth/")) {
+        if (isDeviceSession) globalWarmRetryAtMs = 0;
         storeWarmResponse(session, path, response);
       }
     } catch {
@@ -773,6 +867,39 @@ export async function startWeRelayRelayServer(
       session.refreshing.delete(path);
     }
   };
+
+  // 电脑在线时轮转刷新设备级缓存，使用户打开页面即可看到最新状态。
+  const scheduleWarmRefresh = () => {
+    if (!lastDeviceSeenAtMs || now() - lastDeviceSeenAtMs > deviceOfflineMs) return;
+    for (const session of [globalWarmSession, ...warmSessions.values()]) {
+      const isDeviceSession = session.key === GLOBAL_WARM_SESSION_KEY;
+      if (
+        !isDeviceSession &&
+        (session.expiresAtMs <= now() ||
+          now() - session.lastUserActivityAtMs > warmCacheTtlMs)
+      ) {
+        deleteWarmSession(session.key);
+        continue;
+      }
+      if (
+        !session.paths.length ||
+        (isDeviceSession && now() < globalWarmRetryAtMs)
+      ) continue;
+      for (let offset = 0; offset < session.paths.length; offset += 1) {
+        const index = (session.refreshCursor + offset) % session.paths.length;
+        const path = session.paths[index];
+        if (!path || session.refreshing.has(path)) continue;
+        const entry = session.entries.get(path);
+        if (entry && now() - entry.updatedAtMs < warmCacheFreshMs) continue;
+        session.refreshCursor = (index + 1) % session.paths.length;
+        void refreshWarmPath(session, path);
+        break;
+      }
+    }
+  };
+
+  const warmRefreshTimer = setInterval(scheduleWarmRefresh, warmRefreshIntervalMs);
+  warmRefreshTimer.unref?.();
 
   const activeSockets = new Set<import("node:net").Socket>();
   const server: Server = http.createServer((request, response) => {
@@ -1034,7 +1161,10 @@ export async function startWeRelayRelayServer(
           const path = `${url.pathname}${url.search}`;
           if (isWarmCacheablePath(method, url)) {
             const warmSession = warmSessionFromRequest(request);
-            const entry = warmSession?.entries.get(path);
+            // 设备预热缓存只对已登录的浏览器会话可见：未登录请求仍会走正常
+            // 转发并在电脑端被拒绝，避免把任务内容暴露给匿名访问者。
+            const entry = warmSession?.entries.get(path) ??
+              (warmSession ? globalWarmSession.entries.get(path) : undefined);
             if (warmSession && entry && now() - entry.updatedAtMs <= warmCacheTtlMs) {
               writeForwardedResponse(response, entry.response, {
                 "x-werelay-cache": "warm",
@@ -1100,6 +1230,7 @@ export async function startWeRelayRelayServer(
     port,
     baseUrl: `http://${host}:${port}`,
     close: async () => {
+      clearInterval(warmRefreshTimer);
       if (waitingPoll) {
         clearTimeout(waitingPoll.timer);
         if (!waitingPoll.response.headersSent) {

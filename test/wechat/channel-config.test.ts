@@ -375,3 +375,53 @@ describe("legacy channel data migration", () => {
     }
   });
 });
+
+describe("legacy migration completion marker", () => {
+  posixTest("skips repeated legacy comparison after one completed migration", () => {
+    const root = makeTempDir();
+    const channelDataDir = path.join(root, "werelay");
+    const legacyDataDir = path.join(root, "cli-bridge");
+    const logs: string[] = [];
+
+    try {
+      writeTextFile(path.join(legacyDataDir, "account.json"), '{"token":"old"}');
+      const first = migrateLegacyChannelFiles((message) => logs.push(message), {
+        channelDataDir,
+        legacyDataDirs: [legacyDataDir],
+      });
+      expect(first).toContain("credentials");
+      expect(fs.existsSync(path.join(channelDataDir, ".legacy-migration-complete")))
+        .toBe(true);
+
+      // 第二次启动不应再逐项比对遗留目录，也不再重复报告跳过项。
+      logs.length = 0;
+      const second = migrateLegacyChannelFiles((message) => logs.push(message), {
+        channelDataDir,
+        legacyDataDirs: [legacyDataDir],
+      });
+      expect(second).toEqual([]);
+      expect(logs).toEqual([]);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  posixTest("still migrates on first startup when no marker exists yet", () => {
+    const root = makeTempDir();
+    const channelDataDir = path.join(root, "werelay");
+    const legacyDataDir = path.join(root, "cli-bridge");
+
+    try {
+      writeTextFile(path.join(legacyDataDir, "sync_buf.txt"), "sync");
+      const migrated = migrateLegacyChannelFiles(undefined, {
+        channelDataDir,
+        legacyDataDirs: [legacyDataDir],
+      });
+
+      expect(migrated).toContain("sync state");
+      expect(readTextFile(path.join(channelDataDir, "sync_buf.txt"))).toBe("sync");
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});

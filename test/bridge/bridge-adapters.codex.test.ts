@@ -5733,3 +5733,20 @@ describe("Codex desktop IPC transport", () => {
     ]);
   });
 });
+
+
+test("retains real timestamps and distinguishes saving memory from subagent activity", () => {
+  const progress = extractCodexDesktopThreadProgress({
+    threadRuntimeStatus: {type: "active", activeFlags: []},
+    turnHistory: {history: {entitiesByKey: {"tail:0:local:current": {
+      turnId: "turn-memory", status: "inProgress", items: [
+        {type: "mcpToolCall", id: "memory-1", tool: "save_memory", status: "completed", createdAtMs: 1000},
+        {type: "dynamicToolCall", id: "memory-2", tool: "update_memory", status: "inProgress", createdAtMs: 2000},
+      ],
+    }}}},
+  });
+  expect(progress).toMatchObject([
+    {id: "memory-1", text: "已保存记忆", status: "completed", createdAtMs: 1000},
+    {id: "memory-2", text: "正在保存记忆", status: "running", createdAtMs: 2000},
+  ]);
+});

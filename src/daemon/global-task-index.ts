@@ -66,6 +66,56 @@ export function selectRunningGlobalTaskAdapters(params: {
   ));
 }
 
+// 全终端任务目录在每次 task-board 读取时都会遍历各终端的会话目录，其中
+// Claude、Grok、reasonix、OpenCode 的枚举使用同步目录扫描。移动网页轮询
+// 与 Relay 预热会反复命中该接口，若每次都重新扫描，会话目录增长后会把
+// 主线程长时间占满，连带让健康检查、微信发送和 Relay 转发一起无响应。
+// 这里复用 Codex 候选已有的短时缓存语义：短时间内复用结果，并把并发请求
+// 合并到同一次扫描，避免叠加阻塞。
+export function createGlobalTaskCatalogCache<Value>(options: {
+  maxAgeMs: number;
+  now?: () => number;
+}): {
+  read(key: string): Value | undefined;
+  load(key: string, loader: () => Promise<Value>): Promise<Value>;
+  invalidate(key?: string): void;
+} {
+  const now = options.now ?? (() => Date.now());
+  const entries = new Map<string, { value: Value; cachedAtMs: number }>();
+  const inFlight = new Map<string, Promise<Value>>();
+  return {
+    read(key) {
+      const entry = entries.get(key);
+      if (!entry) return undefined;
+      if (now() - entry.cachedAtMs >= options.maxAgeMs) {
+        entries.delete(key);
+        return undefined;
+      }
+      return entry.value;
+    },
+    async load(key, loader) {
+      const cached = this.read(key);
+      if (cached !== undefined) return cached;
+      const pending = inFlight.get(key);
+      if (pending) return await pending;
+      const promise = loader().then((value) => {
+        entries.set(key, { value, cachedAtMs: now() });
+        return value;
+      });
+      inFlight.set(key, promise);
+      try {
+        return await promise;
+      } finally {
+        if (inFlight.get(key) === promise) inFlight.delete(key);
+      }
+    },
+    invalidate(key) {
+      if (key === undefined) entries.clear();
+      else entries.delete(key);
+    },
+  };
+}
+
 export function sortGlobalTaskCandidates(
   candidates: GlobalTaskCandidate[],
 ): GlobalTaskCandidate[] {

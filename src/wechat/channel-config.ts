@@ -325,6 +325,15 @@ export function migrateLegacyChannelFiles(
   const migrated: string[] = [];
   const skippedExisting = new Set<string>();
   ensureChannelDataDir(channelDataDir);
+  // 遗留目录可能保留很久，而目录类目每次启动都要递归比对全部条目。实测
+  // ~/.cli-bridge 有 8000 多个文件、目标目录有 14000 多个文件，逐个
+  // existsSync 会让每次启动多花数分钟且期间服务不可用。完成过一次完整
+  // 比对后写下标记，后续启动直接跳过；标记文件本身不参与迁移比对。
+  const migrationMarkerFile = path.join(channelDataDir, ".legacy-migration-complete");
+  const migrationCompleted = fs.existsSync(migrationMarkerFile);
+  if (migrationCompleted) {
+    return migrated;
+  }
 
   for (const legacySource of legacySources) {
     if (
@@ -380,6 +389,13 @@ export function migrateLegacyChannelFiles(
     log?.(
       `Skipped existing WeRelay data: ${[...skippedExisting].join(", ")}`,
     );
+  }
+
+  // 完整比对已完成，记录标记让后续启动不再重复递归比较遗留目录。
+  try {
+    writePrivateFileAtomic(migrationMarkerFile, `${new Date().toISOString()}\n`);
+  } catch {
+    // 标记写入失败不影响本次迁移结果，下次启动会再比对一次。
   }
 
   return migrated;

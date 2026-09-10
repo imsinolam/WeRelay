@@ -290,7 +290,7 @@ describe("mobile message delivery stages", () => {
     expect(CODEX_MOBILE_JS).toContain("pending.adapter || state.currentAdapter");
     expect(CODEX_MOBILE_JS).toContain("requestedAdapter");
     expect(CODEX_MOBILE_JS).toContain('pending.status = result.status || (pending.queued ? "queued" : "accepted");');
-    expect(CODEX_MOBILE_JS).toContain("\\u6D88\\u606F\\u5DF2\\u63A5\\u6536\\uFF0C\\u5C06\\u5728\\u540E\\u53F0\\u7EE7\\u7EED\\u63D0\\u4EA4");
+    expect(CODEX_MOBILE_JS).toContain("pending.serverAcknowledged = true;");
   });
 });
 
@@ -503,7 +503,7 @@ describe("mobile fetch resilience", () => {
     expect(CODEX_MOBILE_JS).toContain("if (error.network && !initial && state.tasks.length)");
     expect(CODEX_MOBILE_JS).toContain("if (!error.network) showToast");
     expect(CODEX_MOBILE_JS).toContain("clientId: pending.clientId");
-    expect(CODEX_MOBILE_JS).toContain("pending.browserAttempts = Math.min(6");
+    expect(CODEX_MOBILE_JS).toContain("pending.browserAttempts = Math.min(30");
     expect(CODEX_MOBILE_JS).toContain("keepalive: body.length < 60 * 1024");
     expect(CODEX_MOBILE_JS).toContain("void submitPendingMessage(pending);");
     expect(CODEX_MOBILE_JS).toContain("hasEarlierPendingMessage(pending)");
@@ -653,7 +653,7 @@ describe("mobile approval result helpers", () => {
     expect(helpers.title("deny")).toBe("已拒绝此操作");
   });
 
-  test("keeps the server message order authoritative when timestamps move backwards", () => {
+  test("orders timestamped messages by occurrence time rather than arrival time", () => {
     const helpers = loadMobileApprovalResultHelpers();
     const timeline = helpers.buildTimeline({
       messages: [
@@ -662,7 +662,7 @@ describe("mobile approval result helpers", () => {
       ],
     });
 
-    expect(timeline.map((item) => item.message?.id)).toEqual(["old", "new"]);
+    expect(timeline.map((item) => item.message?.id)).toEqual(["new", "old"]);
   });
 
   test("interleaves messages, progress, pending approvals, and approval results by occurrence time", () => {
@@ -896,7 +896,20 @@ function loadMobileMarkdownRenderer(): (markdown: string, foldPrefix?: string) =
   return new Function(`${source}\nreturn renderMarkdown;`)() as (markdown: string) => string;
 }
 
-
+function loadMobileMessageTimeLabel(): (
+  message: { role?: string; turnId?: string; createdAtMs?: number },
+  summary: { status?: string; turnId?: string; completedAtMs?: number; receivedAtMs?: number } | null,
+  isLatest: boolean,
+  nowMs: number,
+) => string {
+  const start = CODEX_MOBILE_JS.indexOf("  function formatClockTime");
+  const end = CODEX_MOBILE_JS.indexOf("\n  function renderMessageRow", start);
+  if (start < 0 || end < 0) throw new Error("Mobile message time formatter not found");
+  const source = CODEX_MOBILE_JS.slice(start, end);
+  return new Function(`${source}\nreturn resolveMessageTimeLabel;`)() as ReturnType<
+    typeof loadMobileMessageTimeLabel
+  >;
+}
 
 function loadMobileMessageRefreshMerger(): (
   current: { forceBottom: boolean; historyOnly: boolean; forceFullPage: boolean } | null,
@@ -1877,7 +1890,7 @@ describe("Codex mobile conversation cache", () => {
     );
     expect(CODEX_MOBILE_JS).toContain("void submitPendingMessage(pending);");
     expect(CODEX_MOBILE_JS).toContain(
-      'pending.status = pending.browserAttempts >= 6 ? "failed" : "retrying";',
+      'pending.status = pending.retryBlocked ? "failed" : "retrying";',
     );
     expect(CODEX_MOBILE_JS).toContain("\\u590D\\u5236\\u6D88\\u606F");
     expect(CODEX_MOBILE_JS).toContain("\\u91CD\\u65B0\\u63D0\\u4EA4");
@@ -2569,6 +2582,55 @@ describe("Codex mobile web rendering", () => {
     expect(separated).not.toContain('class="message-tools-group"');
     expect(separated).toContain('data-fold-key="message-11:1"');
     expect(separated).toContain('data-fold-key="message-11:3"');
+  });
+
+  test("labels finished replies with completion time and running ones with update time", () => {
+    const label = loadMobileMessageTimeLabel();
+    const nowMs = new Date(2026, 8, 4, 16, 41, 0).getTime();
+    const at = (hour: number, minute: number) =>
+      new Date(2026, 8, 4, hour, minute, 0).getTime();
+
+    // 已结束：显示完成时间
+    expect(label(
+      { role: "assistant", turnId: "t1", createdAtMs: at(16, 30) },
+      { status: "completed", turnId: "t1", completedAtMs: at(16, 41) },
+      true,
+      nowMs,
+    )).toBe("完成于 16:41");
+
+    // 进行中：显示最近更新时间
+    expect(label(
+      { role: "assistant", turnId: "t2", createdAtMs: at(16, 20) },
+      { status: "running", turnId: "t2", receivedAtMs: at(16, 39) },
+      true,
+      nowMs,
+    )).toBe("更新于 16:39");
+
+    // 进行中的最新一轮即使 turnId 尚未对齐，也按更新时间显示
+    expect(label(
+      { role: "assistant", createdAtMs: at(16, 35) },
+      { status: "running", turnId: "t9", receivedAtMs: at(16, 40) },
+      true,
+      nowMs,
+    )).toBe("更新于 16:40");
+
+    // 历史回复：即使当前有运行中的轮次，也保留自己的完成时间
+    expect(label(
+      { role: "assistant", turnId: "t0", createdAtMs: at(9, 5) },
+      { status: "running", turnId: "t2", receivedAtMs: at(16, 39) },
+      false,
+      nowMs,
+    )).toBe("完成于 09:05");
+
+    // 跨天显示日期，用户消息不显示时间
+    expect(label(
+      { role: "assistant", createdAtMs: new Date(2026, 8, 3, 22, 5, 0).getTime() },
+      null,
+      true,
+      nowMs,
+    )).toBe("完成于 昨天 22:05");
+    expect(label({ role: "user", createdAtMs: at(16, 0) }, null, true, nowMs)).toBe("");
+    expect(label({ role: "assistant" }, null, true, nowMs)).toBe("");
   });
 
   test("keeps the plan and latest progress visible while folding older completed activity", () => {
@@ -4778,11 +4840,11 @@ describe("Codex mobile server", () => {
       expect(js).not.toContain('if (pending.status === "sending") return true;');
       expect(js).toContain("baselineUserKeys");
       expect(js).not.toContain('pending.status === "failed" || pending.status === "sending"');
-      expect(js).toContain('pending.status = pending.browserAttempts >= 6 ? "failed" : "retrying";');
-      expect(js).toContain("pending.browserAttempts = Math.min(6");
+      expect(js).toContain('pending.status = pending.retryBlocked ? "failed" : "retrying";');
+      expect(js).toContain("pending.browserAttempts = Math.min(30");
       expect(js).toContain('message.status === "unconfirmed"');
-      expect(js).toContain("result.duplicate");
-      expect(js).toContain("\\u6D88\\u606F\\u5DF2\\u7531\\u540E\\u53F0\\u63A5\\u6536\\uFF0C\\u65E0\\u9700\\u91CD\\u590D\\u63D0\\u4EA4");
+      expect(js).toContain("pending.serverAcknowledged = true;");
+      expect(js).not.toContain("showToast(result.duplicate");
       expect(js).toContain("\\u63D0\\u4EA4\\u5931\\u8D25\\uFF0C\\u6D88\\u606F\\u5DF2\\u4FDD\\u7559");
       expect(js).toContain("\\u590D\\u5236\\u6D88\\u606F");
       expect(js).toContain("\\u91CD\\u65B0\\u63D0\\u4EA4");
@@ -6081,5 +6143,55 @@ describe("Codex mobile local preview deployment", () => {
         fixture.closeAllConnections?.();
       });
     }
+  });
+});
+
+
+describe("mobile question answers", () => {
+  test("submits answers separately from permission approval and rejects malformed or stale requests", async () => {
+    const authStore = createAuthStore("question test password");
+    const calls: unknown[] = [];
+    const server = await startCodexMobileServer({
+      host: "127.0.0.1", port: 0, authStore,
+      listTasks: async () => [],
+      readMessages: async (threadId) => ({ threadId, messages: [], queuedMessages: [] }),
+      sendMessage: async () => ({queued: false}),
+      submitUserInput: async (threadId, requestId, answers, adapter) => {
+        calls.push({threadId, requestId, answers, adapter});
+        return requestId === "question-current";
+      },
+      resolveApproval: async () => { throw new Error("Must not approve a question"); },
+    });
+    const headers = {cookie: `codex_mobile_session=${authStore.createSessionToken()}`, "content-type": "application/json"};
+    try {
+      const url = `http://127.0.0.1:${server.port}/api/tasks/thread-original/user-input?adapter=deepseek`;
+      const send = (body: unknown) => fetch(url, {method: "POST", headers, body: JSON.stringify(body)});
+      expect((await send({requestId: "question-current", answers: {q1: ["A", "B"], q2: ["自定义答案"]}})).status).toBe(200);
+      expect(calls).toEqual([{threadId: "thread-original", requestId: "question-current", answers: {q1: ["A", "B"], q2: ["自定义答案"]}, adapter: "deepseek"}]);
+      expect((await send({requestId: "old", answers: {q1: ["A"]}})).status).toBe(409);
+      expect((await send({requestId: "question-current", answers: {q1: []}})).status).toBe(400);
+      expect((await send({requestId: "question-current", answers: {q1: "approve"}})).status).toBe(400);
+      expect((await fetch(url, {method: "POST", headers: {"content-type": "application/json"}, body: "{}"})).status).toBe(401);
+      expect(calls).toHaveLength(2);
+    } finally { await server.close(); }
+  });
+  test("rejects corrupt task identity before enqueuing a new message", async () => {
+    const authStore = createAuthStore("identity test password");
+    let sends = 0;
+    const server = await startCodexMobileServer({
+      host: "127.0.0.1", port: 0, authStore,
+      listTasks: async () => [],
+      readMessages: async (threadId) => ({threadId, messages: [], queuedMessages: []}),
+      sendMessage: async () => { sends++; return {queued: false}; },
+    });
+    try {
+      for (const id of ["undefined", "null"]) {
+        const response = await fetch(`http://127.0.0.1:${server.port}/api/tasks/${id}/messages`, {
+          method: "POST", headers: {cookie: `codex_mobile_session=${authStore.createSessionToken()}`, "content-type": "application/json"}, body: JSON.stringify({clientId: "stable-id", text: "不能发错任务"}),
+        });
+        expect(response.status).toBe(400);
+      }
+      expect(sends).toBe(0);
+    } finally { await server.close(); }
   });
 });

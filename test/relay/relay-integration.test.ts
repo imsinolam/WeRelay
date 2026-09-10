@@ -85,7 +85,7 @@ async function startLocalMobileStub() {
 }
 
 async function waitUntilOnline(baseUrl: string): Promise<void> {
-  const deadline = Date.now() + 3_000;
+  const deadline = Date.now() + 8_000;
   while (Date.now() < deadline) {
     const payload = await fetch(`${baseUrl}/health`).then((response) => response.json()) as {
       deviceOnline?: boolean;
@@ -741,5 +741,138 @@ describe("WeRelay relay local preview deployment", () => {
     expect(await content.text()).toContain("Relay 最新预览");
     expect(content.headers.get("content-security-policy")).toContain("sandbox");
     expect(content.headers.get("cache-control")).toBe("no-store");
+  });
+
+  test("prewarms recent tasks and their messages before any browser opens the page", async () => {
+    const requestCounts = new Map<string, number>();
+    const version = 1;
+    const tasks = Array.from({ length: 12 }, (_, index) => ({
+      adapter: "codex",
+      threadId: `thread-${index + 1}`,
+      title: `任务 ${index + 1}`,
+      status: "idle",
+      lastUpdatedAt: `2026-08-15T00:00:${String(index).padStart(2, "0")}.000Z`,
+    }));
+    const localServer = http.createServer((request, response) => {
+      const requestPath = request.url ?? "/";
+      const url = new URL(requestPath, "http://werelay.local");
+      requestCounts.set(requestPath, (requestCounts.get(requestPath) ?? 0) + 1);
+      // 设备级预热必须携带电脑下发的预热令牌；浏览器会话则用登录 Cookie。
+      const prewarmAuthorized =
+        request.headers["x-werelay-relay-prewarm"] === "local-prewarm-secret";
+      const browserAuthorized = typeof request.headers.cookie === "string" &&
+        request.headers.cookie.includes("codex_mobile_session=");
+      if (!prewarmAuthorized && !browserAuthorized) {
+        response.writeHead(401, { "content-type": "application/json" });
+        response.end(JSON.stringify({ error: "请先登录。" }));
+        return;
+      }
+      response.writeHead(200, { "content-type": "application/json" });
+      if (url.pathname === "/api/auth/status") {
+        response.end(JSON.stringify({ authenticated: true, configured: true, canSetup: false }));
+        return;
+      }
+      if (url.pathname === "/api/adapters") {
+        response.end(JSON.stringify({
+          activeAdapter: "codex",
+          adapters: [{ id: "codex", label: "Codex", status: "idle", active: true }],
+        }));
+        return;
+      }
+      if (url.pathname === "/api/task-board" || url.pathname === "/api/tasks") {
+        response.end(JSON.stringify({ tasks, recentCompleted: [] }));
+        return;
+      }
+      if (/^\/api\/tasks\/[^/]+\/messages$/.test(url.pathname)) {
+        const threadId = decodeURIComponent(url.pathname.split("/")[3] ?? "");
+        response.end(JSON.stringify({
+          threadId,
+          messages: [{ role: "assistant", text: `任务详情 ${version}` }],
+          queuedMessages: [],
+          progressItems: [],
+          runSummary: null,
+          pendingApproval: null,
+          approvalResults: [],
+          revision: `revision-${version}`,
+        }));
+        return;
+      }
+      response.end(JSON.stringify({}));
+    });
+    const localPort = await new Promise<number>((resolve, reject) => {
+      localServer.once("error", reject);
+      localServer.listen(0, "127.0.0.1", () => {
+        const address = localServer.address();
+        if (!address || typeof address === "string") reject(new Error("missing local address"));
+        else resolve(address.port);
+      });
+    });
+    closers.push(async () => {
+      await new Promise<void>((resolve) => {
+        localServer.close(() => resolve());
+        localServer.closeAllConnections?.();
+      });
+    });
+
+    const relay = await startWeRelayRelayServer({
+      host: "127.0.0.1",
+      port: 0,
+      deviceId: "prewarm-device",
+      deviceToken: "prewarm-token",
+      pollTimeoutMs: 20,
+      deviceOfflineMs: 5_000,
+      warmCacheFreshMs: 0,
+      warmRefreshIntervalMs: 5,
+    });
+    closers.push(() => relay.close());
+    const client = startWeRelayRelayClient({
+      relayUrl: relay.baseUrl,
+      deviceId: "prewarm-device",
+      deviceToken: "prewarm-token",
+      localBaseUrl: `http://127.0.0.1:${localPort}`,
+      localPrewarmToken: "local-prewarm-secret",
+      retryDelayMs: 5,
+    });
+    closers.push(() => client.close());
+    await waitUntilOnline(relay.baseUrl);
+
+    // 没有任何浏览器访问过：电脑应主动把最近任务的消息尾页推给服务器。
+    const firstTaskMessages = "/api/tasks/thread-1/messages?limit=40&history=1&adapter=codex";
+    const deadline = Date.now() + 8_000;
+    while (Date.now() < deadline && (requestCounts.get(firstTaskMessages) ?? 0) === 0) {
+      await Bun.sleep(10);
+    }
+    expect(requestCounts.get(firstTaskMessages) ?? 0).toBeGreaterThan(0);
+
+    // 只预热最近 10 个任务，第 11、12 个不应被主动抓取。
+    expect(requestCounts.get("/api/tasks/thread-11/messages?limit=40&history=1&adapter=codex"))
+      .toBeUndefined();
+    expect(requestCounts.get("/api/tasks/thread-12/messages?limit=40&history=1&adapter=codex"))
+      .toBeUndefined();
+
+    // 匿名浏览器不能读到设备预热缓存。
+    const anonymous = await fetch(
+      `${relay.baseUrl}/api/tasks/thread-1/messages?limit=40&history=1&adapter=codex`,
+    );
+    expect(anonymous.status).toBe(401);
+    expect(anonymous.headers.get("x-werelay-cache")).toBeNull();
+
+    // 已登录浏览器可直接命中服务器缓存，无需等待电脑。
+    const sessionToken = `v1.${Date.now() + 60_000}.prewarm.signature`;
+    const sessionHeaders = { cookie: `codex_mobile_session=${sessionToken}` };
+    const status = await fetch(`${relay.baseUrl}/api/auth/status`, {
+      headers: sessionHeaders,
+    });
+    expect(status.status).toBe(200);
+    const authorized = await fetch(
+      `${relay.baseUrl}/api/tasks/thread-1/messages?limit=40&history=1&adapter=codex`,
+      { headers: sessionHeaders },
+    );
+    expect(authorized.status).toBe(200);
+    expect(authorized.headers.get("x-werelay-cache")).toBe("warm");
+    expect(await authorized.json()).toMatchObject({
+      threadId: "thread-1",
+      messages: [{ role: "assistant", text: "任务详情 1" }],
+    });
   });
 });

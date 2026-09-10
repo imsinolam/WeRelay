@@ -166,6 +166,8 @@ describe("MobileMessageOutbox", () => {
       "mobile-first",
       "mobile-other",
     ]);
+    outbox.markSubmitted("claude", "thread-2", "mobile-other", {});
+    expect(outbox.nextAttemptAtMs()).toBe(1_000);
   });
 
   test("moves every accepted message from one temporary task to the same real task", () => {
@@ -379,4 +381,14 @@ describe("mobile outbox helpers", () => {
       "打开任务：https://relay.example/t/task",
     );
   });
+});
+
+
+test("classifies permanent image failures separately from safe reconnects and uncertain delivery", async () => {
+  const {classifyMobileSendFailure} = await import("../../src/daemon/mobile-message-outbox.ts");
+  expect(classifyMobileSendFailure("ECONNREFUSED 127.0.0.1")).toBe("transient");
+  expect(classifyMobileSendFailure("Timed out waiting for app-server")).toBe("transient");
+  expect(classifyMobileSendFailure('attachment-error: Model does not support image input')).toBe("permanent");
+  expect(classifyMobileSendFailure("Codex 暂未确认收到这条消息")).toBe("unconfirmed");
+  expect(classifyMobileSendFailure("session.prompt timed out")).toBe("unconfirmed");
 });

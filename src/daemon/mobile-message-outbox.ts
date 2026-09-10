@@ -211,6 +211,15 @@ function truncate(value: string, maxLength: number): string {
   return `${value.slice(0, Math.max(0, maxLength - 1))}…`;
 }
 
+/** Only connection failures known to precede acceptance may retry indefinitely. */
+export function classifyMobileSendFailure(error: string): "transient" | "permanent" | "unconfirmed" | "unknown" {
+  if (/暂未确认|未确认收到|avoid.*duplicate|unconfirmed/i.test(error)) return "unconfirmed";
+  if (/does not support image|attachment-error|不支持.*图片|图片.*不正确|没有找到这个|not found|invalid.*(image|input|model)|内容不能为空/i.test(error)) return "permanent";
+  if (/ECONNREFUSED|ENETUNREACH|EHOSTUNREACH|ENOTFOUND|EAI_AGAIN|not connected|未连接|连接.*未就绪|waiting for app-server|电脑.*离线|at capacity|rate limit|too many requests|\b429\b/i.test(error)) return "transient";
+  if (/timed out|timeout|超时|disconnected|连接中断/i.test(error)) return "unconfirmed";
+  return "unknown";
+}
+
 export function computeMobileMessageRetryDelayMs(attempt: number): number {
   return Math.min(30_000, 1_000 * (2 ** Math.max(0, Math.floor(attempt) - 1)));
 }
@@ -356,11 +365,10 @@ export class MobileMessageOutbox {
   }
 
   nextAttemptAtMs(): number | null {
-    const pending = this.entries.filter((entry) => (
-      entry.status === "accepted" || entry.status === "retrying"
-    ));
-    if (!pending.length) return null;
-    return Math.min(...pending.map((entry) => entry.nextAttemptAtMs));
+    // Only each task's head can dispatch. A later accepted entry with time 0
+    // must not cause a 50ms busy loop while its predecessor is backing off.
+    const heads = this.readyEntries(Number.MAX_SAFE_INTEGER);
+    return heads.length ? Math.min(...heads.map((entry) => entry.nextAttemptAtMs)) : null;
   }
 
   markSending(adapter: string, threadId: string, clientId: string, attemptedAtMs = this.now()): boolean {

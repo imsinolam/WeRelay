@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   activateGlobalTaskCandidate,
   buildGlobalTaskSnapshot,
+  createGlobalTaskCatalogCache,
   formatGlobalTaskDisplayTitle,
   formatGlobalTaskList,
   formatGlobalTaskSearchResults,
@@ -408,5 +409,54 @@ describe("global task list project labels", () => {
     });
 
     expect(output).toContain("[DSH · WXGWork] 定位最近 DeepSeek Harness 报错");
+  });
+});
+
+describe("global task catalog cache", () => {
+  test("reuses a recent scan instead of rescanning on every task-board read", async () => {
+    let scans = 0;
+    let clock = 1_000;
+    const cache = createGlobalTaskCatalogCache<string[]>({
+      maxAgeMs: 3_000,
+      now: () => clock,
+    });
+    const load = () => cache.load("grok", async () => {
+      scans += 1;
+      return [`scan-${scans}`];
+    });
+
+    expect(await load()).toEqual(["scan-1"]);
+    expect(await load()).toEqual(["scan-1"]);
+    clock += 1_000;
+    expect(await load()).toEqual(["scan-1"]);
+    expect(scans).toBe(1);
+
+    clock += 3_000;
+    expect(await load()).toEqual(["scan-2"]);
+    expect(scans).toBe(2);
+  });
+
+  test("merges concurrent scans for the same adapter into one traversal", async () => {
+    let scans = 0;
+    const cache = createGlobalTaskCatalogCache<number>({ maxAgeMs: 3_000 });
+    const load = () => cache.load("codebuddy", async () => {
+      scans += 1;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return scans;
+    });
+
+    const results = await Promise.all([load(), load(), load()]);
+
+    expect(results).toEqual([1, 1, 1]);
+    expect(scans).toBe(1);
+  });
+
+  test("keeps adapters isolated so one slow catalog cannot serve another", async () => {
+    const cache = createGlobalTaskCatalogCache<string>({ maxAgeMs: 3_000 });
+
+    expect(await cache.load("grok", async () => "grok-value")).toBe("grok-value");
+    expect(await cache.load("reasonix", async () => "reasonix-value")).toBe("reasonix-value");
+    expect(cache.read("grok")).toBe("grok-value");
+    expect(cache.read("reasonix")).toBe("reasonix-value");
   });
 });

@@ -392,7 +392,7 @@ describe("daemon startup resilience", () => {
     const loopStart = source.indexOf(
       "      for (const [messageIndex, message] of pollResult.messages.entries()) {",
     );
-    const loopEnd = source.indexOf("\n      }\n    }\n  }\n\n  async shutdown", loopStart);
+    const loopEnd = source.indexOf("\n  async shutdown", loopStart);
     expect(loopStart).toBeGreaterThan(-1);
     expect(loopEnd).toBeGreaterThan(loopStart);
 
@@ -1281,7 +1281,8 @@ describe("werelay-daemon helpers", () => {
 
     expect(listStart).toBeGreaterThan(-1);
     expect(listEnd).toBeGreaterThan(listStart);
-    expect(listBlock).toContain("readOpenMobileAdapters(this.cwd)");
+    // 已打开终端的进程快照改由短时缓存提供，避免每次读取都同步执行 ps。
+    expect(listBlock).toContain("readOpenMobileAdaptersCached()");
     expect(listBlock).toContain("this.slots.keys()");
     expect(listBlock).toContain("selectRunningGlobalTaskAdapters");
     expect(listBlock).toContain("this.listGlobalTaskCandidates(adapters)");

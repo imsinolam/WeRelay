@@ -11,6 +11,8 @@ export type PendingCodexCompletionDelivery = {
   url?: string;
   outcome?: "completed" | "failed" | "interrupted";
   texts: string[];
+  images?: string[];
+  nextImageIndex?: number;
   nextTextIndex: number;
   createdAt: string;
 };
@@ -49,6 +51,7 @@ function clonePending(
   return {
     ...delivery,
     texts: [...delivery.texts],
+    ...(delivery.images ? { images: [...delivery.images] } : {}),
   };
 }
 
@@ -104,6 +107,9 @@ function normalizePending(
         record.outcome === "failed" ||
         record.outcome === "interrupted"
       ? { outcome: record.outcome }
+      : {}),
+    ...(Array.isArray(record.images) && record.images.every((item) => typeof item === "string")
+      ? { images: [...record.images], nextImageIndex: Math.min(record.images.length, Math.max(0, Number.isInteger(record.nextImageIndex) ? Number(record.nextImageIndex) : 0)) }
       : {}),
     texts: [...record.texts],
     nextTextIndex: record.nextTextIndex,
@@ -339,6 +345,7 @@ export class CodexCompletionDeliveryQueue {
     url?: string;
     outcome?: "completed" | "failed" | "interrupted";
     texts: string[];
+    images?: string[];
   }): CodexCompletionEnqueueResult {
     if (this.pruneExpired()) {
       this.persistState();
@@ -366,6 +373,7 @@ export class CodexCompletionDeliveryQueue {
       ...(input.url?.trim() ? { url: input.url.trim() } : {}),
       ...(input.outcome ? { outcome: input.outcome } : {}),
       texts: [...texts],
+      ...(input.images?.length ? { images: [...input.images], nextImageIndex: 0 } : {}),
       nextTextIndex: 0,
       createdAt: new Date(this.now()).toISOString(),
     };
@@ -380,7 +388,7 @@ export class CodexCompletionDeliveryQueue {
     for (const key of keys) {
       if (this.inFlight.has(key)) continue;
       const delivery = this.pending.get(key);
-      if (!delivery) continue;
+      if (!delivery || (delivery.images?.length ?? 0) > (delivery.nextImageIndex ?? 0)) continue;
       this.pending.delete(key);
       this.delivered.delete(key);
       this.delivered.set(key, {
@@ -401,7 +409,9 @@ export class CodexCompletionDeliveryQueue {
     send: (
       delivery: PendingCodexCompletionDelivery,
       remainingTexts: string[],
+      checkpoint: () => void,
     ) => Promise<number>,
+    sendImage?: (delivery: PendingCodexCompletionDelivery, imagePath: string) => Promise<void>,
   ): Promise<CodexCompletionDeliveryResult> {
     if (this.pruneExpired()) {
       this.persistState();
@@ -425,39 +435,36 @@ export class CodexCompletionDeliveryQueue {
     this.inFlight.add(key);
     try {
       const remaining = delivery.texts.slice(delivery.nextTextIndex);
-      if (remaining.length === 0) {
-        this.markDelivered(delivery);
-        return {
-          status: "delivered",
-          sentCount: 0,
-          totalCount: delivery.texts.length,
-          delivery: clonePending(delivery),
-        };
-      }
-      const reportedCount = await send(clonePending(delivery), [...remaining]);
-      const sentCount = Math.max(
-        0,
-        Math.min(remaining.length, Number.isInteger(reportedCount) ? reportedCount : 0),
-      );
-      delivery.nextTextIndex += sentCount;
-      if (delivery.nextTextIndex >= delivery.texts.length) {
-        this.markDelivered(delivery);
-        return {
-          status: "delivered",
-          sentCount,
-          totalCount: delivery.texts.length,
-          delivery: clonePending(delivery),
-        };
-      }
-      if (sentCount > 0) {
+      const startIndex = delivery.nextTextIndex;
+      const checkpoint = () => {
+        if (delivery.nextTextIndex < delivery.texts.length) {
+          delivery.nextTextIndex++;
+          this.persistState();
+        }
+      };
+      if (remaining.length) {
+        const reportedCount = await send(clonePending(delivery), [...remaining], checkpoint);
+        delivery.nextTextIndex = Math.max(delivery.nextTextIndex, startIndex + Math.max(0,
+          Math.min(remaining.length, Number.isInteger(reportedCount) ? reportedCount : 0)));
         this.persistState();
       }
-      return {
-        status: "pending",
-        sentCount,
-        totalCount: delivery.texts.length,
-        delivery: clonePending(delivery),
-      };
+      const sentCount = delivery.nextTextIndex - startIndex;
+      if (delivery.nextTextIndex >= delivery.texts.length) {
+        const images = delivery.images ?? [];
+        while ((delivery.nextImageIndex ?? 0) < images.length) {
+          if (!sendImage) return { status: "pending", sentCount, totalCount: delivery.texts.length, delivery: clonePending(delivery) };
+          try {
+            await sendImage(clonePending(delivery), images[delivery.nextImageIndex ?? 0]!);
+          } catch {
+            return { status: "pending", sentCount, totalCount: delivery.texts.length, delivery: clonePending(delivery) };
+          }
+          delivery.nextImageIndex = (delivery.nextImageIndex ?? 0) + 1;
+          this.persistState();
+        }
+        this.markDelivered(delivery);
+        return { status: "delivered", sentCount, totalCount: delivery.texts.length, delivery: clonePending(delivery) };
+      }
+      return { status: "pending", sentCount, totalCount: delivery.texts.length, delivery: clonePending(delivery) };
     } finally {
       this.inFlight.delete(key);
     }

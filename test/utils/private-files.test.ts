@@ -99,3 +99,43 @@ describe("private runtime filesystem helpers", () => {
     }
   });
 });
+
+describe("private tree permission repair", () => {
+  posixTest("repairs permissive modes without touching already correct entries", () => {
+    const root = makeTempDir();
+    const looseDir = path.join(root, "loose");
+    fs.mkdirSync(looseDir, { mode: 0o755 });
+    fs.chmodSync(looseDir, 0o755);
+    const looseFile = path.join(looseDir, "loose.json");
+    fs.writeFileSync(looseFile, "{}", { mode: 0o644 });
+    fs.chmodSync(looseFile, 0o644);
+    const correctFile = path.join(root, "correct.json");
+    fs.writeFileSync(correctFile, "{}", { mode: PRIVATE_FILE_MODE });
+    fs.chmodSync(correctFile, PRIVATE_FILE_MODE);
+
+    const before = fs.statSync(correctFile).ctimeMs;
+    repairPrivateTreePermissions(root);
+    const after = fs.statSync(correctFile).ctimeMs;
+
+    expect(mode(root)).toBe(PRIVATE_DIR_MODE);
+    expect(mode(looseDir)).toBe(PRIVATE_DIR_MODE);
+    expect(mode(looseFile)).toBe(PRIVATE_FILE_MODE);
+    expect(mode(correctFile)).toBe(PRIVATE_FILE_MODE);
+    // 权限已经正确的文件不应被再次 chmod（ctime 不变），这是启动提速的关键。
+    expect(after).toBe(before);
+  });
+
+  posixTest("clears group and other bits on executables as well as special bits", () => {
+    const root = makeTempDir();
+    const executable = path.join(root, "tool.sh");
+    fs.writeFileSync(executable, "#!/bin/sh\n");
+    fs.chmodSync(executable, 0o755);
+    expect(fs.statSync(executable).mode & 0o777).toBe(0o755);
+
+    repairPrivateTreePermissions(root);
+
+    // 可执行文件保留执行位但必须去掉组和其他用户权限；比较完整权限位
+    // 还能覆盖 setuid/setgid 这类无法在普通用户下稳定构造的特殊位。
+    expect(fs.statSync(executable).mode & 0o7777).toBe(0o700);
+  });
+});

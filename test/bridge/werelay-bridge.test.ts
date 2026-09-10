@@ -153,7 +153,7 @@ describe("werelay-bridge cli helpers", () => {
         }),
       }),
     ).toBe(
-      "wechat_context_token_stale: context=final_reply recipient=owner@im.wechat action=wechat_message_required error=WechatApiResponseError: sendmessage failed: ret=-2 errcode=undefined errmsg=",
+      "wechat_send_prepare_rejected: context=final_reply recipient=owner@im.wechat action=bounded_retry token_status=unproven error=WechatApiResponseError: sendmessage failed: ret=-2 errcode=undefined errmsg=",
     );
   });
 

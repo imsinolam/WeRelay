@@ -270,7 +270,7 @@ export function formatWechatContextTokenStaleLogEntry(params: {
   recipientId: string;
   error: unknown;
 }): string {
-  return `wechat_context_token_stale: context=${params.context} recipient=${params.recipientId} action=wechat_message_required error=${truncatePreview(describeWechatTransportError(params.error), 400)}`;
+  return `wechat_send_prepare_rejected: context=${params.context} recipient=${params.recipientId} action=bounded_retry token_status=unproven error=${truncatePreview(describeWechatTransportError(params.error), 400)}`;
 }
 
 function formatWechatSendRetryLogEntry(params: {
@@ -721,9 +721,9 @@ async function main(): Promise<void> {
           return true;
         } catch (err) {
           if (isWechatContextTokenStaleError(err)) {
-            transport.clearCachedContextToken(senderId);
+            // Retain context; rejection may be temporary or refer to an older in-flight request.
             const hint =
-              "WeChat conversation context is stale. Ask the WeChat owner to send any message first, then local terminal replies can sync back to WeChat.";
+              "微信暂时拒绝了这次发送，已保留上下文；守护进程会限速重试，新消息也可触发恢复。";
             logError(`Failed to send WeChat ${context}: ${hint}`);
             stateStore.appendLog(
               formatWechatContextTokenStaleLogEntry({
