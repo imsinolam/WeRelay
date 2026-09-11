@@ -2232,7 +2232,7 @@ describe("werelay-daemon helpers", () => {
 
   test("shows the selected adapter task list after a successful switch", () => {
     const source = readRepoFile("src/daemon/werelay-daemon.ts");
-    const switchStart = source.indexOf("    const switchAdapter = parseDaemonSwitchCommand(message.text);");
+    const switchStart = source.indexOf("const switchCommand = parseDaemonSwitchCommand(message.text);");
     const switchEnd = source.indexOf("\n    if (message.text.trim().toLowerCase() === \"/daemon-stop\")", switchStart);
     const switchBlock = source.slice(switchStart, switchEnd);
 
@@ -2303,7 +2303,7 @@ describe("werelay-daemon helpers", () => {
 
   test("keeps adapter switches scoped to that adapter while mobile task board uses the global catalog", () => {
     const source = readRepoFile("src/daemon/werelay-daemon.ts");
-    const switchStart = source.indexOf("    const switchAdapter = parseDaemonSwitchCommand(message.text);");
+    const switchStart = source.indexOf("const switchCommand = parseDaemonSwitchCommand(message.text);");
     const switchEnd = source.indexOf('\n    if (message.text.trim().toLowerCase() === "/daemon-stop")', switchStart);
     const switchBlock = source.slice(switchStart, switchEnd);
     const boardStart = source.indexOf("  private async listMobileTaskBoard()");
@@ -2398,6 +2398,27 @@ describe("werelay-daemon helpers", () => {
     expect(parseDaemonSwitchCommand("/claude code")).toBe("claude");
     expect(parseDaemonSwitchCommand("/workbuddy desktop")).toBe("workbuddy");
     expect(parseDaemonSwitchCommand("/status")).toBeNull();
+  });
+
+  test("parseDaemonSwitchCommand accepts an optional page-size argument", () => {
+    expect(parseDaemonSwitchCommand("/dsh 30")).toEqual({
+      adapter: "deepseek",
+      pageSize: 30,
+    });
+    expect(parseDaemonSwitchCommand("/codex 20")).toEqual({
+      adapter: "codex",
+      pageSize: 20,
+    });
+    expect(parseDaemonSwitchCommand("/DSH　15")).toEqual({
+      adapter: "deepseek",
+      pageSize: 15,
+    });
+    expect(parseDaemonSwitchCommand("/dsh 0")).toBeNull();
+    expect(parseDaemonSwitchCommand("/dsh 999")).toEqual({
+      adapter: "deepseek",
+      pageSize: 100,
+    });
+    expect(parseDaemonSwitchCommand("/dsh abc")).toBeNull();
   });
 
   test("parseDaemonCliArgs binds daemon to cwd and optional initial adapter", () => {
@@ -2779,7 +2800,7 @@ describe("werelay-daemon helpers", () => {
 
   test("validates the switched terminal before making it active or announcing success", () => {
     const source = readRepoFile("src/daemon/werelay-daemon.ts");
-    const switchStart = source.indexOf("    const switchAdapter = parseDaemonSwitchCommand(message.text);");
+    const switchStart = source.indexOf("const switchCommand = parseDaemonSwitchCommand(message.text);");
     const switchEnd = source.indexOf("\n    if (message.text.trim().toLowerCase() === \"/daemon-stop\")", switchStart);
     const switchBlock = source.slice(switchStart, switchEnd);
     const retryIndex = switchBlock.indexOf("await retrySwitchedAdapterTaskList(");

@@ -36,7 +36,7 @@ export type SystemCommand =
   | { type: "status" }
   | { type: "help" }
   | { type: "codex_reply_mode"; mode: "preview" | "full" }
-  | { type: "resume"; target?: string; page?: number }
+  | { type: "resume"; target?: string; page?: number; pageSize?: number }
   | { type: "resume_page"; direction: "next" | "prev"; count?: number }
   | { type: "new_session"; input?: string }
   | { type: "stop" }

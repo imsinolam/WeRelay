@@ -918,7 +918,15 @@ export class DeepSeekHarnessAdapter implements BridgeAdapter {
         ) {
           throw error;
         }
-        selected = await this.retryAfterDesktopRecovery();
+        try {
+          selected = await this.retryAfterDesktopRecovery(error);
+        } catch (recoveryError) {
+          // The recovery window can expire without ever producing an
+          // actionable error (for example while DSH Desktop is still
+          // booting and its port is not listening yet). Always surface a
+          // real reason so callers and WeChat never see `undefined`.
+          throw recoveryError ?? error;
+        }
       }
       this.state.startedAt = nowIso();
       this.setStatus(selected?.running ? "busy" : "idle");
@@ -957,7 +965,9 @@ export class DeepSeekHarnessAdapter implements BridgeAdapter {
     return selected;
   }
 
-  private async retryAfterDesktopRecovery(): Promise<DeepSeekHarnessSessionSummary | undefined> {
+  private async retryAfterDesktopRecovery(
+    originalError?: unknown,
+  ): Promise<DeepSeekHarnessSessionSummary | undefined> {
     const deadline = this.dependencies.now() + DEEPSEEK_DESKTOP_RECOVERY_TIMEOUT_MS;
     let lastError: unknown;
     while (true) {
@@ -972,7 +982,12 @@ export class DeepSeekHarnessAdapter implements BridgeAdapter {
       }
       const remainingMs = deadline - this.dependencies.now();
       if (remainingMs <= 0) {
-        throw lastError;
+        // Never throw a bare `undefined`: when the restarted Desktop never
+        // published a loopback port inside the window, surface the original
+        // transport failure so callers and WeChat see the real reason.
+        throw lastError ?? originalError ?? new Error(
+          "DSH Desktop 已重新启动，但本地接口仍未就绪；请在电脑上确认 DSH Desktop 已打开后重试。",
+        );
       }
       await this.dependencies.sleep(
         Math.min(DEEPSEEK_DESKTOP_RECOVERY_POLL_MS, remainingMs),

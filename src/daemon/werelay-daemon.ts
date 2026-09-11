@@ -617,6 +617,7 @@ type DaemonSystemCommand = NonNullable<
   taskListHistory?: CodexTaskListPagePosition[];
   taskListScope?: "global" | "adapter";
   sessionAlreadyRestored?: boolean;
+  pageSize?: number;
 };
 
 const MODULE_FILE = fileURLToPath(import.meta.url);
@@ -910,36 +911,50 @@ export function resolveDaemonInitialAdapter(
   return options.restorePersistedAdapter ? persistedAdapter : undefined;
 }
 
-export function parseDaemonSwitchCommand(text: string): DaemonAdapterKind | null {
-  const normalized = text.trim().toLowerCase().replace(/[\s_-]+/g, " ");
-  switch (normalized) {
-    case "/codex":
-      return "codex";
-    case "/claude":
-    case "/claude code":
-      return "claude";
-    case "/tclaude":
-      return "tclaude";
-    case "/grok":
-    case "/grok cli":
-      return "grok";
-    case "/codebuddy":
-      return "codebuddy";
-    case "/reasonix":
-    case "/reasonix code":
-      return "reasonix";
-    case "/workbuddy":
-    case "/workbuddy desktop":
-      return "workbuddy";
-    case "/deepseek":
-    case "/deepseek harness":
-    case "/dsh":
-      return "deepseek";
-    case "/opencode":
-      return "opencode";
-    default:
-      return null;
-  }
+export function parseDaemonSwitchCommand(
+  text: string,
+): DaemonAdapterKind | { adapter: DaemonAdapterKind; pageSize: number } | null {
+  const raw = text.trim();
+  // 全角空格（U+3000）是中文输入法下的常见分隔符，用转义写法避免
+  // 源码中出现不规则空白字符（lint 的 no-irregular-whitespace 会拒绝）。
+  const countMatch = raw.match(/^(\S+)[\s\u3000]+([1-9]\d*)$/);
+  const baseText = countMatch ? countMatch[1] ?? raw : raw;
+  const pageSize = countMatch
+    ? Math.min(Number(countMatch[2]), CODEX_TASK_LIST_MAX_PAGE_SIZE)
+    : undefined;
+  const normalized = baseText.trim().toLowerCase().replace(/[\s_-]+/g, " ");
+  const adapter = (() => {
+    switch (normalized) {
+      case "/codex":
+        return "codex";
+      case "/claude":
+      case "/claude code":
+        return "claude";
+      case "/tclaude":
+        return "tclaude";
+      case "/grok":
+      case "/grok cli":
+        return "grok";
+      case "/codebuddy":
+        return "codebuddy";
+      case "/reasonix":
+      case "/reasonix code":
+        return "reasonix";
+      case "/workbuddy":
+      case "/workbuddy desktop":
+        return "workbuddy";
+      case "/deepseek":
+      case "/deepseek harness":
+      case "/dsh":
+        return "deepseek";
+      case "/opencode":
+        return "opencode";
+      default:
+        return null;
+    }
+  })();
+  if (!adapter) return null;
+  return pageSize === undefined ? adapter : { adapter, pageSize };
 }
 
 export function isDaemonWechatHelpCommand(text: string): boolean {
@@ -4473,7 +4488,15 @@ class WeRelayDaemon {
       );
       return;
     }
-    const switchAdapter = parseDaemonSwitchCommand(message.text);
+    const switchCommand = parseDaemonSwitchCommand(message.text);
+    const switchAdapter = switchCommand === null
+      ? null
+      : typeof switchCommand === "string"
+        ? switchCommand
+        : switchCommand.adapter;
+    const switchPageSize = switchCommand !== null && typeof switchCommand !== "string"
+      ? switchCommand.pageSize
+      : undefined;
     if (switchAdapter) {
       const previousSlot = this.getActiveSlot();
       await this.queueWechatMessage(
@@ -4490,16 +4513,20 @@ class WeRelayDaemon {
           activate: false,
         });
       } catch (error) {
-        const raw = error instanceof Error ? error.message : String(error);
-        const missingCommand = /(?:spawn\s+\S+\s+ENOENT|ENOENT)/i.test(raw);
-        const detail = missingCommand
-          ? `没有找到 ${getBridgeProvider(switchAdapter).command} 命令，请检查安装和 PATH。`
-          : raw;
+        const raw = error instanceof Error
+          ? `${error.name}: ${error.message}`.trim()
+          : String(error ?? "").trim();
+        const usable = raw && raw !== "Error:" && raw !== "undefined";
+        const detail = usable
+          ? (/ENOENT/i.test(raw)
+            ? `没有找到 ${getBridgeProvider(switchAdapter).command} 命令，请检查安装和 PATH。`
+            : raw)
+          : `${formatDaemonAdapterLabel(switchAdapter)} 没有连接成功，请在电脑上确认终端已打开后重试。`;
         const fallback = previousSlot
           ? `仍使用 ${formatDaemonAdapterLabel(previousSlot.adapter)}。`
           : "当前没有可用应用。";
         appendDaemonLog(
-          `switch_adapter_failed: adapter=${switchAdapter} previous_active=${previousSlot?.adapter ?? "(none)"} error=${truncatePreview(raw, 400)}`,
+          `switch_adapter_failed: adapter=${switchAdapter} previous_active=${previousSlot?.adapter ?? "(none)"} error=${truncatePreview(raw || "(empty)", 400)}`,
         );
         await this.queueWechatMessage(
           message.senderId,
@@ -4574,6 +4601,7 @@ class WeRelayDaemon {
           type: "resume",
           taskListScope: "adapter",
           preserveTaskSnapshot: true,
+          ...(switchPageSize ? { pageSize: switchPageSize } : {}),
         });
       } catch (error) {
         appendDaemonLog(
@@ -5162,7 +5190,12 @@ class WeRelayDaemon {
       }
       case "resume": {
         const commandStartedAtMs = Date.now();
-        const pageSize = command.taskListPosition?.pageSize ?? CODEX_TASK_LIST_PAGE_SIZE;
+        const commandPageSize = command.pageSize && command.pageSize >= 1
+          ? Math.min(Math.floor(command.pageSize), CODEX_TASK_LIST_MAX_PAGE_SIZE)
+          : undefined;
+        const pageSize = commandPageSize ??
+          command.taskListPosition?.pageSize ??
+          CODEX_TASK_LIST_PAGE_SIZE;
         const page = command.page ?? 1;
         const pageStart = command.taskListPosition?.startIndex ??
           (page - 1) * CODEX_TASK_LIST_PAGE_SIZE;

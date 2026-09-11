@@ -515,6 +515,43 @@ describe("DeepSeek Harness adapter", () => {
     await adapter.dispose();
   });
 
+  test("reports the original failure when the desktop recovery window expires without a listening host", async () => {
+    const queue = new AsyncEnvelopeQueue();
+    const { client } = createFakeClient(queue);
+    const protectedClient: DeepSeekHarnessClientLike = {
+      ...client,
+      async describeHost() {
+        throw new Error("DeepSeek Harness host.describe transport failed: HTTP 403");
+      },
+    };
+    const adapter = new DeepSeekHarnessAdapter({
+      kind: "deepseek",
+      command: "dsh",
+      cwd: "/tmp/project",
+      allowDesktopApplicationLaunch: true,
+    }, {
+      createClient: () => protectedClient,
+      resolveBaseUrl: () => "http://127.0.0.1:43120",
+      // The restarted Desktop never publishes a loopback port in this window.
+      resolveRecoveredBaseUrl: () => null,
+      recoverDesktopAccess: async () => true,
+      sleep: async () => undefined,
+      now: (() => {
+        let now = 0;
+        return () => now += 5_000;
+      })(),
+    });
+
+    const failure = await adapter.start().then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).not.toContain("undefined");
+    expect((failure as Error).message).toContain("HTTP 403");
+    await adapter.dispose();
+  });
+
   test("uses the existing Harness owner and forwards a WeChat turn without reasoning", async () => {
     const queue = new AsyncEnvelopeQueue();
     const { client, prompts } = createFakeClient(queue);

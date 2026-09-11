@@ -2,11 +2,9 @@ const TASK_LIST_DISPLAY_TITLE_MAX_CHARS = 72;
 
 function neutralizeLinkToken(value: string): string {
   return value
-    .replace(/:/g, "：")
-    .replace(/\//g, "／")
-    .replace(/\\/g, "＼")
-    .replace(/\./g, "．")
-    .replace(/@/g, "＠");
+    .replace(/(https?:\/)(?!\u200B)\/+/gi, "$1\u200B/")
+    .replace(/\.(?!\u200B)/g, ".\u200B")
+    .replace(/@(?!\u200B)/g, "@\u200B");
 }
 
 export function formatTaskListDisplayTitle(

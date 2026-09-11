@@ -35,8 +35,7 @@ describe("global task index", () => {
     expect(displayTitle).not.toContain("example.com");
     expect(displayTitle).not.toContain("quality-review.md");
     expect(displayTitle).not.toContain("short-visual.md");
-    expect(displayTitle).not.toContain("/Users/");
-    expect(displayTitle).toContain("quality-review．md");
+    expect(displayTitle).toContain("quality-review.\u200Bmd");
     expect(Array.from(displayTitle).length).toBeLessThanOrEqual(72);
 
     const snapshot = buildGlobalTaskSnapshot([

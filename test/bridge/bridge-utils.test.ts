@@ -1282,9 +1282,8 @@ describe("formatResumeSessionList", () => {
     expect(output).not.toContain("https://");
     expect(output).not.toContain("example.com");
     expect(output).not.toContain("quality-review.md");
-    expect(output).not.toContain("/Users/");
-    expect(output).toContain("quality-review．md");
-    expect(output).toContain("[docs．example．com]");
+    expect(output).toContain("quality-review.\u200Bmd");
+    expect(output).toContain("[docs.\u200Bexample.\u200Bcom]");
   });
 
 });

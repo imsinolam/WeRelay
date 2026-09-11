@@ -31,7 +31,7 @@ function timestampMs(candidate: Pick<GlobalTaskCandidate, "lastUpdatedAt">): num
 }
 
 function normalizedSearchText(value: string): string {
-  return value.toLocaleLowerCase().replace(/[\s_\-./\\]+/g, "");
+  return value.toLocaleLowerCase().replace(/[\s_\-./\\\u200B-\u200D\uFEFF]+/g, "");
 }
 
 function candidateSearchText(candidate: GlobalTaskCandidate): string {
