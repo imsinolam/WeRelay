@@ -25,6 +25,9 @@ import { killProcessTreeSync } from "./bridge-process-reaper.ts";
 import { nowIso, truncatePreview } from "./bridge-utils.ts";
 
 const REASONIX_TRANSCRIPT_SUFFIX = ".jsonl";
+// 任务枚举只需要标题和“是否存在用户消息”，读取 transcript 开头即可；
+// 设上限避免同步读入超大会话文件而阻塞主线程。
+const REASONIX_METADATA_READ_MAX_BYTES = 256 * 1024;
 const REASONIX_EXCLUDED_TRANSCRIPT_SUFFIXES = [
   ".events.jsonl",
   ".conflicts.jsonl",
@@ -88,6 +91,30 @@ function readJsonFile(filePath: string): Record<string, unknown> | null {
     return isRecord(parsed) ? parsed : null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * 只读取 transcript 的开头若干字节，用于任务枚举时的标题与首条用户消息。
+ * 超过上限的部分（通常是很长的后续对话）不参与元数据判断，避免同步读入
+ * 大文件阻塞守护进程主线程。
+ */
+function readReasonixTranscriptHead(filePath: string, maxBytes: number): string {
+  let file: number | undefined;
+  try {
+    const stat = fs.statSync(filePath);
+    const length = Math.min(maxBytes, stat.size);
+    if (length <= 0) return "";
+    file = fs.openSync(filePath, "r");
+    const buffer = Buffer.alloc(length);
+    fs.readSync(file, buffer, 0, length, 0);
+    return buffer.toString("utf8");
+  } catch {
+    return "";
+  } finally {
+    if (file !== undefined) {
+      try { fs.closeSync(file); } catch { /* Best effort. */ }
+    }
   }
 }
 
@@ -234,10 +261,14 @@ function readReasonixSessionMetadata(
   const ensureMessages = (): BridgeSessionMessage[] => {
     if (messages) return messages;
     try {
-      messages = parseReasonixTranscript(fs.readFileSync(transcriptPath, "utf8"), {
-        sessionId,
-        model,
-      });
+      // 这里只用于确认是否存在用户消息、并取首条用户消息作为标题，读取
+      // 文件开头即可。会话 transcript 会增长到数百 KB 甚至更大，每次任务
+      // 枚举都同步读全文会长时间占满主线程，连带让健康检查、微信发送和
+      // Relay 转发一起无响应（手机端表现为电脑离线）。
+      messages = parseReasonixTranscript(
+        readReasonixTranscriptHead(transcriptPath, REASONIX_METADATA_READ_MAX_BYTES),
+        { sessionId, model },
+      );
     } catch {
       messages = [];
     }

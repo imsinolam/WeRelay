@@ -636,6 +636,9 @@ const CODEX_TASK_CANDIDATE_CACHE_MAX_AGE_MS = 3_000;
 const GLOBAL_TASK_CATALOG_CACHE_MAX_AGE_MS = 6_000;
 // 已打开终端的进程快照变化不频繁，短时复用即可满足“刚打开就显示”的体验。
 const OPEN_MOBILE_ADAPTERS_CACHE_MAX_AGE_MS = 3_000;
+// 进程快照在正常机器上只需几十毫秒；给同步调用一个上限，避免子进程无法
+// 回收时把守护进程主线程永久挂住。
+const OPEN_MOBILE_ADAPTERS_PROBE_TIMEOUT_MS = 5_000;
 const CODEX_COMPLETION_SUMMARY_RETRY_MS = 250;
 const CODEX_COMPLETION_SUMMARY_RETRY_COUNT = 3;
 const DAEMON_TRANSIENT_CACHE_TTL_MS = 24 * 60 * 60_000;
@@ -1738,11 +1741,17 @@ export function detectOpenMobileAdaptersFromProcessList(
 function readOpenMobileAdapters(cwd: string): Set<DaemonAdapterKind> {
   let processList = "";
   if (process.platform !== "win32") {
+    // 同步进程快照必须带超时：缺少超时时，spawnSync 偶尔无法回收子进程，
+    // 会让主线程一直停在等待里，连带健康检查、微信发送和 Relay 转发全部
+    // 无响应（表现为手机提示电脑离线）。超时后按“没有额外终端”处理，
+    // 下一次读取会重新尝试。
     const snapshot = spawnSync("ps", ["-axo", "command="], {
       encoding: "utf8",
       maxBuffer: 4 * 1024 * 1024,
+      timeout: OPEN_MOBILE_ADAPTERS_PROBE_TIMEOUT_MS,
+      killSignal: "SIGKILL",
     });
-    if (!snapshot.error && snapshot.status === 0) {
+    if (!snapshot.error && snapshot.status === 0 && typeof snapshot.stdout === "string") {
       processList = snapshot.stdout;
     }
   }

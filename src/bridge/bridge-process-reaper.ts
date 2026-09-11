@@ -10,6 +10,7 @@ export type BridgeProcessRecord = {
 
 const PEER_BRIDGE_EXIT_TIMEOUT_MS = 4_000;
 const PEER_BRIDGE_EXIT_POLL_MS = 100;
+const PROCESS_TREE_PROBE_TIMEOUT_MS = 5_000;
 
 function isPidAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) {
@@ -455,6 +456,10 @@ function collectPosixDescendantsSync(rootPid: number): number[] {
       const result = spawnSync("pgrep", ["-P", String(parent)], {
         encoding: "utf8",
         windowsHide: true,
+        // 与 ps 快照同理：同步子进程缺少超时时可能无法回收，进而挂住
+        // 守护进程主线程。
+        timeout: PROCESS_TREE_PROBE_TIMEOUT_MS,
+        killSignal: "SIGKILL",
       });
       if (result.error || result.status !== 0) {
         continue;
