@@ -7,3 +7,9 @@ WeRelay evolved from the CLI WeChat Bridge project. Version 2.0 completed the in
 The project is licensed under the GNU Affero General Public License v3.0 or later. Third-party dependencies retain their own licenses; see `package.json` and the linked upstream projects in `README.md`.
 
 `qrcode-terminal` 0.12.0 is distributed under the Apache License 2.0. Its complete license text is included in that dependency's npm package.
+
+The mobile web boot screen embeds an adapted version of the `solving` (rubik)
+thinking-orb animation from `thinking-orbs` (https://github.com/Jakubantalik/thinking-orbs),
+MIT License, Copyright (c) 2026 Jakub Antalik. The adaptation rewrites the
+geometry into dependency-free plain JavaScript, renders it on a 2D canvas, and
+resolves its ink from the WeRelay light/dark theme instead of the host project.

@@ -10,6 +10,7 @@ import {
   type WeRelayRelayClientHandle,
 } from "../../src/relay/relay-client.ts";
 import {
+  WERELAY_RELAY_HEARTBEAT_PATH,
   WERELAY_RELAY_POLL_PATH,
   WERELAY_RELAY_PROTOCOL_VERSION,
   WERELAY_RELAY_RESPONSE_PATH,
@@ -99,6 +100,20 @@ async function waitUntilOnline(baseUrl: string): Promise<void> {
 }
 
 describe("WeRelay application relay", () => {
+  test("authenticated heartbeat keeps a busy device online without consuming queued commands", async () => {
+    const relay = await startWeRelayRelayServer({ host: "127.0.0.1", port: 0,
+      deviceId: "heartbeat-device", deviceToken: "heartbeat-token", pollTimeoutMs: 10, deviceOfflineMs: 500 });
+    closers.push(() => relay.close());
+    const endpoint = `${relay.baseUrl}${WERELAY_RELAY_HEARTBEAT_PATH}`;
+    expect((await fetch(endpoint, { method: "POST", body: "{}" })).status).toBe(401);
+    expect(await fetch(`${relay.baseUrl}/health`).then(r => r.json())).toMatchObject({ deviceOnline: false });
+    const response = await fetch(endpoint, { method: "POST", body: "{}", headers: {
+      authorization: "Bearer heartbeat-token", "x-werelay-device-id": "heartbeat-device", "content-type": "application/json",
+    } });
+    expect(response.status).toBe(204);
+    expect(await fetch(`${relay.baseUrl}/health`).then(r => r.json())).toMatchObject({ deviceOnline: true });
+  });
+
   test("delivers a queued write before older read requests", async () => {
     const relay = await startWeRelayRelayServer({
       host: "127.0.0.1",

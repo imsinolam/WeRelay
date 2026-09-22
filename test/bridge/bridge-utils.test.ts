@@ -1229,12 +1229,12 @@ describe("formatResumeSessionList", () => {
       currentSessionId: "session_1",
     });
 
-    expect(output).toContain("Claude Code 最近任务");
+    expect(output).not.toContain("Claude Code 最近任务");
     expect(output).not.toContain("session_1");
     expect(output).toContain(" · 当前");
     expect(output).toContain("[3] 进入任务 3");
     expect(output).toContain("[3：内容]");
-    expect(output).toContain("[3：内容] 进入任务 3 并发消息");
+    expect(output).toContain("[3：内容] 给任务3发消息");
     expect(output).not.toContain("/resume");
   });
 
@@ -1261,7 +1261,7 @@ describe("formatResumeSessionList", () => {
       currentWorkerStatus: "busy",
     });
 
-    expect(output).toContain("DSH 最近任务");
+    expect(output).not.toContain("DSH 最近任务");
     expect(output).toContain("1. [trade_highlow_v3] US中转服务器 · 当前 · 处理中 🟢");
     expect(output).toContain("2. [DeskRelay] 等待审批 · 待审批");
     expect(output).toContain("🟢");
@@ -1481,10 +1481,10 @@ describe("adapter-aware message formatting", () => {
     expect(output).toContain("需要补充信息");
     expect(output).toContain("请选择：Format");
     expect(output).toContain("1. Markdown");
-    expect(output).toContain("回复 /answer 1");
+    expect(output).toContain("直接回复数字选择，如：1。");
     expect(output).not.toMatch(/adapter:|\[id:|options:|Return a Markdown|Create a Word/);
     expect(formatPendingUserInputReminder(pending)).toBe(
-      "任务等待输入：Format\n请回复 /answer。",
+      "任务等待输入：Format\n直接回复选项数字。",
     );
   });
 });
@@ -1741,7 +1741,7 @@ describe("formatResumeSessionList for Codex desktop tasks", () => {
       currentWorkerStatus: "awaiting_approval",
     });
 
-    expect(output).toContain("最近任务\n1.");
+    expect(output.startsWith("1.")).toBe(true);
     expect(output).not.toContain("────────");
     expect(output).toContain("[design-system]");
     expect(output).not.toContain("[generated-task]");
@@ -1755,7 +1755,7 @@ describe("formatResumeSessionList for Codex desktop tasks", () => {
     expect(output).not.toContain("[进行中]");
     expect(output).toContain("[3] 进入任务 3");
     expect(output).toContain("任务序号在下次发送 [任务] 前保持不变。");
-    expect(output).toContain("[3：内容] 进入任务 3 并发消息");
+    expect(output).toContain("[3：内容] 给任务3发消息");
     expect(output).not.toContain("上一页");
     expect(output).toContain("中英文冒号均可，指令间可加空格。");
     expect(output).toContain("任务序号在下次发送 [任务] 前保持不变");
@@ -1796,7 +1796,7 @@ describe("formatResumeSessionList for Codex desktop tasks", () => {
     expect(output).not.toContain("发送“上一页”返回");
     expect(output).toContain("[3] 进入任务 3");
     expect(output).toContain("任务序号在下次发送 [任务] 前保持不变。");
-    expect(output).toContain("[3：内容] 进入任务 3 并发消息");
+    expect(output).toContain("[3：内容] 给任务3发消息");
   });
 
   test("supports a custom next-page size without skipping tasks", () => {

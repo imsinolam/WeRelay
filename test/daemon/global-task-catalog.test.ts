@@ -19,6 +19,17 @@ afterEach(() => {
   }
 });
 
+test("busy overlay preserves existing approval and user-input flags", () => {
+  const candidates = mergeSessionRuntimeSignals([{
+    sessionId: "running",
+    title: "任务",
+    runtimeStatus: { type: "active", activeFlags: ["waitingOnApproval"] },
+  }], { activeSessionIds: ["running"], pendingUserInputIds: ["running"] });
+  expect(candidates[0]?.runtimeStatus).toEqual({
+    type: "active", activeFlags: ["waitingOnApproval", "waitingOnUserInput"],
+  });
+});
+
 describe("global task catalog runtime signals", () => {
 
   test("bounds background DeepSeek catalog reads without changing normal Harness timeouts", async () => {
@@ -67,6 +78,29 @@ describe("global task catalog runtime signals", () => {
     });
     expect(candidate?.projectId).toBeUndefined();
     expect(candidate?.projectName).toBeUndefined();
+  });
+
+  test("merges the selected live slot and active task ids into a lightweight catalog", () => {
+    const candidates = mergeSessionRuntimeSignals([
+      {
+        sessionId: "selected-session",
+        title: "当前任务",
+        lastUpdatedAt: "2026-09-12T07:00:00.000Z",
+        runtimeStatus: { type: "notLoaded" },
+      },
+      {
+        sessionId: "background-session",
+        title: "后台任务",
+        lastUpdatedAt: "2026-09-12T06:00:00.000Z",
+      },
+    ], {
+      activeSessionIds: ["selected-session", "background-session"],
+    });
+
+    expect(candidates.map((candidate) => candidate.runtimeStatus)).toEqual([
+      { type: "active", activeFlags: [] },
+      { type: "active", activeFlags: [] },
+    ]);
   });
 
   test("merges live slot approval signals into a freshly discovered Harness catalog", () => {

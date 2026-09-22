@@ -204,6 +204,13 @@ type ResolvedRecipient = {
   contextToken: string;
 };
 
+type UploadSource = {
+  plaintext: Buffer;
+  rawsize: number;
+  rawfilemd5: string;
+  contentDigest: string;
+};
+
 type UploadPreparation = {
   contentDigest: string;
   rawsize: number;
@@ -1343,7 +1350,7 @@ export class WeChatTransport {
 
       const senderId = rawMessage.from_user_id ?? "unknown";
       if (rawMessage.context_token) {
-        this.cacheContextToken(senderId, rawMessage.context_token);
+        this.cacheContextToken(senderId, rawMessage.context_token, account.token);
       }
 
       // Filter pre-start backlog BEFORE claiming/remembering the message so a
@@ -1485,12 +1492,16 @@ export class WeChatTransport {
       );
     }
 
+    const uploadSource = this.readUploadSource(imagePath, "image");
+    const requestKey = `sendImage:${uploadSource.contentDigest}`;
+    this.assertMediaSendMayProceed(resolved, requestKey);
     const upload = await this.prepareUpload(
       resolved.account,
       resolved.recipientId,
       imagePath,
       UPLOAD_MEDIA_TYPE_IMAGE,
       "image",
+      uploadSource,
     );
 
     await this.sendMessage(resolved.account, resolved.recipientId, resolved.contextToken, [
@@ -1505,19 +1516,23 @@ export class WeChatTransport {
           mid_size: upload.filesize,
         },
       },
-    ], `sendImage:${upload.contentDigest}`);
+    ], requestKey);
 
     return resolved.recipientId;
   }
 
   async sendFile(filePath: string, options: SendFileOptions = {}): Promise<string> {
     const resolved = this.resolveRecipient(options.recipientId);
+    const uploadSource = this.readUploadSource(filePath, "file");
+    const requestKey = `sendFile:${uploadSource.contentDigest}`;
+    this.assertMediaSendMayProceed(resolved, requestKey);
     const upload = await this.prepareUpload(
       resolved.account,
       resolved.recipientId,
       filePath,
       UPLOAD_MEDIA_TYPE_FILE,
       "file",
+      uploadSource,
     );
     const fileName = options.title?.trim() || path.basename(filePath);
 
@@ -1534,19 +1549,23 @@ export class WeChatTransport {
           },
         },
       },
-    ], `sendFile:${upload.contentDigest}`);
+    ], requestKey);
 
     return resolved.recipientId;
   }
 
   async sendVoice(voicePath: string, recipientId?: string): Promise<string> {
     const resolved = this.resolveRecipient(recipientId);
+    const uploadSource = this.readUploadSource(voicePath, "voice");
+    const requestKey = `sendVoice:${uploadSource.contentDigest}`;
+    this.assertMediaSendMayProceed(resolved, requestKey);
     const upload = await this.prepareUpload(
       resolved.account,
       resolved.recipientId,
       voicePath,
       UPLOAD_MEDIA_TYPE_VOICE,
       "voice",
+      uploadSource,
     );
 
     await this.sendMessage(resolved.account, resolved.recipientId, resolved.contextToken, [
@@ -1560,7 +1579,7 @@ export class WeChatTransport {
           },
         },
       },
-    ], `sendVoice:${upload.contentDigest}`);
+    ], requestKey);
 
     return resolved.recipientId;
   }
@@ -1578,12 +1597,16 @@ export class WeChatTransport {
       );
     }
 
+    const uploadSource = this.readUploadSource(videoPath, "video");
+    const requestKey = `sendVideo:${uploadSource.contentDigest}`;
+    this.assertMediaSendMayProceed(resolved, requestKey);
     const upload = await this.prepareUpload(
       resolved.account,
       resolved.recipientId,
       videoPath,
       UPLOAD_MEDIA_TYPE_VIDEO,
       "video",
+      uploadSource,
     );
 
     await this.sendMessage(resolved.account, resolved.recipientId, resolved.contextToken, [
@@ -1598,7 +1621,7 @@ export class WeChatTransport {
           video_size: upload.filesize,
         },
       },
-    ], `sendVideo:${upload.contentDigest}`);
+    ], requestKey);
 
     return resolved.recipientId;
   }
@@ -1693,19 +1716,39 @@ export class WeChatTransport {
     });
   }
 
+  private assertMediaSendMayProceed(
+    resolved: ResolvedRecipient,
+    requestKey: string,
+  ): void {
+    this.contextSendGuard.assertCanAttempt({
+      recipient: `${resolved.account.token}\0${resolved.recipientId}`,
+      requestKey,
+      getToken: () =>
+        this.contextTokenCache.get(resolved.recipientId) ?? resolved.contextToken,
+    });
+  }
+
+  private readUploadSource(filePath: string, label: UploadLabel): UploadSource {
+    const stat = this.requireExistingFile(filePath);
+    assertMediaUploadSizeAllowed(label, stat.size);
+    const plaintext = fs.readFileSync(filePath);
+    return {
+      plaintext,
+      rawsize: plaintext.length,
+      rawfilemd5: crypto.createHash("md5").update(plaintext).digest("hex"),
+      contentDigest: crypto.createHash("sha256").update(plaintext).digest("hex"),
+    };
+  }
+
   private async prepareUpload(
     account: AccountData,
     recipientId: string,
     filePath: string,
     mediaType: number,
     label: UploadLabel,
+    source = this.readUploadSource(filePath, label),
   ): Promise<UploadPreparation> {
-    const stat = this.requireExistingFile(filePath);
-    assertMediaUploadSizeAllowed(label, stat.size);
-
-    const plaintext = fs.readFileSync(filePath);
-    const rawsize = plaintext.length;
-    const rawfilemd5 = crypto.createHash("md5").update(plaintext).digest("hex");
+    const { plaintext, rawsize, rawfilemd5, contentDigest } = source;
     const filesize = aesEcbPaddedSize(rawsize);
     const filekey = crypto.randomBytes(16).toString("hex");
     const aeskey = crypto.randomBytes(16);
@@ -1745,7 +1788,7 @@ export class WeChatTransport {
     );
 
     return {
-      contentDigest: crypto.createHash("sha256").update(plaintext).digest("hex"),
+      contentDigest,
       rawsize,
       filesize,
       aeskey,
@@ -1840,7 +1883,11 @@ export class WeChatTransport {
     }
   }
 
-  private cacheContextToken(senderId: string, token: string): void {
+  private cacheContextToken(senderId: string, token: string, accountToken?: string): void {
+    const previous = this.contextTokenCache.get(senderId);
+    if (previous && previous !== token && accountToken) {
+      this.contextSendGuard.markContextRefreshed(`${accountToken}\0${senderId}`);
+    }
     if (this.contextTokenCache.has(senderId)) {
       this.contextTokenCache.delete(senderId);
     }

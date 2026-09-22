@@ -1,6 +1,9 @@
 #!/usr/bin/env bun
 
 import path from "node:path";
+import { reconcilePendingUserInputs } from "./pending-user-input.ts";
+import { splitTaskListMessages } from "./task-list-instructions.ts";
+import { sendWechatTextBatch } from "../wechat/wechat-text-batch.ts";
 
 import {
   resolveDefaultAdapterCommand,
@@ -44,6 +47,7 @@ import {
   formatApprovalMessage,
   formatPendingApprovalReminder,
   formatPendingUserInputReminder,
+  splitWechatTextIntoChunks,
   formatResumeSessionList,
   formatResumeSessionSearchResults,
   formatDuration,
@@ -62,6 +66,7 @@ import {
   nowIso,
   OutputBatcher,
   parsePendingUserInputAnswerCommand,
+  resolveWechatQuestionReply,
   parseWechatControlCommand,
   resolveBareCodexTaskSelection,
   resolveCompactCodexTaskSearchTarget,
@@ -709,53 +714,23 @@ async function main(): Promise<void> {
     return run;
   };
 
-  const queueWechatMessage = (
+  const sendWechatMessageNow = async (
     senderId: string,
     text: string,
     context: WechatSendContext = "message",
   ) => {
-    return queueWechatTextAction(async () => {
-      for (let attempt = 1; attempt <= WECHAT_SEND_MAX_ATTEMPTS; attempt += 1) {
-        try {
-          await transport.sendText(senderId, text);
-          return true;
-        } catch (err) {
-          if (isWechatContextTokenStaleError(err)) {
-            // Retain context; rejection may be temporary or refer to an older in-flight request.
-            const hint =
-              "微信暂时拒绝了这次发送，已保留上下文；守护进程会限速重试，新消息也可触发恢复。";
-            logError(`Failed to send WeChat ${context}: ${hint}`);
-            stateStore.appendLog(
-              formatWechatContextTokenStaleLogEntry({
-                context,
-                recipientId: senderId,
-                error: err,
-              }),
-            );
-            return false;
-          }
-
-          if (attempt < WECHAT_SEND_MAX_ATTEMPTS && isRetryableWechatSendError(err)) {
-            const delayMs = computeWechatSendRetryDelayMs(attempt);
-            logError(
-              `Failed to send WeChat ${context} (attempt ${attempt}). Retrying in ${formatDuration(delayMs)}. ${describeWechatTransportError(err)}`,
-            );
-            stateStore.appendLog(
-              formatWechatSendRetryLogEntry({
-                context,
-                recipientId: senderId,
-                attempt,
-                delayMs,
-                error: err,
-              }),
-            );
-            await delay(delayMs);
-            continue;
-          }
-
-          logError(`Failed to send WeChat ${context}: ${describeWechatTransportError(err)}`);
+    for (let attempt = 1; attempt <= WECHAT_SEND_MAX_ATTEMPTS; attempt += 1) {
+      try {
+        await transport.sendText(senderId, text);
+        return true;
+      } catch (err) {
+        if (isWechatContextTokenStaleError(err)) {
+          // Retain context; rejection may be temporary or refer to an older in-flight request.
+          const hint =
+            "微信暂时拒绝了这次发送，已保留上下文；守护进程会限速重试，新消息也可触发恢复。";
+          logError(`Failed to send WeChat ${context}: ${hint}`);
           stateStore.appendLog(
-            formatWechatSendFailureLogEntry({
+            formatWechatContextTokenStaleLogEntry({
               context,
               recipientId: senderId,
               error: err,
@@ -763,11 +738,51 @@ async function main(): Promise<void> {
           );
           return false;
         }
-      }
 
-      return false;
-    });
+        if (attempt < WECHAT_SEND_MAX_ATTEMPTS && isRetryableWechatSendError(err)) {
+          const delayMs = computeWechatSendRetryDelayMs(attempt);
+          logError(
+            `Failed to send WeChat ${context} (attempt ${attempt}). Retrying in ${formatDuration(delayMs)}. ${describeWechatTransportError(err)}`,
+          );
+          stateStore.appendLog(
+            formatWechatSendRetryLogEntry({
+              context,
+              recipientId: senderId,
+              attempt,
+              delayMs,
+              error: err,
+            }),
+          );
+          await delay(delayMs);
+          continue;
+        }
+
+        logError(`Failed to send WeChat ${context}: ${describeWechatTransportError(err)}`);
+        stateStore.appendLog(
+          formatWechatSendFailureLogEntry({
+            context,
+            recipientId: senderId,
+            error: err,
+          }),
+        );
+        return false;
+      }
+    }
+
+    return false;
   };
+
+  const queueWechatMessage = (
+    senderId: string,
+    text: string,
+    context: WechatSendContext = "message",
+  ) => queueWechatTextAction(() => sendWechatMessageNow(senderId, text, context));
+
+  const queueWechatTaskListMessage = (senderId: string, text: string) =>
+    queueWechatTextAction(() => sendWechatTextBatch(
+      splitTaskListMessages(text).flatMap((part) => splitWechatTextIntoChunks(part)),
+      (part) => sendWechatMessageNow(senderId, part),
+    ));
 
   const trackWechatForwardTask = (task: Promise<void>): void => {
     const tracked = task
@@ -963,6 +978,7 @@ async function main(): Promise<void> {
       outputBatcher,
       queueWechatAttachmentAction,
       queueWechatMessage,
+      onUserInputNotificationSent: () => { awaitingBareCodexTaskSelection = false; },
       trackWechatForwardTask,
       maybeDrainDeferredInboundMessages,
       getActiveTask: () => activeTask,
@@ -1099,6 +1115,7 @@ async function main(): Promise<void> {
             stateStore,
             adapter,
             queueWechatMessage,
+            queueWechatTaskListMessage,
             outputBatcher,
             rememberCodexTaskNumbers,
             formatTaskMessage,
@@ -1212,6 +1229,7 @@ function wireAdapterEvents(params: {
     text: string,
     context?: WechatSendContext,
   ) => Promise<boolean>;
+  onUserInputNotificationSent: () => void;
   trackWechatForwardTask: (task: Promise<void>) => void;
   maybeDrainDeferredInboundMessages: () => Promise<void>;
   getActiveTask: () => ActiveTask | null;
@@ -1253,11 +1271,9 @@ function wireAdapterEvents(params: {
     ) {
       stateStore.clearPendingConfirmation();
     }
-    if (
-      options.adapter !== "codex" &&
-      bridgeState.pendingUserInput &&
-      !adapterState.pendingUserInput
-    ) {
+    if (options.adapter !== "codex" && bridgeState.pendingUserInput &&
+        reconcilePendingUserInputs([bridgeState.pendingUserInput], adapterState,
+          adapter.getPendingTaskUserInput?.bind(adapter)).length === 0) {
       stateStore.clearPendingUserInput();
     }
     const authorizedUserId = stateStore.getState().authorizedUserId;
@@ -1400,7 +1416,7 @@ function wireAdapterEvents(params: {
           stateStore.appendLog(
             `User input requested: questions=${pending.questions.length}`,
           );
-          await queueWechatMessage(
+          const sent = await queueWechatMessage(
             authorizedUserId,
             formatTaskMessage(
               formatUserInputRequestMessage(pending, adapterState),
@@ -1408,6 +1424,7 @@ function wireAdapterEvents(params: {
             ),
             "user_input_required",
           );
+          if (sent) params.onUserInputNotificationSent();
         }));
         break;
       case "mirrored_user_input":
@@ -1612,6 +1629,7 @@ async function handleInboundMessage(params: {
     text: string,
     context?: WechatSendContext,
   ) => Promise<boolean>;
+  queueWechatTaskListMessage: (senderId: string, text: string) => Promise<number>;
   outputBatcher: OutputBatcher;
   rememberCodexTaskNumbers: (
     candidates: Awaited<ReturnType<BridgeAdapter["listResumeSessions"]>>,
@@ -1628,6 +1646,7 @@ async function handleInboundMessage(params: {
     stateStore,
     adapter,
     queueWechatMessage,
+    queueWechatTaskListMessage,
     outputBatcher,
     rememberCodexTaskNumbers,
     formatTaskMessage,
@@ -1662,7 +1681,13 @@ async function handleInboundMessage(params: {
     message = imageDraftResult.message;
   }
 
-  const parsedSystemCommand = parseWechatControlCommand(message.text, {
+  const questionReply = resolveWechatQuestionReply({
+    text: message.text, adapter: options.adapter, pending: state.pendingUserInput,
+    awaitingTaskSelection: getAwaitingBareCodexTaskSelection(),
+    hasPendingApproval: Boolean(state.pendingConfirmation),
+    hasAttachments: message.attachments.length > 0,
+  });
+  const parsedSystemCommand = questionReply ?? parseWechatControlCommand(message.text, {
     adapter: options.adapter,
     hasPendingConfirmation: Boolean(state.pendingConfirmation),
     hasPendingUserInput: Boolean(state.pendingUserInput),
@@ -1675,7 +1700,7 @@ async function handleInboundMessage(params: {
         text: message.text,
         awaitingSelection: getAwaitingBareCodexTaskSelection(),
         hasPendingConfirmation: Boolean(state.pendingConfirmation),
-        hasPendingUserInput: Boolean(state.pendingUserInput),
+        hasPendingUserInput: Boolean(state.pendingUserInput) && !getAwaitingBareCodexTaskSelection(),
       });
   let systemCommand: SystemCommand | null = parsedSystemCommand ?? (bareTaskTarget
     ? { type: "resume" as const, target: bareTaskTarget }
@@ -1738,7 +1763,7 @@ async function handleInboundMessage(params: {
         if (!systemCommand.target) {
           const pageCandidates = candidates.slice(pageStart, pageStart + pageSize);
           setAwaitingBareCodexTaskSelection(pageCandidates.length > 0);
-          await queueWechatMessage(
+          await queueWechatTaskListMessage(
             message.senderId,
             formatResumeSessionList({
               adapter: "codex",
@@ -1758,7 +1783,7 @@ async function handleInboundMessage(params: {
         const candidate = resolveResumeSessionCandidate(candidates, systemCommand.target);
         if (!candidate) {
           setAwaitingBareCodexTaskSelection(true);
-          await queueWechatMessage(
+          await queueWechatTaskListMessage(
             message.senderId,
             searchMatches.length > 1
               ? formatResumeSessionSearchResults({
@@ -2002,7 +2027,7 @@ async function handleInboundMessage(params: {
       }
 
       stateStore.clearPendingUserInput();
-      stateStore.appendLog(`User input answered: ${parsed.preview}`);
+      stateStore.appendLog(`User input answered: thread=${pending.threadId ?? "current"} questions=${pending.questions.length}`);
       await queueWechatMessage(
         message.senderId,
         formatTaskMessage("答案已提交，继续处理。", pending.threadId),

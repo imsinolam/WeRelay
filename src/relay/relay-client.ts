@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import {
+  WERELAY_RELAY_HEARTBEAT_PATH,
   WERELAY_RELAY_POLL_PATH,
   WERELAY_RELAY_PROTOCOL_VERSION,
   WERELAY_RELAY_RESPONSE_BODY_LIMIT,
@@ -28,6 +29,10 @@ export type StartWeRelayRelayClientOptions = {
   logger?: (message: string) => void;
   fetchImpl?: typeof fetch;
   retryDelayMs?: number;
+  localRequestTimeoutMs?: number;
+  remoteRequestTimeoutMs?: number;
+  pollRequestTimeoutMs?: number;
+  heartbeatIntervalMs?: number;
 };
 
 export type WeRelayRelayClientHandle = {
@@ -46,16 +51,19 @@ type JournalState = {
 
 function delay(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
-    if (signal.aborted) {
-      resolve();
-      return;
-    }
-    const timer = setTimeout(resolve, ms);
-    signal.addEventListener("abort", () => {
+    if (signal.aborted) { resolve(); return; }
+    const finish = (): void => {
       clearTimeout(timer);
+      signal.removeEventListener("abort", finish);
       resolve();
-    }, { once: true });
+    };
+    const timer = setTimeout(finish, ms);
+    signal.addEventListener("abort", finish, { once: true });
   });
+}
+
+function requestSignal(parent: AbortSignal, timeoutMs: number): AbortSignal {
+  return AbortSignal.any([parent, AbortSignal.timeout(Math.max(1, timeoutMs))]);
 }
 
 function isRelayCommand(value: unknown): value is WeRelayRelayCommand {
@@ -215,6 +223,8 @@ async function executeRelayCommand(
     localBaseUrl: string;
     localPrewarmToken?: string;
     fetchImpl: typeof fetch;
+    signal: AbortSignal;
+    timeoutMs: number;
   },
 ): Promise<WeRelayRelayCommandResponse> {
   let localUrl: URL;
@@ -252,12 +262,14 @@ async function executeRelayCommand(
     }
   }
 
+  const signal = requestSignal(options.signal, Math.min(options.timeoutMs, command.expiresAtMs - Date.now()));
   try {
     const response = await options.fetchImpl(localUrl, {
       method: command.request.method,
       headers,
       ...(body && command.request.method !== "GET" ? { body } : {}),
       redirect: "manual",
+      signal,
     });
     const responseBody = Buffer.from(await response.arrayBuffer());
     if (responseBody.length > WERELAY_RELAY_RESPONSE_BODY_LIMIT) {
@@ -273,10 +285,15 @@ async function executeRelayCommand(
         : {}),
     };
   } catch {
+    const timedOut = signal.aborted && !options.signal.aborted;
     return buildJsonErrorResponse(
       command.id,
-      502,
-      "电脑端移动服务暂时不可用，请稍后重试。",
+      timedOut ? 504 : 502,
+      timedOut
+        ? (command.request.method === "GET"
+          ? "电脑端读取超时，连接仍在保持，请稍后重试。"
+          : "电脑尚未确认这次操作的结果，请先查看任务状态，避免重复发送。")
+        : "电脑端移动服务暂时不可用，请稍后重试。",
     );
   }
 }
@@ -339,6 +356,8 @@ export function startWeRelayRelayClient(
           ? { localPrewarmToken: options.localPrewarmToken }
           : {}),
         fetchImpl,
+        signal: abortController.signal,
+        timeoutMs: options.localRequestTimeoutMs ?? 20_000,
       });
       if (command.request.method !== "GET") {
         journal.save(commandResponse);
@@ -349,7 +368,7 @@ export function startWeRelayRelayClient(
       deviceId,
       deviceToken,
       fetchImpl,
-      signal: abortController.signal,
+      signal: requestSignal(abortController.signal, options.remoteRequestTimeoutMs ?? 10_000),
     });
   };
 
@@ -375,7 +394,7 @@ export function startWeRelayRelayClient(
     inFlightCommands.add(tracked);
   };
 
-  const done = (async () => {
+  const pollDone = (async () => {
     let consecutiveFailures = 0;
     while (!abortController.signal.aborted) {
       try {
@@ -393,7 +412,7 @@ export function startWeRelayRelayClient(
               "x-werelay-device-id": deviceId,
             },
             body: "{}",
-            signal: abortController.signal,
+            signal: requestSignal(abortController.signal, options.pollRequestTimeoutMs ?? 35_000),
           },
         );
         if (pollResponse.status === 204) {
@@ -430,6 +449,38 @@ export function startWeRelayRelayClient(
       }
     }
   })();
+
+  // Online presence must not depend on an available business-request slot.
+  const heartbeatDone = (async () => {
+    let unavailable = false;
+    while (!abortController.signal.aborted) {
+      await delay(options.heartbeatIntervalMs ?? 15_000, abortController.signal);
+      if (abortController.signal.aborted) break;
+      try {
+        const response = await fetchImpl(`${relayUrl}${WERELAY_RELAY_HEARTBEAT_PATH}`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${deviceToken}`,
+            "content-type": "application/json",
+            "x-werelay-device-id": deviceId,
+          },
+          body: "{}",
+          signal: requestSignal(abortController.signal, options.remoteRequestTimeoutMs ?? 10_000),
+        });
+        // Older Relays do not expose this optional route. Their normal poll is
+        // still bounded by the local deadlines; no fallback may dequeue work.
+        if (response.status === 404) return;
+        if (!response.ok) throw new Error(`Relay 保活返回 ${response.status}`);
+        if (unavailable) logger("WeRelay 公网保活已恢复。");
+        unavailable = false;
+      } catch (error) {
+        if (abortController.signal.aborted) break;
+        if (!unavailable) logger(`WeRelay 公网保活异常：${error instanceof Error ? error.message : String(error)}`);
+        unavailable = true;
+      }
+    }
+  })();
+  const done = Promise.all([pollDone, heartbeatDone]).then(() => undefined);
 
   return {
     done,

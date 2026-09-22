@@ -1,9 +1,11 @@
+import { extractCodexCrossTaskMessage } from "./codex-cross-task-message.ts";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { spawn as spawnChild } from "node:child_process";
 import type { ChildProcess, ChildProcessWithoutNullStreams } from "node:child_process";
+import { Worker } from "node:worker_threads";
 import type {
   ApprovalRequest,
   BridgeMessageImage,
@@ -40,7 +42,7 @@ import {
   ensurePrivateDir,
   writePrivateFileAtomic,
 } from "../utils/private-files.ts";
-import { readFileTail, scanFileTail } from "../utils/file-tail.ts";
+import { scanFileTailReverse } from "../utils/file-tail.ts";
 import {
   CodexDesktopIpcClient,
   isCodexDesktopMainProcessRunning,
@@ -110,10 +112,47 @@ type CodexBunSqliteModule = {
   ) => CodexSqliteDatabase;
 };
 
+export type CodexStateDbRuntimeStatusSnapshot = {
+  filePath: string;
+  fileSize: number;
+  modifiedAtMs: number;
+  runtimeStatus: BridgeResumeSessionRuntimeStatus;
+};
+
 export type CodexStateDbSessionCatalog = {
   candidates: BridgeResumeSessionCandidate[];
   rolloutPathByThreadId: Map<string, string>;
+  runtimeStatusByThreadId: Map<string, CodexStateDbRuntimeStatusSnapshot>;
 };
+
+export type CodexStateDbSessionCatalogOptions = {
+  databasePath?: string;
+  catalogDatabasePath?: string;
+  limit?: number;
+  inferRuntimeStatuses?: boolean;
+};
+
+type CodexStateCatalogWorkerRequest = {
+  id: number;
+  options: CodexStateDbSessionCatalogOptions;
+};
+
+type CodexStateCatalogWorkerResponse =
+  | { id: number; ok: true; catalog: CodexStateDbSessionCatalog | null }
+  | { id: number; ok: false; error: string };
+
+const CODEX_STATE_CATALOG_WORKER_TIMEOUT_MS = 1_500;
+let codexStateCatalogWorker: Worker | null = null;
+let codexStateCatalogWorkerRequestId = 0;
+const codexStateCatalogWorkerPending = new Map<
+  number,
+  {
+    worker: Worker;
+    resolve: (catalog: CodexStateDbSessionCatalog | null) => void;
+    reject: (error: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+  }
+>();
 
 const CODEX_DESKTOP_RECONNECT_GRACE_MS = 3_000;
 const CODEX_DESKTOP_STARTUP_TIMEOUT_MS = 15_000;
@@ -898,7 +937,7 @@ function extractCodexRolloutVisibleMessage(
   }
   if (
     !line.includes(CODEX_ROLLOUT_RESPONSE_ITEM_MARKER) ||
-    !line.includes(CODEX_ROLLOUT_MESSAGE_MARKER)
+    (!line.includes(CODEX_ROLLOUT_MESSAGE_MARKER) && !line.includes("<codex_delegation>"))
   ) {
     return null;
   }
@@ -911,6 +950,10 @@ function extractCodexRolloutVisibleMessage(
       return null;
     }
     const payload = parsed.payload;
+    if (isRecord(payload)) {
+      const crossTask = extractCodexCrossTaskMessage(payload, parsed.timestamp);
+      if (crossTask) return crossTask;
+    }
     if (!isRecord(payload) || payload.type !== "message") {
       return null;
     }
@@ -1021,7 +1064,7 @@ export function readCodexSessionMessagePageFromRollout(
     : codexRolloutModelCacheEntry(filePath, stats);
   try {
     let endOffset = requestedEnd;
-    let rightFragment = Buffer.alloc(0);
+    let rightFragments: Buffer[] = [];
 
     while (endOffset > 0) {
       const startOffset = Math.max(
@@ -1040,33 +1083,24 @@ export function readCodexSessionMessagePageFromRollout(
         return null;
       }
       const chunk = buffer.subarray(0, bytesRead);
-      const data = rightFragment.length > 0
-        ? Buffer.concat([chunk, rightFragment])
-        : chunk;
-      const newlineOffsets: number[] = [];
-      for (let index = 0; index < data.length; index += 1) {
-        if (data[index] === 0x0a) {
-          newlineOffsets.push(index);
+      let segmentEnd = chunk.length;
+      while (segmentEnd >= 0) {
+        // Scan each new chunk only once. A large tool/image record can span
+        // hundreds of chunks; rescanning and copying its accumulated suffix
+        // on every read blocks the daemon (and its heartbeat) quadratically.
+        const newline = segmentEnd > 0 ? chunk.lastIndexOf(0x0a, segmentEnd - 1) : -1;
+        const segmentStart = newline + 1;
+        const fragment = chunk.subarray(segmentStart, segmentEnd);
+        if (newline < 0 && startOffset > 0) {
+          if (fragment.length) rightFragments.push(fragment);
+          break;
         }
-      }
-      const segmentStarts = [
-        0,
-        ...newlineOffsets.map((offset) => offset + 1),
-      ];
-      const segmentEnds = [...newlineOffsets, data.length];
-      const firstCompleteSegment = startOffset > 0 ? 1 : 0;
-
-      for (
-        let segmentIndex = segmentStarts.length - 1;
-        segmentIndex >= firstCompleteSegment;
-        segmentIndex -= 1
-      ) {
-        const segmentStart = segmentStarts[segmentIndex] ?? 0;
-        const segmentEnd = segmentEnds[segmentIndex] ?? segmentStart;
-        if (segmentEnd <= segmentStart) {
-          continue;
-        }
-        const line = data.subarray(segmentStart, segmentEnd);
+        const line = rightFragments.length > 0
+          ? Buffer.concat([fragment, ...rightFragments.reverse()])
+          : fragment;
+        rightFragments = [];
+        segmentEnd = newline;
+        if (line.length === 0) continue;
         const completedTurn = extractCodexCompletedTurnEvidence(line);
         if (completedTurn?.finalText) {
           completedTurnFinalTextById.set(
@@ -1100,14 +1134,6 @@ export function readCodexSessionMessagePageFromRollout(
         });
       }
 
-      if (startOffset > 0) {
-        const firstNewline = newlineOffsets[0];
-        rightFragment = firstNewline === undefined
-          ? data
-          : data.subarray(0, firstNewline);
-      } else {
-        rightFragment = Buffer.alloc(0);
-      }
       endOffset = startOffset;
 
       if (found.length > limit) {
@@ -2186,37 +2212,19 @@ function mergeCodexSessionProgress(
 export function readCodexSessionProgressFromRolloutTail(
   filePath: string,
 ): BridgeSessionProgressItem[] {
-  const lines = readFileTail(filePath, {
-    scanLimitBytes: CODEX_SESSION_PROGRESS_SCAN_LIMIT_BYTES,
-    chunkBytes: CODEX_DESKTOP_RUNTIME_STATUS_SCAN_CHUNK_BYTES,
-  });
-  if (!lines) {
-    return [];
-  }
-
-  // The primitive emits lines in file order (oldest first); parse from the
-  // newest line backward and stop at the first record of a previous turn,
-  // mirroring the original reverse-scan semantics.
   const records: CodexRolloutProgressRecord[] = [];
   let latestTurnId: string | undefined;
-  let reachedPreviousTurn = false;
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    if (reachedPreviousTurn) break;
-    const record = parseCodexRolloutProgressRecord(lines[index] ?? "");
-    if (!record?.turnId) {
-      continue;
-    }
-    if (!latestTurnId) {
-      latestTurnId = record.turnId;
-    } else if (record.turnId !== latestTurnId) {
-      reachedPreviousTurn = records.length > 0;
-      if (reachedPreviousTurn) {
-        break;
-      }
-      continue;
-    }
+  const count = scanFileTailReverse(filePath, {
+    scanLimitBytes: CODEX_SESSION_PROGRESS_SCAN_LIMIT_BYTES,
+    chunkBytes: CODEX_DESKTOP_RUNTIME_STATUS_SCAN_CHUNK_BYTES,
+  }, (line) => {
+    const record = parseCodexRolloutProgressRecord(line);
+    if (!record?.turnId) return;
+    if (!latestTurnId) latestTurnId = record.turnId;
+    else if (record.turnId !== latestTurnId) return false;
     records.push(record);
-  }
+  });
+  if (count === null) return [];
   records.reverse();
   return codexRolloutProgressFromRecords(records);
 }
@@ -2229,7 +2237,7 @@ export function mergeCodexSessionMessages(
   const indexById = new Map<string, number>();
   const indexBySemanticKey = new Map<string, number>();
   const semanticKey = (message: BridgeSessionMessage): string =>
-    `${message.turnId ?? ""}:${message.role}:${message.phase ?? ""}:${message.text}`;
+    `${message.turnId ?? ""}:${message.role}:${message.sourceTask?.adapter ?? ""}:${message.sourceTask?.sessionId ?? ""}:${message.phase ?? ""}:${message.text}`;
 
   const rebuildIndexes = (): void => {
     indexById.clear();
@@ -2366,17 +2374,14 @@ export function readCodexSessionRunSummaryFromRolloutTail(
   nowMs = Date.now(),
 ): BridgeSessionRunSummary | null {
   let summary: BridgeSessionRunSummary | null = null;
-  // Scan from the newest line backward; the first parsable summary wins.
-  // The primitive emits lines in file order, so iterate and keep the
-  // newest parse result (later lines overwrite earlier ones).
-  scanFileTail(filePath, {
+  scanFileTailReverse(filePath, {
     scanLimitBytes: CODEX_SESSION_RUN_SUMMARY_SCAN_LIMIT_BYTES,
     chunkBytes: CODEX_DESKTOP_RUNTIME_STATUS_SCAN_CHUNK_BYTES,
   }, (line) => {
-    const parsed = parseCodexSessionRunSummary(line.text, nowMs);
-    if (parsed) {
-      summary = parsed;
-    }
+    const parsed = parseCodexSessionRunSummary(line, nowMs);
+    if (!parsed) return;
+    summary = parsed;
+    return false;
   });
   return summary;
 }
@@ -2655,12 +2660,8 @@ async function readCodexLocalCatalogTitles(
   }
 }
 
-export async function readCodexStateDbSessionCatalog(
-  options: {
-    databasePath?: string;
-    catalogDatabasePath?: string;
-    limit?: number;
-  } = {},
+export async function readCodexStateDbSessionCatalogInProcess(
+  options: CodexStateDbSessionCatalogOptions = {},
 ): Promise<CodexStateDbSessionCatalog | null> {
   const databasePath = options.databasePath ?? codexStateDatabasePath();
   const catalogDatabasePath =
@@ -2746,12 +2747,160 @@ export async function readCodexStateDbSessionCatalog(
       });
       if (rolloutPath) rolloutPathByThreadId.set(threadId, rolloutPath);
     }
-    return { candidates, rolloutPathByThreadId };
+    const runtimeStatusByThreadId = new Map<
+      string,
+      CodexStateDbRuntimeStatusSnapshot
+    >();
+    if (options.inferRuntimeStatuses) {
+      for (const candidate of candidates.slice(
+        0,
+        CODEX_DESKTOP_RUNTIME_STATUS_MAX_CANDIDATES,
+      )) {
+        const threadId = candidate.threadId ?? candidate.sessionId;
+        const rolloutPath = rolloutPathByThreadId.get(threadId);
+        if (!rolloutPath) {
+          continue;
+        }
+        const inferred = readCodexDesktopRuntimeStatusFromSessionTail(rolloutPath);
+        if (!inferred?.runtimeStatus) {
+          continue;
+        }
+        const snapshot = {
+          filePath: rolloutPath,
+          fileSize: inferred.fileSize,
+          modifiedAtMs: inferred.modifiedAtMs,
+          runtimeStatus: inferred.runtimeStatus,
+        };
+        runtimeStatusByThreadId.set(threadId, snapshot);
+        candidate.runtimeStatus = inferred.runtimeStatus;
+      }
+    }
+    return { candidates, rolloutPathByThreadId, runtimeStatusByThreadId };
   } catch {
     return null;
   } finally {
     database.close();
   }
+}
+
+function rejectCodexStateCatalogWorkerPending(
+  worker: Worker,
+  error: Error,
+): void {
+  for (const [id, pending] of codexStateCatalogWorkerPending) {
+    if (pending.worker !== worker) {
+      continue;
+    }
+    codexStateCatalogWorkerPending.delete(id);
+    clearTimeout(pending.timer);
+    pending.reject(error);
+  }
+}
+
+function resetCodexStateCatalogWorker(
+  worker: Worker,
+  error: Error,
+): void {
+  if (codexStateCatalogWorker === worker) codexStateCatalogWorker = null;
+  rejectCodexStateCatalogWorkerPending(worker, error);
+}
+
+function getCodexStateCatalogWorker(): Worker {
+  if (codexStateCatalogWorker) {
+    return codexStateCatalogWorker;
+  }
+  const extension = import.meta.url.endsWith(".ts") ? ".ts" : ".js";
+  const worker = new Worker(
+    new URL(`./codex-state-catalog-worker${extension}`, import.meta.url),
+    { execArgv: process.execArgv.filter((arg, index, args) =>
+      !/^--input-type(?:=|$)/u.test(arg) && args[index - 1] !== "--input-type") },
+  );
+  worker.on("message", (response: CodexStateCatalogWorkerResponse) => {
+    const pending = codexStateCatalogWorkerPending.get(response.id);
+    if (!pending || pending.worker !== worker) {
+      return;
+    }
+    codexStateCatalogWorkerPending.delete(response.id);
+    if (![...codexStateCatalogWorkerPending.values()].some((item) => item.worker === worker)) worker.unref();
+    clearTimeout(pending.timer);
+    if (response.ok) {
+      pending.resolve(response.catalog);
+    } else {
+      pending.reject(new Error(response.error));
+    }
+  });
+  worker.on("error", (error) => {
+    resetCodexStateCatalogWorker(worker, error);
+  });
+  worker.on("exit", (code) => {
+    resetCodexStateCatalogWorker(
+      worker,
+      new Error(`Codex 任务目录读取线程已退出（代码 ${code}）。`),
+    );
+  });
+  codexStateCatalogWorker = worker;
+  // Adding a message listener refs Node's port; unref only after listeners exist.
+  worker.unref();
+  return worker;
+}
+
+export function shouldReadCodexStateCatalogInProcess(
+  platform = process.platform,
+  bunVersion: string | null | undefined = process.versions.bun,
+): boolean {
+  return platform === "win32" && typeof bunVersion === "string" && bunVersion.length > 0;
+}
+
+export async function readCodexStateDbSessionCatalog(
+  options: CodexStateDbSessionCatalogOptions = {},
+): Promise<CodexStateDbSessionCatalog | null> {
+  const resolvedOptions: CodexStateDbSessionCatalogOptions = {
+    ...options,
+    databasePath: options.databasePath ?? codexStateDatabasePath(),
+    catalogDatabasePath:
+      options.catalogDatabasePath ?? codexLocalCatalogDatabasePath(),
+  };
+  // Bun workers can stall while reusing bun:sqlite on Windows. Official packaged
+  // runtimes use Node and stay off the daemon event loop; keep source-mode Bun
+  // usable by falling back to the already bounded in-process reader there.
+  if (shouldReadCodexStateCatalogInProcess()) {
+    return await readCodexStateDbSessionCatalogInProcess(resolvedOptions);
+  }
+  const worker = getCodexStateCatalogWorker();
+  const id = ++codexStateCatalogWorkerRequestId;
+  return await new Promise<CodexStateDbSessionCatalog | null>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      const pending = codexStateCatalogWorkerPending.get(id);
+      if (!pending) {
+        return;
+      }
+      const timeoutError = new Error("Codex 任务目录读取超时。");
+      if (codexStateCatalogWorker === worker) {
+        codexStateCatalogWorker = null;
+        rejectCodexStateCatalogWorkerPending(worker, timeoutError);
+        void worker.terminate();
+        return;
+      }
+      codexStateCatalogWorkerPending.delete(id);
+      clearTimeout(pending.timer);
+      pending.reject(timeoutError);
+    }, CODEX_STATE_CATALOG_WORKER_TIMEOUT_MS);
+    worker.ref();
+    codexStateCatalogWorkerPending.set(id, {
+      worker,
+      resolve,
+      reject,
+      timer,
+    });
+    try {
+      worker.postMessage({ id, options: resolvedOptions } satisfies CodexStateCatalogWorkerRequest);
+    } catch (error) {
+      clearTimeout(timer);
+      codexStateCatalogWorkerPending.delete(id);
+      if (![...codexStateCatalogWorkerPending.values()].some((item) => item.worker === worker)) worker.unref();
+      reject(error instanceof Error ? error : new Error(String(error)));
+    }
+  });
 }
 
 export function mapCodexDesktopThreadListResponse(
@@ -3847,6 +3996,7 @@ export class CodexPtyAdapter extends AbstractPtyAdapter {
 
   private overlayPersistedDesktopRuntimeStatuses(
     candidates: BridgeResumeSessionCandidate[],
+    inferredStatuses?: ReadonlyMap<string, CodexStateDbRuntimeStatusSnapshot>,
   ): void {
     const candidatesToInspect = candidates
       .filter(
@@ -3870,6 +4020,14 @@ export class CodexPtyAdapter extends AbstractPtyAdapter {
     const unresolvedThreadIds: string[] = [];
     for (const candidate of candidatesToInspect) {
       const threadId = candidate.threadId ?? candidate.sessionId;
+      const inferred = inferredStatuses?.get(threadId);
+      if (inferred) {
+        sessionFilesByThreadId.set(threadId, inferred);
+        continue;
+      }
+      if (inferredStatuses) {
+        continue;
+      }
       const filePath = this.desktopThreadSessionFilePathById.get(threadId);
       if (!filePath) {
         unresolvedThreadIds.push(threadId);
@@ -3886,9 +4044,11 @@ export class CodexPtyAdapter extends AbstractPtyAdapter {
         unresolvedThreadIds.push(threadId);
       }
     }
-    for (const [threadId, sessionFile] of
-      findCodexDesktopSessionFilesByThreadId(unresolvedThreadIds)) {
-      sessionFilesByThreadId.set(threadId, sessionFile);
+    if (!inferredStatuses) {
+      for (const [threadId, sessionFile] of
+        findCodexDesktopSessionFilesByThreadId(unresolvedThreadIds)) {
+        sessionFilesByThreadId.set(threadId, sessionFile);
+      }
     }
     const now = Date.now();
 
@@ -3949,9 +4109,8 @@ export class CodexPtyAdapter extends AbstractPtyAdapter {
         continue;
       }
 
-      const inferred = readCodexDesktopRuntimeStatusFromSessionTail(
-        sessionFile.filePath,
-      );
+      const inferred = inferredStatuses?.get(threadId) ??
+        readCodexDesktopRuntimeStatusFromSessionTail(sessionFile.filePath);
       if (!inferred?.runtimeStatus) {
         continue;
       }
@@ -3979,11 +4138,17 @@ export class CodexPtyAdapter extends AbstractPtyAdapter {
 
   override async listResumeSessions(limit = 10): Promise<BridgeResumeSessionCandidate[]> {
     try {
-      const stateCatalog = await readCodexStateDbSessionCatalog({ limit });
+      const stateCatalog = await readCodexStateDbSessionCatalog({
+        limit,
+        inferRuntimeStatuses: true,
+      });
       let candidates: BridgeResumeSessionCandidate[];
+      let inferredRuntimeStatuses:
+        ReadonlyMap<string, CodexStateDbRuntimeStatusSnapshot> | undefined;
       const databaseProjectIds = new Map<string, string>();
       if (stateCatalog) {
         candidates = stateCatalog.candidates;
+        inferredRuntimeStatuses = stateCatalog.runtimeStatusByThreadId;
         for (const candidate of candidates) {
           if (candidate.projectId) {
             databaseProjectIds.set(candidate.sessionId, candidate.projectId);
@@ -4024,7 +4189,10 @@ export class CodexPtyAdapter extends AbstractPtyAdapter {
           candidate.runtimeStatus = this.mapDesktopConversationRuntimeStatus(desktopState);
         }
       }
-      this.overlayPersistedDesktopRuntimeStatuses(candidates);
+      this.overlayPersistedDesktopRuntimeStatuses(
+        candidates,
+        inferredRuntimeStatuses,
+      );
       for (const candidate of candidates) {
         if (candidate.runtimeStatus) {
           this.desktopListedRuntimeStatusByThreadId.set(
@@ -4683,6 +4851,30 @@ export class CodexPtyAdapter extends AbstractPtyAdapter {
           extractCodexDesktopThreadMessages(liveState, trackedTurn?.turnId),
         )
       : persisted;
+  }
+
+  async getNewSessionModelState(): Promise<BridgeSessionModelState> {
+    if (!this.usesDesktopTransport()) {
+      return { options: [], canChange: false, unavailableReason: "当前 Codex 连接不支持预选新任务模型。" };
+    }
+    // Catalog only: do not create/follow/read a desktop task to configure a draft.
+    const catalog = await this.sendRpcRequest("model/list", { limit: 100, includeHidden: false });
+    const options = mapCodexModelListResponse(catalog).map(option => ({
+      ...option, reasoningEffortOptions: option.reasoningEffortOptions ?? [],
+    }));
+    const defaultRecord = isRecord(catalog) && Array.isArray(catalog.data)
+      ? catalog.data.find(candidate => isRecord(candidate) && candidate.isDefault === true) : null;
+    const defaultId = isRecord(defaultRecord)
+      ? normalizeCodexModelName(defaultRecord.model) ?? normalizeCodexModelName(defaultRecord.id) : undefined;
+    const defaultOption = options.find(option => option.id === defaultId);
+    return {
+      options, canChange: options.length > 0,
+      ...(defaultOption ? { currentModel: defaultOption.id,
+        currentReasoningEffort: defaultOption.defaultReasoningEffort,
+        reasoningEffortOptions: defaultOption.reasoningEffortOptions,
+        canChangeReasoningEffort: defaultOption.reasoningEffortOptions.length > 0 } : {}),
+      ...(options.length ? {} : { unavailableReason: "暂时无法读取 Codex 可用模型，请重试。" }),
+    };
   }
 
   async getSessionModelState(threadId: string): Promise<BridgeSessionModelState> {

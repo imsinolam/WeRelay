@@ -12,7 +12,7 @@ export const DEEPSEEK_DESKTOP_APP_PATH = "/Applications/DSH Desktop.app";
 export const DEEPSEEK_DESKTOP_BUNDLE_ID = "ai.deepseek.dsh.desktop";
 const DEEPSEEK_DESKTOP_SETTINGS_PATH = path.join(".dsh", "settings.yaml");
 const DEFAULT_QUIT_TIMEOUT_MS = 10_000;
-const DEEPSEEK_HARNESS_URL_ENV = "DESKRELAY_DEEPSEEK_HARNESS_URL";
+const DEEPSEEK_HARNESS_URL_ENV = "WERELAY_DEEPSEEK_HARNESS_URL";
 
 type DeepSeekDesktopRecoveryDependencies = {
   platform: NodeJS.Platform;
@@ -181,22 +181,37 @@ function defaultRecoveryDependencies(): DeepSeekDesktopRecoveryDependencies {
   };
 }
 
+/**
+ * Whether an error justifies changing DSH Desktop settings and restarting it.
+ *
+ * Only the protected-host case qualifies: DSH Desktop answers 403 when its
+ * loopback browser access is disabled, and enabling `openBrowser` needs a
+ * restart to take effect.
+ *
+ * Transient transport errors (a refused connection, a timeout, a socket that
+ * closed because the Desktop was restarting) must NOT be treated as
+ * recoverable. Restarting the user's Desktop because one request raced a
+ * restart turns a brief blip into a long outage, and the restart outlives the
+ * caller's recovery window so the switch fails anyway. Those cases belong to
+ * plain retrying.
+ */
 function isRecoverableDeepSeekDesktopError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return /HTTP\s*403|fetch failed|ECONNREFUSED|ETIMEDOUT|timed?\s*out|timeout|WebSocket.*(?:失败|closed|error)/iu.test(
-    message,
-  );
+  return /HTTP\s*403|unauthorized|\bforbidden\b/iu.test(message);
 }
 
 export async function recoverDeepSeekDesktopHarnessAccess(params: {
   error: unknown;
   allowDesktopApplicationLaunch: boolean;
+  /** Separate consent for settings repair; switching terminals is not restart consent. */
+  allowDesktopApplicationRestart?: boolean;
   dependencies?: DeepSeekDesktopRecoveryDependencies;
 }): Promise<boolean> {
-  if (!params.allowDesktopApplicationLaunch || !isRecoverableDeepSeekDesktopError(params.error)) {
+  if (!params.allowDesktopApplicationLaunch) {
     return false;
   }
-  if (process.env[DEEPSEEK_HARNESS_URL_ENV]?.trim()) {
+  if (process.env[DEEPSEEK_HARNESS_URL_ENV]?.trim() ||
+      process.env.DESKRELAY_DEEPSEEK_HARNESS_URL?.trim()) {
     return false;
   }
   const dependencies = params.dependencies ?? defaultRecoveryDependencies();
@@ -204,15 +219,22 @@ export async function recoverDeepSeekDesktopHarnessAccess(params: {
     return false;
   }
 
-  const current = dependencies.readSettings();
-  const updated = enableDeepSeekDesktopLoopbackAccessInYaml(current);
-  if (updated.changed) {
-    dependencies.writeSettings(updated.text);
-  }
-  if (await dependencies.isRunning()) {
-    await dependencies.restart();
-  } else {
+  const protectedHost = isRecoverableDeepSeekDesktopError(params.error);
+  const message = params.error instanceof Error ? params.error.message : String(params.error);
+  const unavailableHost = /ECONNREFUSED|fetch failed|connection refused|timed?\s*out|timeout|连接失败/iu.test(message);
+  if (!await dependencies.isRunning()) {
+    if (!protectedHost && !unavailableHost) return false;
+    // Starting a closed application does not require rewriting its settings.
     await dependencies.launch();
+    return true;
   }
+
+  // A stale cookie can also produce 403. Never stop a running owner merely
+  // because a user selected its terminal; retry authentication in the client.
+  if (!params.allowDesktopApplicationRestart || !protectedHost) return false;
+  const updated = enableDeepSeekDesktopLoopbackAccessInYaml(dependencies.readSettings());
+  if (!updated.changed) return false;
+  dependencies.writeSettings(updated.text);
+  await dependencies.restart();
   return true;
 }

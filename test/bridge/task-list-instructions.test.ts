@@ -3,7 +3,7 @@ import { formatResumeSessionList } from "../../src/bridge/bridge-utils.ts";
 import { formatGlobalTaskList, buildGlobalTaskSnapshot } from "../../src/daemon/global-task-index.ts";
 
 const footer = `[3] 进入任务 3
-[3：内容] 进入任务 3 并发消息
+[3：内容] 给任务3发消息
 
 [任务：关键词] 搜索任务
 [下一页] 再看 10 条，可带数量如[下一页20]

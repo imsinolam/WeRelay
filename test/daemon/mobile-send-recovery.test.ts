@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import { describe, expect, test } from "bun:test";
+import { WeRelayDaemon } from "../../src/daemon/werelay-daemon.ts";
 import { CODEX_MOBILE_JS } from "../../src/daemon/codex-mobile-web.ts";
 
 function fn(name: string): string {
@@ -27,11 +28,12 @@ describe("durable mobile send recovery", () => {
     expect(CODEX_MOBILE_JS).toContain('await restorePendingMessageImages(pending)');
     expect(CODEX_MOBILE_JS).toContain('await persistPendingMessageImages(pending)');
   });
-  test("temporary tasks never request model or permission endpoints", () => {
-    for (const name of ["loadCurrentTaskModel", "loadCurrentTaskPermission"]) {
-      const start = CODEX_MOBILE_JS.indexOf("async function " + name);
-      expect(CODEX_MOBILE_JS.slice(start, start + 280)).toContain("taskNeedsCreation(currentTask())");
-    }
+  test("temporary tasks read only the draft catalog and never existing-task permissions", () => {
+    const model = CODEX_MOBILE_JS.slice(CODEX_MOBILE_JS.indexOf("async function loadCurrentTaskModel"), CODEX_MOBILE_JS.indexOf("async function loadCurrentTaskPermission"));
+    expect(model).toContain('draft ? "/api/new-task/model"');
+    const permission = CODEX_MOBILE_JS.slice(CODEX_MOBILE_JS.indexOf("async function loadCurrentTaskPermission"), CODEX_MOBILE_JS.indexOf("async function selectCurrentTaskPermission"));
+    expect(permission.indexOf("taskNeedsCreation(currentTask())")).toBeLessThan(permission.indexOf("await api("));
+    expect(permission.slice(0,permission.indexOf("await api("))).toContain("return null;");
   });
 });
 
@@ -91,18 +93,14 @@ test("server-acknowledged permanent failures never become browser resend loops",
 
 
 test("runtime question recovery retains one identity across read and answer", () => {
-  const source = fs.readFileSync(new URL("../../src/daemon/werelay-daemon.ts", import.meta.url), "utf8");
-  const start = source.indexOf("  private getMobilePendingQuestion(");
-  const end = source.indexOf("\n  private mobileQuestionId(", start);
-  let recovered = 0;
-  const functionSource = source.slice(source.indexOf("    const state =", start), source.lastIndexOf("  }", end));
-  const read = new Function("slot", "threadId", "toPendingUserInput", functionSource);
+  const daemon = Object.create(WeRelayDaemon.prototype) as any;
   const runtimeRequest = {summary:"选择方案", questions:[{id:"q", question:"选哪个？"}]};
   const slot = {pendingUserInputs: [], runtime:{getState: () => ({sharedThreadId:"t1", pendingUserInput: runtimeRequest})}};
-  const convert = (value: any) => ({...value, createdAt: String(++recovered)});
-  const first = read(slot, "t1", convert);
-  const second = read(slot, "t1", convert);
+  const first = daemon.getMobilePendingQuestion(slot, "t1");
+  const second = daemon.getMobilePendingQuestion(slot, "t1");
   expect(second).toBe(first);
-  expect(recovered).toBe(1);
-  expect(read(slot, "other-task", convert)).toBe(null);
+  expect(slot.pendingUserInputs).toHaveLength(1);
+  expect(first.createdAt).toBeTruthy();
+  expect(daemon.mobileQuestionId(second)).toBe(daemon.mobileQuestionId(first));
+  expect(daemon.getMobilePendingQuestion(slot, "other-task")).toBe(null);
 });

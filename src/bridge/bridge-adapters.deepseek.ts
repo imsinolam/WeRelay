@@ -23,17 +23,50 @@ import type {
 } from "./bridge-types.ts";
 import type { AdapterOptions, EventSink } from "./bridge-adapters.shared.ts";
 import { nowIso, truncatePreview } from "./bridge-utils.ts";
+import { DeepSeekHarnessRemoteMux } from "./deepseek-harness-remote.ts";
 import { recoverDeepSeekDesktopHarnessAccess } from "./deepseek-desktop-lifecycle.ts";
+import {
+  classifyDeepSeekHarnessProbe,
+  deepSeekHarnessEndpoint,
+  type DeepSeekHarnessCapability,
+  resolveDeepSeekHarnessCookieHeader,
+  typertSessionAddress,
+  wrapTypertPayload,
+  type DeepSeekHarnessDialect,
+} from "./deepseek-harness-protocol.ts";
 
 const DEFAULT_DEEPSEEK_HARNESS_URL = "http://127.0.0.1:3080";
+/**
+ * DSH Desktop's documented loopback web port (`DESKTOP_DEFAULT_WEB_PORT`).
+ * A Desktop process also owns helper IPC sockets, so discovery prefers this
+ * port over whichever listener `lsof` happens to report first.
+ */
+const DESKTOP_DEFAULT_WEB_PORT = 43120;
+const DESKTOP_APP_PATH = "/Applications/DSH Desktop.app";
 const DEEPSEEK_HARNESS_URL_ENV = "WERELAY_DEEPSEEK_HARNESS_URL";
 const DEEPSEEK_HARNESS_HTTP_TIMEOUT_MS = 10_000;
 const DEEPSEEK_HARNESS_RECONNECT_MS = 1_000;
 const DEEPSEEK_HARNESS_RECOVERY_INTERVAL_MS = 2_000;
 const DEEPSEEK_HARNESS_RECOVERY_MAX_MS = 30 * 60_000;
 const DEEPSEEK_HARNESS_DISCONNECT_RENOTIFY_MS = 10 * 60_000;
+const DEEPSEEK_HARNESS_DISCONNECT_NOTICE_DEBOUNCE_MS = 5_000;
+const DEEPSEEK_HARNESS_RECOVERY_STABLE_MS = 5_000;
 const DEEPSEEK_HISTORY_LIMIT = 100;
 const DEEPSEEK_DESKTOP_RECOVERY_TIMEOUT_MS = 20_000;
+/**
+ * Bounded in-place retry for transient connect failures (a Desktop restart, a
+ * refused connection). Kept short and side-effect free: it must never restart
+ * the Desktop, and it must not make a user-visible switch hang.
+ */
+const DEEPSEEK_TRANSIENT_CONNECT_RETRY_ATTEMPTS = 4;
+const DEEPSEEK_TRANSIENT_CONNECT_RETRY_INTERVAL_MS = 1_500;
+/**
+ * Discovery attempts before accepting the documented default endpoint. A
+ * Desktop that is starting up briefly has no listener; treating that as "use
+ * the default port" pins a dead address for the client's whole lifetime.
+ */
+const DEEPSEEK_ENDPOINT_DISCOVERY_ATTEMPTS = 5;
+const DEEPSEEK_ENDPOINT_DISCOVERY_INTERVAL_MS = 400;
 const DEEPSEEK_DESKTOP_RECOVERY_POLL_MS = 250;
 
 type UnknownRecord = Record<string, unknown>;
@@ -79,7 +112,9 @@ export type DeepSeekHarnessModelSelection = {
 };
 
 export type DeepSeekHarnessModelState = {
-  current: DeepSeekHarnessModelSelection;
+  // 部分 Harness 会话（例如尚未选择模型，或目录只返回 provider 列表时）
+  // 不会带回 current；读取方必须自行兜底，不能假定它一定存在。
+  current?: DeepSeekHarnessModelSelection;
   routable: boolean;
   groups: Array<{
     id: string;
@@ -108,6 +143,7 @@ type DeepSeekHarnessImageMediaType = Extract<
 >["mediaType"];
 
 export type DeepSeekHarnessMuxFrame =
+  | { type: "stream/ready" }
   | {
       type: "session/event";
       sessionId: string;
@@ -260,6 +296,40 @@ type PendingHarnessQuestion = {
 
 type HarnessTurnOrigin = "wechat" | "local";
 
+/**
+ * Whether a connect failure is a transient transport problem worth retrying.
+ *
+ * Node surfaces these as `fetch failed` with the real reason in `cause`, so the
+ * whole chain is inspected. Semantic failures (a missing session, an invalid
+ * argument) are deliberately excluded: retrying them only delays the error.
+ */
+function isTransientDeepSeekConnectError(error: unknown): boolean {
+  const seen: string[] = [];
+  let current: unknown = error;
+  for (let depth = 0; depth < 4 && current instanceof Error; depth += 1) {
+    const code = (current as { code?: unknown }).code;
+    seen.push(`${current.message}${typeof code === "string" ? ` ${code}` : ""}`);
+    current = (current as { cause?: unknown }).cause;
+  }
+  const text = seen.join(" ");
+  return /fetch failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EPIPE|socket hang up|timed?\s*out|timeout|WebSocket.*(?:失败|closed|error)|aborted/iu.test(
+    text,
+  );
+}
+
+/** Summarize a failed Harness connection for logs: endpoint plus cause chain. */
+function describeDeepSeekConnectFailure(baseUrl: string, error: unknown): string {
+  const parts: string[] = [];
+  let current: unknown = error;
+  for (let depth = 0; depth < 4 && current instanceof Error; depth += 1) {
+    const code = (current as { code?: unknown }).code;
+    parts.push(`${current.name}: ${current.message}${typeof code === "string" ? ` [${code}]` : ""}`);
+    current = (current as { cause?: unknown }).cause;
+  }
+  const detail = parts.join(" <- ");
+  return ` [endpoint=${baseUrl || "(unresolved)"}${detail ? `; ${detail}` : ""}]`;
+}
+
 function isRecord(value: unknown): value is UnknownRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -347,7 +417,27 @@ type DeepSeekHarnessEndpointDiscovery = {
   platform?: NodeJS.Platform;
   readProcessList?: () => string;
   readListeners?: (pid: number) => string;
+  readPortListeners?: () => string;
+  /** Override for tests: whether the DSH Desktop bundle is installed. */
+  appInstalled?: () => boolean;
 };
+
+/** List every loopback TCP listener with its owning process name. */
+function readDeepSeekDesktopPortListeners(): string {
+  try {
+    return execFileSync(
+      "/usr/sbin/lsof",
+      ["-nP", "-iTCP", "-sTCP:LISTEN"],
+      {
+        encoding: "utf8",
+        timeout: 2_000,
+        stdio: ["ignore", "pipe", "ignore"],
+      },
+    );
+  } catch {
+    return "";
+  }
+}
 
 function readDeepSeekDesktopProcessList(): string {
   try {
@@ -384,28 +474,80 @@ export function discoverDeepSeekDesktopHarnessBaseUrl(
     return null;
   }
   const processList = (discovery.readProcessList ?? readDeepSeekDesktopProcessList)();
+  // DSH Desktop 2.0.9 serves its loopback API from a Helper child process, so
+  // discovery must accept both the main executable and its Helper, and read
+  // listeners by port rather than assuming the parent owns the socket.
   const desktopPids = processList.split(/\r?\n/).flatMap((line) => {
     const match = line.match(/^\s*(\d+)\s+(.+)$/);
     if (!match?.[1] || !match[2]) return [];
-    return match[2].trim() ===
-        "/Applications/DSH Desktop.app/Contents/MacOS/DSH Desktop"
-      ? [Number(match[1])]
-      : [];
+    const command = match[2].trim();
+    const isDesktop = command ===
+      "/Applications/DSH Desktop.app/Contents/MacOS/DSH Desktop" ||
+      command.startsWith(
+        "/Applications/DSH Desktop.app/Contents/Frameworks/DSH Desktop Helper.app/Contents/MacOS/",
+      );
+    return isDesktop ? [Number(match[1])] : [];
   }).filter((pid) => Number.isSafeInteger(pid) && pid > 0);
   const readListeners = discovery.readListeners ?? readDeepSeekDesktopListeners;
+  const readPortListeners = discovery.readPortListeners ?? readDeepSeekDesktopPortListeners;
+  const ownedPorts: number[] = [];
   for (const pid of desktopPids) {
     const listenerOutput = readListeners(pid);
-    const match = listenerOutput.match(
-      /^n(?:127(?:\.\d{1,3}){3}|\[?::1\]?):([1-9]\d{0,4})$/m,
-    );
-    const port = match?.[1] ? Number(match[1]) : 0;
-    if (port > 0 && port <= 65_535) {
-      return `http://127.0.0.1:${port}`;
+    for (const line of listenerOutput.split(/\r?\n/)) {
+      const match = line.match(/^n(?:127(?:\.\d{1,3}){3}|\[?::1\]?):([1-9]\d{0,4})$/u);
+      const port = match?.[1] ? Number(match[1]) : 0;
+      if (port > 0 && port <= 65_535) ownedPorts.push(port);
     }
+  }
+  // A DSH Desktop process owns several loopback sockets (helper IPC, caches),
+  // so prefer its documented web port before accepting any other listener.
+  if (ownedPorts.includes(DESKTOP_DEFAULT_WEB_PORT)) {
+    return `http://127.0.0.1:${DESKTOP_DEFAULT_WEB_PORT}`;
+  }
+  if (ownedPorts.length > 0) {
+    return `http://127.0.0.1:${ownedPorts[0]}`;
+  }
+  // Only scan system listeners when a Desktop process was actually found;
+  // otherwise the caller must fall through to the `dsh web` default.
+  if (desktopPids.length === 0) {
+    return null;
+  }
+  // Fall back to scanning loopback listeners for the DSH Desktop process
+  // names, which also covers Helper-owned sockets that `lsof -p` misses.
+  // `lsof` may wrap a long record across lines, so track the owning command
+  // and match its loopback port on whichever line carries it.
+  const portOutput = readPortListeners();
+  let scanningDshRecord = false;
+  const fallbackPorts: number[] = [];
+  for (const line of portOutput.split(/\r?\n/)) {
+    if (/^\S/u.test(line)) {
+      scanningDshRecord = /^DSH\\x20De\b|^DSH\s*Desktop\b/u.test(line);
+      if (!scanningDshRecord) continue;
+    }
+    if (!scanningDshRecord) continue;
+    const match = line.match(/(?:127(?:\.\d{1,3}){3}|\[?::1\]?):([1-9]\d{0,4})\s*\(LISTEN\)/u);
+    const port = match?.[1] ? Number(match[1]) : 0;
+    if (port > 0 && port <= 65_535) fallbackPorts.push(port);
+  }
+  if (fallbackPorts.includes(DESKTOP_DEFAULT_WEB_PORT)) {
+    return `http://127.0.0.1:${DESKTOP_DEFAULT_WEB_PORT}`;
+  }
+  if (fallbackPorts.length > 0) {
+    return `http://127.0.0.1:${fallbackPorts[0]}`;
   }
   return null;
 }
 
+/**
+ * Resolve the Harness endpoint.
+ *
+ * DSH Desktop and the `dsh web` CLI are different products on different
+ * ports: the Desktop serves 43120 and the CLI serves 3080. Discovery finds the
+ * Desktop; the documented default only fits the CLI. When the Desktop app is
+ * installed but its port cannot be discovered yet (it may still be starting),
+ * prefer the Desktop port over the CLI default so the client does not bind a
+ * port that nothing is serving.
+ */
 export function resolveDeepSeekHarnessBaseUrl(
   value = process.env[DEEPSEEK_HARNESS_URL_ENV],
   discovery: DeepSeekHarnessEndpointDiscovery = {},
@@ -413,44 +555,321 @@ export function resolveDeepSeekHarnessBaseUrl(
   if (value?.trim()) {
     return normalizeDeepSeekHarnessBaseUrl(value);
   }
-  return discoverDeepSeekDesktopHarnessBaseUrl(discovery) ??
-    DEFAULT_DEEPSEEK_HARNESS_URL;
+  const discovered = discoverDeepSeekDesktopHarnessBaseUrl(discovery);
+  if (discovered) return discovered;
+  return (discovery.appInstalled ?? deepSeekDesktopAppInstalled)()
+    ? `http://127.0.0.1:${DESKTOP_DEFAULT_WEB_PORT}`
+    : DEFAULT_DEEPSEEK_HARNESS_URL;
+}
+
+/** Whether the DSH Desktop application bundle is present on this machine. */
+function deepSeekDesktopAppInstalled(): boolean {
+  if (process.platform !== "darwin") return false;
+  try {
+    return fs.existsSync(DESKTOP_APP_PATH);
+  } catch {
+    return false;
+  }
 }
 
 export class DeepSeekHarnessHttpClient implements DeepSeekHarnessClientLike {
+  /** Detected once per client; Typert is DSH Desktop 2.0.9+. */
+  private dialect: DeepSeekHarnessDialect = "legacy";
+  private dialectProbe: Promise<DeepSeekHarnessDialect> | null = null;
+  /** True once a probe produced a definitive answer worth caching. */
+  private dialectConfirmed = false;
+  /**
+   * Cached cookie header. DSH Desktop mints a new browser-session credential
+   * each time it starts, so a cookie computed at construction time goes stale
+   * as soon as the Desktop restarts. It is refreshed on demand instead of
+   * being fixed for the client's lifetime.
+   */
+  private cookieHeader: string | null;
+  // Keep bulk follow snapshots off the long-lived approval/event carrier.
+  // A history timeout, oversized frame or reconnect must not disconnect $events.
+  private remoteMux: DeepSeekHarnessRemoteMux | null = null;
+  private eventMux: DeepSeekHarnessRemoteMux | null = null;
+  private readonly remoteEvents = new Map<string, { clientId: string; sessionId: string; kind: "approval" | "question" }>();
+
+  private getRemoteMux(): DeepSeekHarnessRemoteMux {
+    this.remoteMux ??= new DeepSeekHarnessRemoteMux(this.baseUrl, () => {
+      this.refreshCookieHeader();
+      return this.cookieHeader;
+    }, this.requestTimeoutMs);
+    return this.remoteMux;
+  }
+
+  private getEventMux(): DeepSeekHarnessRemoteMux {
+    this.eventMux ??= new DeepSeekHarnessRemoteMux(this.baseUrl, () => {
+      this.refreshCookieHeader();
+      return this.cookieHeader;
+    }, this.requestTimeoutMs);
+    return this.eventMux;
+  }
+
   constructor(
     private readonly baseUrl: string,
     private readonly fetchFn: typeof fetch = fetch,
     private readonly requestTimeoutMs = DEEPSEEK_HARNESS_HTTP_TIMEOUT_MS,
-  ) {}
+    cookieHeader?: string | null,
+    private readonly resolveCookieHeader: (
+      baseUrl: string,
+    ) => string | null = resolveDeepSeekHarnessCookieHeader,
+  ) {
+    this.cookieHeader = cookieHeader === undefined
+      ? resolveDeepSeekHarnessCookieHeader(baseUrl)
+      : cookieHeader;
+  }
+
+  /**
+   * DSH Desktop 2.0.9 requires the signed browser-session cookie on every
+   * loopback request. Legacy builds have no credential store and simply
+   * ignore the header, so sending it is always safe.
+   */
+  private authHeaders(extra: Record<string, string> = {}): Record<string, string> {
+    return this.cookieHeader ? { ...extra, cookie: this.cookieHeader } : extra;
+  }
+
+  /**
+   * Re-read the Harness credential store and mint a fresh cookie. The Desktop
+   * issues a new secret on every start, so a 401/403 means the cached cookie
+   * belongs to a previous generation.
+   */
+  private refreshCookieHeader(): boolean {
+    const refreshed = this.resolveCookieHeader(this.baseUrl);
+    if (!refreshed || refreshed === this.cookieHeader) return false;
+    this.cookieHeader = refreshed;
+    // The auth generation changed, so any dialect verdict belongs to the
+    // previous generation as well.
+    this.dialectConfirmed = false;
+    this.dialectProbe = null;
+    return true;
+  }
+
+  /**
+   * Decide which RPC dialect this host speaks by probing the slash-form
+   * endpoint. A Typert host answers with a gateway envelope (or 401 without a
+   * cookie), while a legacy host reports the route as not found.
+   *
+   * Only a definitive answer is cached. A transport failure (the Desktop
+   * restarting, a timeout, a refused connection) must not be remembered as
+   * `legacy`: that would pin the client to the wrong dialect for the rest of
+   * its lifetime, so every later call would 404 even after the host returns.
+   */
+  private async resolveDialect(): Promise<DeepSeekHarnessDialect> {
+    if (this.dialectProbe) return await this.dialectProbe;
+    const probe = (async () => {
+      try {
+        const response = await this.fetchFn(
+          new URL("/api/session/list", this.baseUrl),
+          {
+            method: "POST",
+            headers: this.authHeaders({ "content-type": "application/json" }),
+            body: JSON.stringify({
+              type: "client-request",
+              rpcId: crypto.randomUUID(),
+              method: "session/list",
+              payload: { args: { _request: {} } },
+            }),
+            signal: AbortSignal.timeout(this.requestTimeoutMs),
+          },
+        );
+        const text = await response.text();
+        const detected = classifyDeepSeekHarnessProbe({
+          status: response.status,
+          body: text,
+        });
+        if (detected) {
+          this.dialect = detected;
+          this.dialectConfirmed = true;
+          return detected;
+        }
+      } catch {
+        // Inconclusive: fall through and leave the probe uncached.
+      }
+      return this.dialect;
+    })();
+    this.dialectProbe = probe;
+    const resolved = await probe;
+    // Drop an inconclusive probe so the next call re-probes instead of
+    // permanently pinning the wrong dialect.
+    if (this.dialectProbe === probe && !this.dialectConfirmed) {
+      this.dialectProbe = null;
+    }
+    return resolved;
+  }
+
+  /**
+   * POST one capability, resolving its dialect-specific endpoint name and
+   * argument wrapper each attempt. Taking the capability rather than a fixed
+   * endpoint name lets a 404 retry re-map the name as well as the wrapper,
+   * which is what heals a client that mis-detected the host dialect.
+   */
+  private async callEndpoint<T>(
+    capability: DeepSeekHarnessCapability,
+    request: Record<string, unknown>,
+    requestId = crypto.randomUUID(),
+    unwrap?: (value: unknown) => T,
+  ): Promise<T> {
+    const attempt = async (dialect: DeepSeekHarnessDialect): Promise<Response> => {
+      const endpoint = deepSeekHarnessEndpoint(capability, dialect);
+      if (!endpoint) {
+        throw new Error(
+          `DeepSeek Harness ${dialect} host does not expose the ${capability} endpoint.`,
+        );
+      }
+      const payload = dialect === "typert"
+        ? wrapTypertPayload(endpoint, capability === "prompt" ? { ...request, requestId } : request)
+        : request;
+      return await this.fetchFn(new URL(`/api/${endpoint}`, this.baseUrl), {
+        method: "POST",
+        headers: this.authHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({
+          type: "client-request",
+          rpcId: requestId,
+          method: endpoint,
+          payload,
+        }),
+        signal: AbortSignal.timeout(this.requestTimeoutMs),
+      });
+    };
+
+    const dialect = await this.resolveDialect();
+    let response = await attempt(dialect);
+    // A 401/403 means the cached browser-session cookie belongs to a previous
+    // Desktop generation. Re-mint it from the credential store and retry once
+    // before giving up, so a Desktop restart does not permanently break the
+    // client until the whole daemon is restarted.
+    if ((response.status === 401 || response.status === 403) && this.refreshCookieHeader()) {
+      response = await attempt(dialect);
+    }
+    if (response.ok) {
+      return await this.readEnvelope<T>(response, capability, requestId, unwrap);
+    }
+    // A 404 means this endpoint does not exist on the connected host, the
+    // signature of a stale dialect guess. Drop the cached probe and retry once
+    // with the opposite dialect — re-mapping the endpoint name and argument
+    // wrapper — so a mis-detected client heals itself instead of 404ing until
+    // the process restarts.
+    if (response.status === 404) {
+      this.dialectConfirmed = false;
+      this.dialectProbe = null;
+      const other: DeepSeekHarnessDialect = dialect === "typert" ? "legacy" : "typert";
+      this.dialect = other;
+      let retryResponse: Response;
+      try {
+        retryResponse = await attempt(other);
+      } catch (error) {
+        // The other dialect may have no equivalent endpoint at all.
+        throw new Error(
+          `DeepSeek Harness ${capability} transport failed: HTTP ${response.status}`,
+          { cause: error },
+        );
+      }
+      if (retryResponse.ok) {
+        return await this.readEnvelope<T>(retryResponse, capability, requestId, unwrap);
+      }
+      throw new Error(
+        `DeepSeek Harness ${capability} transport failed: HTTP ${retryResponse.status}`,
+      );
+    }
+    throw new Error(
+      `DeepSeek Harness ${capability} transport failed: HTTP ${response.status}`,
+    );
+  }
+
+  /** Validate one RPC response envelope and unwrap its value. */
+  private async readEnvelope<T>(
+    response: Response,
+    capability: string,
+    requestId: string,
+    unwrap?: (value: unknown) => T,
+  ): Promise<T> {
+    const envelope = await response.json() as DeepSeekRpcEnvelope;
+    if (
+      !isRecord(envelope) ||
+      envelope.type !== "server-response" ||
+      envelope.rpcId !== requestId ||
+      !isRecord(envelope.result)
+    ) {
+      throw new Error(`DeepSeek Harness ${capability} returned an invalid RPC envelope.`);
+    }
+    if (envelope.result.ok !== true) {
+      throw new Error(
+        `DeepSeek Harness ${capability} failed: ${describeRpcError(envelope.result.error)}`,
+      );
+    }
+    return unwrap ? unwrap(envelope.result.value) : envelope.result.value as T;
+  }
 
   async describeHost() {
-    return (await this.call<ReturnType<DeepSeekHarnessClientLike["describeHost"]> extends Promise<infer T> ? T : never>(
+    const dialect = await this.resolveDialect();
+    // Typert hosts dropped the dedicated describe endpoint; the session list
+    // already proves reachability, so report a minimal host description.
+    if (dialect === "typert") {
+      return {
+        version: "2.0.9+",
+        cwd: "",
+        provider: "",
+        model: "",
+        attachedSessions: 0,
+        canOpenPath: false,
+      };
+    }
+    return await this.call<ReturnType<DeepSeekHarnessClientLike["describeHost"]> extends Promise<infer T> ? T : never>(
       "host.describe",
       {},
-    )).value;
+    ).then((result) => result.value);
   }
 
   async listSessions(): Promise<DeepSeekHarnessSessionSummary[]> {
-    const result = await this.call<{ items: DeepSeekHarnessSessionSummary[] }>(
-      "session.list",
+    return await this.callEndpoint<{ items: DeepSeekHarnessSessionSummary[] }>(
+      "listSessions",
       {},
-    );
-    return result.value.items;
+      crypto.randomUUID(),
+      (value) => value as { items: DeepSeekHarnessSessionSummary[] },
+    ).then((result) => result.items);
   }
 
   async createSession(cwd: string): Promise<{ sessionId: string }> {
-    return (await this.call<{ sessionId: string }>("session.create", { cwd })).value;
+    return await this.callEndpoint<{ sessionId: string }>("createSession", { cwd });
   }
 
   async renameSession(sessionId: string, title: string): Promise<void> {
-    await this.call("session.rename", { sessionId, title });
+    await this.callEndpoint("renameSession", { sessionId, title });
   }
 
   async readHistory(
     sessionId: string,
     options: { beforeSeq?: number; maxMessages?: number } = {},
   ) {
+    const dialect = await this.resolveDialect();
+    if (dialect === "typert") {
+      // Projection cursors in the lightweight list may be absent or stale (-1)
+      // for cold sessions. The native opening snapshot is authoritative.
+      const snapshot = await this.readTypertSessionSnapshot(sessionId, options.maxMessages);
+      const page = options.beforeSeq === undefined ? snapshot : await this.callEndpoint<{
+        records?: unknown[];
+        hasMore?: boolean;
+        projections?: { asOfSeq?: number; values?: Record<string, unknown> };
+      }>("readHistory", {
+        ...typertSessionAddress(sessionId),
+        throughSeq: snapshot.cursor,
+        beforeSeq: options.beforeSeq,
+        ...(options.maxMessages === undefined ? {} : { maxMessages: options.maxMessages }),
+      });
+      return {
+        events: (page.records ?? []).flatMap((record) => {
+          if (!isRecord(record) || record.type !== "event" || !isRecord(record.event)) return [];
+          const event = record.event;
+          return typeof event.seq === "number"
+            ? [{ event: event as DeepSeekHarnessSessionEvent }]
+            : [];
+        }),
+        hasMore: page.hasMore === true,
+        ...(page.projections ? { projections: page.projections } : {}),
+      };
+    }
     return (await this.call<{
       events: DeepSeekHarnessHistoryEntry[];
       hasMore: boolean;
@@ -459,6 +878,23 @@ export class DeepSeekHarnessHttpClient implements DeepSeekHarnessClientLike {
   }
 
   async readModels(sessionId: string): Promise<DeepSeekHarnessModelState> {
+    const dialect = await this.resolveDialect();
+    if (dialect === "typert") {
+      const catalog = await this.callEndpoint<DeepSeekHarnessModelState & {
+        default?: DeepSeekHarnessModelSelection;
+        routableProviders?: string[];
+      }>("readModels", {});
+      const snapshot = await this.readTypertSessionSnapshot(sessionId, 1);
+      const selection = snapshot.projections?.values?.modelSelection;
+      const next = isRecord(selection) ? selection.next : undefined;
+      const current = isRecord(next) && typeof next.provider === "string" && typeof next.model === "string"
+        ? { provider: next.provider, model: next.model,
+          ...(typeof next.reasoningEffort === "string" ? { reasoningEffort: next.reasoningEffort } : {}) }
+        : catalog.default;
+      if (!current) throw new Error("DeepSeek Harness 尚未提供这个任务的模型设置。");
+      return { current, groups: catalog.groups, failures: catalog.failures,
+        routable: catalog.routableProviders?.includes(current.provider) ?? false };
+    }
     return (await this.call<DeepSeekHarnessModelState>("session.models", { sessionId })).value;
   }
 
@@ -466,10 +902,33 @@ export class DeepSeekHarnessHttpClient implements DeepSeekHarnessClientLike {
     sessionId: string,
     selection: DeepSeekHarnessModelSelection,
   ): Promise<{ selected: DeepSeekHarnessModelSelection }> {
-    return (await this.call<{ selected: DeepSeekHarnessModelSelection }>(
-      "session.selectModel",
+    return await this.callEndpoint<{ selected: DeepSeekHarnessModelSelection }>(
+      "selectModel",
       { sessionId, ...selection },
-    )).value;
+    );
+  }
+
+  private async readTypertSessionSnapshot(sessionId: string, maxMessages?: number): Promise<{
+    cursor: number;
+    records: unknown[];
+    hasMore?: boolean;
+    projections?: { asOfSeq?: number; values?: Record<string, unknown> };
+  }> {
+    const signal = AbortSignal.timeout(this.requestTimeoutMs);
+    for await (const frame of this.getRemoteMux().open("session/follow", {
+      args: { request: { ...typertSessionAddress(sessionId), ...(maxMessages === undefined ? {} : { maxMessages }) } },
+    }, signal)) {
+      if (isRecord(frame) && frame.type === "snapshot" && Number.isSafeInteger(frame.cursor) &&
+          typeof frame.cursor === "number" && frame.cursor >= -1 && Array.isArray(frame.records)) {
+        return {
+          cursor: frame.cursor,
+          records: frame.records,
+          hasMore: frame.hasMore === true,
+          ...(isRecord(frame.projections) ? { projections: frame.projections } : {}),
+        };
+      }
+    }
+    throw new Error("DeepSeek Harness 未返回指定任务的历史快照，未切换到其他任务。");
   }
 
   async prompt(
@@ -477,8 +936,8 @@ export class DeepSeekHarnessHttpClient implements DeepSeekHarnessClientLike {
     content: DeepSeekHarnessPromptContent[],
     requestId = crypto.randomUUID(),
   ): Promise<{ rpcId: string; value: { accepted: true } }> {
-    return await this.call<{ accepted: true }>(
-      "session.prompt",
+    const value = await this.callEndpoint<{ accepted: true }>(
+      "prompt",
       {
         sessionId,
         mode: "queue",
@@ -487,16 +946,37 @@ export class DeepSeekHarnessHttpClient implements DeepSeekHarnessClientLike {
       },
       requestId,
     );
+    return { rpcId: requestId, value };
   }
 
   async cancelSession(sessionId: string): Promise<{ accepted: true }> {
-    return (await this.call<{ accepted: true }>("session.cancel", { sessionId })).value;
+    return await this.callEndpoint<{ accepted: true }>("cancelSession", { sessionId });
   }
 
   async respond(message: DeepSeekHarnessClientResponse): Promise<{
     accepted: boolean;
     reason?: string;
   }> {
+    if (await this.resolveDialect() === "typert") {
+      const pending = this.remoteEvents.get(message.rpcId);
+      if (!pending) return { accepted: false, reason: "这条确认已失效，请重新查看任务。" };
+      const value = message.result.ok && isRecord(message.result.value) ? message.result.value : null;
+      const outcome = message.result.ok
+        ? { kind: "result", value: pending.kind === "approval" ? value?.outcome : value?.answer }
+        : { kind: "rejected", error: message.result.error };
+      const id = crypto.randomUUID();
+      const response = await this.fetchFn(new URL("/api/$events/result", this.baseUrl), {
+        method: "POST", headers: this.authHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({ type: "client-request", rpcId: id, method: "$events/result", payload: {
+          args: { clientId: pending.clientId, eventId: message.rpcId, outcome },
+        } }),
+        signal: AbortSignal.timeout(this.requestTimeoutMs),
+      });
+      if (!response.ok) throw new Error(`DeepSeek Harness 确认发送失败：HTTP ${response.status}`);
+      await this.readEnvelope(response, "respond", id);
+      this.remoteEvents.delete(message.rpcId);
+      return { accepted: true };
+    }
     const response = await this.fetchFn(new URL("/api/respond", this.baseUrl), {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -518,9 +998,56 @@ export class DeepSeekHarnessHttpClient implements DeepSeekHarnessClientLike {
 
   async *openMux(signal?: AbortSignal): AsyncGenerator<DeepSeekHarnessEnvelope> {
     const streamSignal = signal ?? new AbortController().signal;
-    const url = new URL("/api/events.mux", this.baseUrl);
+    // Typert renamed the stream mux and requires the same session cookie as
+    // the HTTP surface; Node's global WebSocket forwards `headers` on the
+    // upgrade request, so no extra dependency is needed.
+    const dialect = await this.resolveDialect();
+    if (dialect === "typert") {
+      let clientId = "";
+      try {
+        for await (const frame of this.getEventMux().open("$events", { args: {} }, streamSignal)) {
+          if (!isRecord(frame)) continue;
+          if (frame.type === "ready" && typeof frame.clientId === "string") {
+            clientId = frame.clientId;
+            yield { rpcId: clientId, payload: { type: "stream/ready" } };
+          } else if (frame.type === "emit" && typeof frame.event === "string" && frame.event.startsWith("api-session/") && Array.isArray(frame.args)) {
+            const first = frame.args[0];
+            const sessionId = typeof first === "string" ? first : isRecord(first) ? readString(first.sessionId) : undefined;
+            if (sessionId) yield { rpcId: crypto.randomUUID(), payload: { type: "session/subscribed", sessionId, lastSeq: -1 } };
+          } else if (frame.type === "waterfall" && clientId && typeof frame.eventId === "string" && typeof frame.agentId === "string" && isRecord(frame.request)) {
+            const kind = frame.event === "approval/request" ? "approval" : frame.event === "user-questions/request" ? "question" : null;
+            if (!kind) continue;
+            if (this.remoteEvents.size >= 256) throw new Error("DeepSeek Harness 待确认请求过多，请在电脑端处理后重试。");
+            this.remoteEvents.set(frame.eventId, { clientId, sessionId: frame.agentId, kind });
+            if (kind === "approval") yield { rpcId: frame.eventId, payload: {
+              type: "approval/requested", sessionId: frame.agentId, approvalId: frame.eventId,
+              toolName: readString(frame.request.toolName) ?? "工具操作",
+              ...(readString(frame.request.callId) ? { callId: readString(frame.request.callId) } : {}),
+              ...(readString(frame.request.reason) ? { reason: readString(frame.request.reason) } : {}),
+            } };
+            else if (Array.isArray(frame.request.questions)) yield { rpcId: frame.eventId, payload: {
+              type: "question/requested", sessionId: frame.agentId, questions: frame.request.questions as DeepSeekHarnessQuestion[],
+            } };
+          } else if (frame.type === "cancel" && typeof frame.eventId === "string") {
+            const pending = this.remoteEvents.get(frame.eventId);
+            if (!pending) continue;
+            this.remoteEvents.delete(frame.eventId);
+            yield { rpcId: frame.eventId, payload: pending.kind === "approval"
+              ? { type: "approval/resolved", sessionId: pending.sessionId, approvalId: frame.eventId, outcome: "cancelled" }
+              : { type: "question/resolved", sessionId: pending.sessionId, questionRpcId: frame.eventId, outcome: "cancelled" } };
+          }
+        }
+      } finally {
+        for (const [id, pending] of this.remoteEvents) if (pending.clientId === clientId) this.remoteEvents.delete(id);
+      }
+      return;
+    }
+    const muxPath = "/api/events.mux";
+    const url = new URL(muxPath, this.baseUrl);
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-    const socket = new WebSocket(url);
+    const socket = this.cookieHeader
+      ? new WebSocket(url, { headers: { cookie: this.cookieHeader } } as never)
+      : new WebSocket(url);
     type QueueItem =
       | { kind: "frame"; envelope: DeepSeekHarnessEnvelope }
       | { kind: "error"; error: Error }
@@ -744,7 +1271,7 @@ export async function listDeepSeekHarnessSessions(
     fetch,
     options.timeoutMs ?? DEEPSEEK_HARNESS_HTTP_TIMEOUT_MS,
   );
-  return (await client.listSessions()).slice(0, Math.max(0, limit)).map((item) =>
+  return (await client.listSessions()).sort((a, b) => b.updatedAt - a.updatedAt).slice(0, Math.max(0, limit)).map((item) =>
     sessionCandidate(item)
   );
 }
@@ -786,7 +1313,9 @@ function pendingQuestionRequest(
       id: question.id,
       header: question.header ?? `问题 ${index + 1}`,
       question: [question.question, question.detail].filter(Boolean).join("\n\n"),
-      isOther: !question.options?.length,
+      // Native Harness questions support a custom answer even with fixed options.
+      isOther: true,
+      multiSelect: question.multiSelect ?? false,
       isSecret: false,
       ...(question.options?.length
         ? {
@@ -834,7 +1363,7 @@ function toolResultState(
 
 export class DeepSeekHarnessAdapter implements BridgeAdapter {
   private readonly options: AdapterOptions;
-  private client: DeepSeekHarnessClientLike;
+  private client!: DeepSeekHarnessClientLike;
   private readonly dependencies: ResolvedDeepSeekHarnessAdapterDependencies;
   private readonly state: BridgeAdapterState;
   private eventSink: EventSink = () => undefined;
@@ -857,6 +1386,11 @@ export class DeepSeekHarnessAdapter implements BridgeAdapter {
   private readonly permissionSelectionBySession = new Map<string, string>();
   private muxOutageNoticeActive = false;
   private muxLastOutageNoticeAt = 0;
+  private muxOutageNoticeTimer: ReturnType<typeof setTimeout> | null = null;
+  private muxRecoveryStableTimer: ReturnType<typeof setTimeout> | null = null;
+  private historyErrorNoticeAt = 0;
+  /** Endpoint the current client is bound to, so it can be re-resolved. */
+  private boundBaseUrl = "";
 
   constructor(
     options: AdapterOptions,
@@ -882,7 +1416,14 @@ export class DeepSeekHarnessAdapter implements BridgeAdapter {
         ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
       now: dependencies?.now ?? (() => Date.now()),
     };
-    this.client = this.dependencies.createClient(this.dependencies.resolveBaseUrl());
+    // The endpoint is resolved once here, but discovery can legitimately fail
+    // while DSH Desktop is restarting and then fall back to the documented
+    // default port. That default may not be the port the Desktop ends up
+    // serving, so remember whether the endpoint was discovered or assumed and
+    // re-resolve it before a connection attempt rather than pinning the client
+    // to a dead port for its whole lifetime.
+    this.boundBaseUrl = this.dependencies.resolveBaseUrl();
+    this.client = this.dependencies.createClient(this.boundBaseUrl);
     const initialSessionId = options.sessionStartMode === "new"
       ? undefined
       : options.initialSharedSessionId ?? options.initialSharedThreadId;
@@ -901,31 +1442,77 @@ export class DeepSeekHarnessAdapter implements BridgeAdapter {
     this.eventSink = sink;
   }
 
+  /**
+   * Re-resolve the Harness endpoint and rebind the client when the resolved
+   * address changed.
+   *
+   * Construction resolves the endpoint once. If DSH Desktop was mid-restart at
+   * that moment, discovery returns nothing and the resolver falls back to the
+   * documented default port, which the Desktop may not be serving. Pinning the
+   * client to that address makes every later call fail with `fetch failed`
+   * even after the Desktop is healthy again.
+   */
+  private async reconnectClientToResolvedBaseUrl(): Promise<void> {
+    const resolved = await this.resolveReachableBaseUrl();
+    if (resolved === this.boundBaseUrl) return;
+    this.boundBaseUrl = resolved;
+    this.client = this.dependencies.createClient(resolved);
+  }
+
+  /**
+   * Resolve an endpoint that actually has a listening Desktop behind it.
+   *
+   * The plain resolver falls back to the documented default port whenever
+   * discovery comes up empty. That default is a `dsh web` port the Desktop does
+   * not serve, so binding it produces ECONNREFUSED for the whole client
+   * lifetime. When discovery is empty, retry briefly instead of accepting a
+   * default that cannot be the right answer while a Desktop is running.
+   */
+  private async resolveReachableBaseUrl(): Promise<string> {
+    const resolved = this.dependencies.resolveBaseUrl();
+    if (resolved !== DEFAULT_DEEPSEEK_HARNESS_URL) return resolved;
+    // A single discovery probe. Endpoint discovery shells out synchronously
+    // (`ps` plus `lsof`), so looping here would block the daemon event loop and
+    // freeze WeChat polling, the web console, and the relay together. Callers
+    // that need another chance retry the whole connect instead.
+    return this.dependencies.resolveRecoveredBaseUrl() ?? resolved;
+  }
+
   async start(): Promise<void> {
     if (this.muxTask) return;
     this.disposing = false;
+    this.clearMuxNoticeTimers();
     this.muxOutageNoticeActive = false;
     this.muxLastOutageNoticeAt = 0;
     this.setStatus("starting", "正在连接 DeepSeek Harness。");
+    // The endpoint may have changed since construction (DSH Desktop restart).
+    await this.reconnectClientToResolvedBaseUrl();
     try {
       let selected: DeepSeekHarnessSessionSummary | undefined;
       try {
         selected = await this.connectAndRestoreSession();
       } catch (error) {
+        // A transient transport failure (the Desktop restarting, a refused
+        // connection) is retried in place. Restarting the Desktop for it would
+        // turn a brief blip into a long outage, so settings recovery stays
+        // reserved for the protected-host case that genuinely needs it.
         if (
           this.options.allowDesktopApplicationLaunch !== true ||
           !await this.dependencies.recoverDesktopAccess(error)
         ) {
-          throw error;
-        }
-        try {
-          selected = await this.retryAfterDesktopRecovery(error);
-        } catch (recoveryError) {
-          // The recovery window can expire without ever producing an
-          // actionable error (for example while DSH Desktop is still
-          // booting and its port is not listening yet). Always surface a
-          // real reason so callers and WeChat never see `undefined`.
-          throw recoveryError ?? error;
+          const retried = await this.retryTransientConnectFailure(error);
+          if (retried === null) throw error;
+          selected = retried;
+        } else {
+          try {
+            selected = await this.retryAfterDesktopRecovery(error);
+          } catch (recoveryError) {
+            // The recovery window can expire without ever producing an
+            // actionable error (for example while DSH Desktop is still
+            // booting and its port is not listening yet). Always surface a
+            // real reason so callers and WeChat never see `undefined`.
+            throw recoveryError ?? error;
+          }
         }
       }
       this.state.startedAt = nowIso();
@@ -933,7 +1520,13 @@ export class DeepSeekHarnessAdapter implements BridgeAdapter {
       this.muxAbortController = new AbortController();
       this.muxTask = this.runMuxLoop(this.muxAbortController.signal);
     } catch (error) {
-      this.setStatus("error", "无法连接 DeepSeek Harness，请确认 DSH Desktop 或 dsh web 正在本机运行。");
+      // Include the resolved endpoint and cause chain: without them a bare
+      // "fetch failed" cannot be told apart from a dead port, a stale cookie,
+      // or a wrong dialect.
+      this.setStatus(
+        "error",
+        `无法连接 DeepSeek Harness，请确认 DSH Desktop 或 dsh web 正在本机运行。${describeDeepSeekConnectFailure(this.boundBaseUrl, error)}`,
+      );
       throw error;
     }
   }
@@ -965,14 +1558,50 @@ export class DeepSeekHarnessAdapter implements BridgeAdapter {
     return selected;
   }
 
+  /**
+   * Retry a transient connect failure in place, re-resolving the endpoint each
+   * time so a Desktop that restarted underneath us is picked up.
+   *
+   * Returns the restored session, or null when every attempt failed. This is
+   * deliberately bounded and side-effect free: it must not restart the
+   * Desktop, because the caller may simply have raced a restart that is
+   * already in progress.
+   */
+  private async retryTransientConnectFailure(
+    originalError: unknown,
+  ): Promise<DeepSeekHarnessSessionSummary | undefined | null> {
+    // Only transport-level failures are worth retrying. A semantic error such
+    // as "the persisted task no longer exists" is permanent, and retrying it
+    // would stall the caller for the whole window before failing anyway.
+    if (!isTransientDeepSeekConnectError(originalError)) return null;
+    // Count attempts rather than polling a clock: an injected or coarse `now`
+    // that does not advance would make a deadline-based loop spin forever.
+    for (let attempt = 0; attempt < DEEPSEEK_TRANSIENT_CONNECT_RETRY_ATTEMPTS; attempt += 1) {
+      await this.dependencies.sleep(DEEPSEEK_TRANSIENT_CONNECT_RETRY_INTERVAL_MS);
+      await this.reconnectClientToResolvedBaseUrl();
+      try {
+        return await this.connectAndRestoreSession();
+      } catch {
+        // Keep trying until the bounded attempt budget is spent.
+      }
+    }
+    return null;
+  }
+
   private async retryAfterDesktopRecovery(
     originalError?: unknown,
   ): Promise<DeepSeekHarnessSessionSummary | undefined> {
-    const deadline = this.dependencies.now() + DEEPSEEK_DESKTOP_RECOVERY_TIMEOUT_MS;
+    // Count bounded attempts instead of polling a clock: an injected or coarse
+    // `now` that never advances would otherwise spin this loop forever.
+    const maxAttempts = Math.max(
+      1,
+      Math.ceil(DEEPSEEK_DESKTOP_RECOVERY_TIMEOUT_MS / DEEPSEEK_DESKTOP_RECOVERY_POLL_MS),
+    );
     let lastError: unknown;
-    while (true) {
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       const recoveredBaseUrl = this.dependencies.resolveRecoveredBaseUrl();
       if (recoveredBaseUrl) {
+        this.boundBaseUrl = recoveredBaseUrl;
         this.client = this.dependencies.createClient(recoveredBaseUrl);
         try {
           return await this.connectAndRestoreSession();
@@ -980,19 +1609,16 @@ export class DeepSeekHarnessAdapter implements BridgeAdapter {
           lastError = error;
         }
       }
-      const remainingMs = deadline - this.dependencies.now();
-      if (remainingMs <= 0) {
-        // Never throw a bare `undefined`: when the restarted Desktop never
-        // published a loopback port inside the window, surface the original
-        // transport failure so callers and WeChat see the real reason.
-        throw lastError ?? originalError ?? new Error(
-          "DSH Desktop 已重新启动，但本地接口仍未就绪；请在电脑上确认 DSH Desktop 已打开后重试。",
-        );
+      if (attempt + 1 < maxAttempts) {
+        await this.dependencies.sleep(DEEPSEEK_DESKTOP_RECOVERY_POLL_MS);
       }
-      await this.dependencies.sleep(
-        Math.min(DEEPSEEK_DESKTOP_RECOVERY_POLL_MS, remainingMs),
-      );
     }
+    // Never throw a bare `undefined`: when the restarted Desktop never
+    // published a loopback port inside the window, surface the original
+    // transport failure so callers and WeChat see the real reason.
+    throw lastError ?? originalError ?? new Error(
+      "DSH Desktop 已重新启动，但本地接口仍未就绪；请在电脑上确认 DSH Desktop 已打开后重试。",
+    );
   }
 
   async sendInput(text: string): Promise<void> {
@@ -1016,18 +1642,20 @@ export class DeepSeekHarnessAdapter implements BridgeAdapter {
     );
     if (sessionSummary?.blank && items.some((item) => item.type === "localImage")) {
       const models = await this.client.readModels(sessionId);
-      const visionModel = models.current.provider === "deepseek-official" &&
-          models.current.model === "deepseek-v4-flash"
-        ? models.groups.find((group) => group.id === models.current.provider)?.models.find(
+      // current 可能缺失（会话尚未选择模型）；缺失时不做视觉模型替换。
+      const current = models.current;
+      const visionModel = current?.provider === "deepseek-official" &&
+          current.model === "deepseek-v4-flash"
+        ? models.groups.find((group) => group.id === current.provider)?.models.find(
           (model) => model.id === "deepseek-v4-flash-vision-exp",
         )
         : undefined;
-      if (visionModel) {
+      if (visionModel && current) {
         await this.client.selectModel(sessionId, {
-          provider: models.current.provider,
+          provider: current.provider,
           model: visionModel.id,
-          ...(models.current.reasoningEffort
-            ? { reasoningEffort: models.current.reasoningEffort }
+          ...(current.reasoningEffort
+            ? { reasoningEffort: current.reasoningEffort }
             : {}),
         });
       }
@@ -1077,7 +1705,7 @@ export class DeepSeekHarnessAdapter implements BridgeAdapter {
 
   async listResumeSessions(limit = 10): Promise<BridgeResumeSessionCandidate[]> {
     const sessions = await this.client.listSessions();
-    return sessions.slice(0, Math.max(0, limit)).map((item) => sessionCandidate(
+    return [...sessions].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, Math.max(0, limit)).map((item) => sessionCandidate(
       item,
       [...this.pendingApprovals.values()].some((pending) => pending.sessionId === item.sessionId),
       [...this.pendingQuestions.values()].some((pending) => pending.sessionId === item.sessionId),
@@ -1252,27 +1880,41 @@ export class DeepSeekHarnessAdapter implements BridgeAdapter {
       : [...options, { id: current, label: current }];
   }
 
+  async getNewSessionModelState(): Promise<BridgeSessionModelState> {
+    if (!this.state.sharedSessionId) {
+      return { options: [], canChange: false, unavailableReason: "请先连接一个 DSH 任务，再预选新任务模型。" };
+    }
+    return await this.getSessionModelState(this.state.sharedSessionId);
+  }
+
   async getSessionModelState(sessionId: string): Promise<BridgeSessionModelState> {
     const state = await this.client.readModels(sessionId);
+    // Harness 在某些会话下（尚未选择模型、目录只返回 provider 列表、Host
+    // 刚重启）不会带回 current。这里必须兜底，否则模型状态读取会直接抛
+    // 异常，让任务台的模型入口与切换全部失败。
+    const current = state.current;
     const reasoningEffortOptions = this.reasoningEffortOptions(
-      state.current.reasoningEffort,
+      current?.reasoningEffort,
     );
     // routable 只说明当前选中的 provider 已不可用；只要目录里还有可切换的
     // 模型，就必须允许用户改选，否则失效模型（如已下线的 ox-alpha）会把任务
     // 永久卡在既不能发消息也不能换模型的状态。模型目录继续展开全部 provider，
     // 供用户精确改选。
-    const options = state.groups.flatMap((group) => group.models.map((model) => ({
+    const groups = Array.isArray(state.groups) ? state.groups : [];
+    const options = groups.flatMap((group) => group.models.map((model) => ({
         id: this.modelSelectionId(group.id, model.id),
         label: model.name,
         group: group.name,
         ...(model.description ? { description: model.description } : {}),
       })));
     return {
-      currentModel: this.modelSelectionId(state.current.provider, state.current.model),
+      ...(current
+        ? { currentModel: this.modelSelectionId(current.provider, current.model) }
+        : {}),
       options,
       canChange: options.length > 0,
-      ...(state.current.reasoningEffort
-        ? { currentReasoningEffort: state.current.reasoningEffort }
+      ...(current?.reasoningEffort
+        ? { currentReasoningEffort: current.reasoningEffort }
         : {}),
       ...(reasoningEffortOptions.length > 0 ? { reasoningEffortOptions } : {}),
       ...(reasoningEffortOptions.length > 0
@@ -1290,15 +1932,18 @@ export class DeepSeekHarnessAdapter implements BridgeAdapter {
   ): Promise<BridgeSessionModelState> {
     const current = await this.client.readModels(sessionId);
     const exact = this.parseModelSelectionId(model);
+    const groups = Array.isArray(current.groups) ? current.groups : [];
+    // current 可能缺失；此时只能按模型 id 查找，不能按当前 provider 匹配。
+    const currentProvider = current.current?.provider;
     const group = exact
-      ? current.groups.find((item) =>
+      ? groups.find((item) =>
           item.id === exact.provider &&
           item.models.some((candidate) => candidate.id === exact.model)
         )
-      : current.groups.find((item) =>
-          item.id === current.current.provider &&
+      : groups.find((item) =>
+          item.id === currentProvider &&
           item.models.some((candidate) => candidate.id === model)
-        ) ?? current.groups.find((item) =>
+        ) ?? groups.find((item) =>
           item.models.some((candidate) => candidate.id === model)
         );
     const selectedModel = exact?.model ?? model;
@@ -1306,7 +1951,7 @@ export class DeepSeekHarnessAdapter implements BridgeAdapter {
     await this.client.selectModel(sessionId, {
       provider: group.id,
       model: selectedModel,
-      ...(current.current.reasoningEffort
+      ...(current.current?.reasoningEffort
         ? { reasoningEffort: current.current.reasoningEffort }
         : {}),
     });
@@ -1320,16 +1965,21 @@ export class DeepSeekHarnessAdapter implements BridgeAdapter {
     const normalizedEffort = reasoningEffort.trim();
     if (!normalizedEffort) throw new Error("请选择推理强度。");
     const current = await this.client.readModels(sessionId);
-    const options = this.reasoningEffortOptions(current.current.reasoningEffort);
+    const options = this.reasoningEffortOptions(current.current?.reasoningEffort);
     if (!current.routable) {
       throw new Error("DeepSeek Harness 当前模型路由不可用。");
     }
     if (!options.some((option) => option.id === normalizedEffort)) {
       throw new Error("这个推理强度当前不可用，请重新选择。");
     }
+    // 没有 current 就无法确定要切换哪个模型，明确报错而不是崩溃。
+    const activeModel = current.current;
+    if (!activeModel) {
+      throw new Error("DeepSeek Harness 当前没有可用的模型，请先选择模型。");
+    }
     await this.client.selectModel(sessionId, {
-      provider: current.current.provider,
-      model: current.current.model,
+      provider: activeModel.provider,
+      model: activeModel.model,
       reasoningEffort: normalizedEffort,
     });
     return await this.getSessionModelState(sessionId);
@@ -1511,6 +2161,11 @@ export class DeepSeekHarnessAdapter implements BridgeAdapter {
     return await this.answerQuestion(pending, answers);
   }
 
+  getPendingTaskUserInput(threadId: string): UserInputRequest | null {
+    const pending = [...this.pendingQuestions.values()].find((item) => item.sessionId === threadId);
+    return pending ? structuredClone(pending.request) : null;
+  }
+
   async submitTaskUserInput(
     threadId: string,
     answers: Record<string, string[]>,
@@ -1524,6 +2179,7 @@ export class DeepSeekHarnessAdapter implements BridgeAdapter {
 
   async dispose(): Promise<void> {
     this.disposing = true;
+    this.clearMuxNoticeTimers();
     this.muxAbortController?.abort();
     this.muxAbortController = null;
     const muxTask = this.muxTask;
@@ -1562,43 +2218,89 @@ export class DeepSeekHarnessAdapter implements BridgeAdapter {
   }
 
   private async runMuxLoop(signal: AbortSignal): Promise<void> {
+    let consecutiveFailures = 0;
     while (!this.disposing && !signal.aborted) {
-      let reconnected = false;
+      let connectedAt: number | undefined;
       try {
+        let receivedEnvelope = false;
         for await (const envelope of this.client.openMux(signal)) {
-          if (!reconnected) {
-            reconnected = true;
-            if (this.muxOutageNoticeActive) {
-              this.muxOutageNoticeActive = false;
-              this.muxLastOutageNoticeAt = 0;
-              this.emit({
-                type: "notice",
-                level: "info",
-                text: "DeepSeek Harness 事件连接已恢复。",
-                timestamp: nowIso(),
-              });
-            }
+          if (!receivedEnvelope) {
+            receivedEnvelope = true;
+            connectedAt = performance.now();
+            this.scheduleMuxRecoveryNotice();
           }
           if (this.disposing || signal.aborted) return;
           this.handleMuxEnvelope(envelope);
         }
       } catch (error) {
         if (this.disposing || signal.aborted) return;
-        const now = Date.now();
-        if (!this.muxOutageNoticeActive || now - this.muxLastOutageNoticeAt >= DEEPSEEK_HARNESS_DISCONNECT_RENOTIFY_MS) {
-          const firstNotice = !this.muxOutageNoticeActive;
-          this.muxOutageNoticeActive = true;
-          this.muxLastOutageNoticeAt = now;
-          this.emit({
-            type: "notice",
-            level: "warning",
-            text: `DeepSeek Harness 事件连接已断开，${firstNotice ? "正在重连" : "仍未恢复，每10分钟提醒一次"}：${truncatePreview(error instanceof Error ? error.message : String(error), 160)}`,
-            timestamp: nowIso(),
-          });
-        }
+        this.clearMuxRecoveryTimer();
+        this.scheduleMuxOutageNotice(error);
       }
-      await waitForAbortableDelay(DEEPSEEK_HARNESS_RECONNECT_MS, signal);
+      // Only sustained recovery resets backoff; a brief ready/disconnect loop
+      // must still back off. Use monotonic time so wall-clock changes are safe.
+      if (connectedAt !== undefined && performance.now() - connectedAt >= DEEPSEEK_HARNESS_RECOVERY_STABLE_MS) {
+        consecutiveFailures = 0;
+      }
+      const retryDelayMs = Math.min(
+        30_000,
+        DEEPSEEK_HARNESS_RECONNECT_MS * (2 ** Math.min(consecutiveFailures, 5)),
+      );
+      consecutiveFailures += 1;
+      await waitForAbortableDelay(retryDelayMs, signal);
     }
+  }
+
+  private clearMuxRecoveryTimer(): void {
+    if (this.muxRecoveryStableTimer) clearTimeout(this.muxRecoveryStableTimer);
+    this.muxRecoveryStableTimer = null;
+  }
+
+  private clearMuxNoticeTimers(): void {
+    if (this.muxOutageNoticeTimer) clearTimeout(this.muxOutageNoticeTimer);
+    this.muxOutageNoticeTimer = null;
+    this.clearMuxRecoveryTimer();
+  }
+
+  private scheduleMuxOutageNotice(error: unknown): void {
+    if (this.muxOutageNoticeActive || this.muxOutageNoticeTimer) return;
+    this.muxOutageNoticeTimer = setTimeout(() => {
+      this.muxOutageNoticeTimer = null;
+      if (this.disposing || this.muxOutageNoticeActive) return;
+      const now = Date.now();
+      if (now - this.muxLastOutageNoticeAt < DEEPSEEK_HARNESS_DISCONNECT_RENOTIFY_MS) return;
+      this.muxOutageNoticeActive = true;
+      this.muxLastOutageNoticeAt = now;
+      this.emit({
+        type: "notice",
+        level: "warning",
+        text: `DeepSeek Harness 事件连接暂时中断，正在自动恢复：${truncatePreview(error instanceof Error ? error.message : String(error), 160)}`,
+        timestamp: nowIso(),
+      });
+    }, DEEPSEEK_HARNESS_DISCONNECT_NOTICE_DEBOUNCE_MS);
+  }
+
+  private scheduleMuxRecoveryNotice(): void {
+    if (!this.muxOutageNoticeActive) {
+      // The socket recovered before the debounce window elapsed: cancel the
+      // pending warning instead of reporting a false outage after recovery.
+      if (this.muxOutageNoticeTimer) clearTimeout(this.muxOutageNoticeTimer);
+      this.muxOutageNoticeTimer = null;
+      return;
+    }
+    if (this.muxRecoveryStableTimer) return;
+    this.muxRecoveryStableTimer = setTimeout(() => {
+      this.muxRecoveryStableTimer = null;
+      if (this.disposing || !this.muxOutageNoticeActive) return;
+      this.muxOutageNoticeActive = false;
+      this.muxLastOutageNoticeAt = 0;
+      this.emit({
+        type: "notice",
+        level: "info",
+        text: "DeepSeek Harness 事件连接已恢复。",
+        timestamp: nowIso(),
+      });
+    }, DEEPSEEK_HARNESS_RECOVERY_STABLE_MS);
   }
 
   private handleMuxEnvelope(envelope: DeepSeekHarnessEnvelope): void {
@@ -1608,7 +2310,7 @@ export class DeepSeekHarnessAdapter implements BridgeAdapter {
         this.handleSessionEvent(frame.sessionId, frame.event, "stream");
         return;
       case "session/subscribed":
-        void this.reconcileSessionHistory(frame.sessionId);
+        this.reconcileSessionHistoryInBackground(frame.sessionId);
         return;
       case "approval/requested":
         this.handleApprovalRequested(envelope.rpcId, frame);
@@ -1702,7 +2404,7 @@ export class DeepSeekHarnessAdapter implements BridgeAdapter {
           ((origin === "local" && this.hasPendingWechatPrompt(sessionId)) ||
             (origin === "wechat" && !(this.replyTextByTurn.get(key)?.length)))
         ) {
-          void this.reconcileSessionHistory(sessionId);
+          this.reconcileSessionHistoryInBackground(sessionId);
           return;
         }
         this.finishTurn(sessionId, turn, data, event.time);
@@ -2006,6 +2708,20 @@ export class DeepSeekHarnessAdapter implements BridgeAdapter {
       if (this.disposing || signal.aborted || !this.hasPendingWechatPrompt(sessionId)) return;
       await this.reconcileSessionHistory(sessionId).catch(() => undefined);
     }
+  }
+
+  private reconcileSessionHistoryInBackground(sessionId: string): void {
+    if (this.historyReconciliationBySession.has(sessionId)) return;
+    void this.reconcileSessionHistory(sessionId).catch((error) => {
+      if (this.disposing || Date.now() - this.historyErrorNoticeAt < 30_000) return;
+      this.historyErrorNoticeAt = Date.now();
+      this.emit({
+        type: "notice",
+        level: "warning",
+        timestamp: nowIso(),
+        text: `DeepSeek Harness 历史同步暂时失败，连接仍保留：${truncatePreview(error instanceof Error ? error.message : String(error), 160)}`,
+      });
+    });
   }
 
   private async reconcileSessionHistory(sessionId: string): Promise<void> {

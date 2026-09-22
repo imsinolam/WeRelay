@@ -1,10 +1,21 @@
+import { IMPLEMENTED_BRIDGE_ADAPTER_IDS, type BridgeAdapterKind } from "../bridge/bridge-providers.ts";
+
+export type CompletionAttachment = { kind: "image" | "file" | "voice" | "video"; path: string };
+
 const MAX_PENDING_CODEX_COMPLETIONS = 80;
 const MAX_DELIVERED_CODEX_COMPLETIONS = 512;
 const CODEX_COMPLETION_RETENTION_MS = 30 * 24 * 60 * 60_000;
+// 积压完成通知的可投递窗口。超过该时长仍未送出的通知直接作废，不再补推：
+// 微信侧迟到的“任务已完成”已经没有操作价值，继续补推只会在下次连上时
+// 一次性轰炸用户。该窗口只约束“还能不能推”，不改变 30 天的去重保留期。
+export const CODEX_COMPLETION_DELIVERABLE_WINDOW_MS = 6 * 60 * 60_000;
 
 export type PendingCodexCompletionDelivery = {
   key: string;
   threadId: string;
+  adapter?: BridgeAdapterKind;
+  attachments?: CompletionAttachment[];
+  nextAttachmentIndex?: number;
   turnId?: string;
   title?: string;
   completedAt?: string;
@@ -31,10 +42,11 @@ export type CodexCompletionDeliveryQueueOptions = {
   initial?: CodexCompletionDeliveryState;
   now?: () => number;
   persist?: (state: CodexCompletionDeliveryState) => void;
+  onExpire?: (deliveries: PendingCodexCompletionDelivery[]) => void;
 };
 
 export type CodexCompletionEnqueueResult = {
-  status: "queued" | "pending" | "delivered";
+  status: "queued" | "pending" | "delivered" | "expired";
   delivery?: PendingCodexCompletionDelivery;
 };
 
@@ -51,6 +63,7 @@ function clonePending(
   return {
     ...delivery,
     texts: [...delivery.texts],
+    ...(delivery.attachments ? { attachments: delivery.attachments.map((item) => ({ ...item })) } : {}),
     ...(delivery.images ? { images: [...delivery.images] } : {}),
   };
 }
@@ -91,6 +104,13 @@ function normalizePending(
   return {
     key: record.key.trim(),
     threadId: record.threadId.trim(),
+    ...(IMPLEMENTED_BRIDGE_ADAPTER_IDS.includes(record.adapter as BridgeAdapterKind)
+      ? { adapter: record.adapter as BridgeAdapterKind } : {}),
+    ...(Array.isArray(record.attachments) && record.attachments.every((item) =>
+      item && typeof item === "object" && ["image", "file", "voice", "video"].includes(item.kind) && typeof item.path === "string")
+      ? { attachments: record.attachments.map((item) => ({ kind: item.kind, path: item.path })),
+          nextAttachmentIndex: Math.min(record.attachments.length, Math.max(0, Number.isInteger(record.nextAttachmentIndex) ? Number(record.nextAttachmentIndex) : 0)) }
+      : {}),
     ...(typeof record.turnId === "string" && record.turnId.trim()
       ? { turnId: record.turnId.trim() }
       : {}),
@@ -291,13 +311,16 @@ export function formatCodexCompletionBacklogSummary(
 export class CodexCompletionDeliveryQueue {
   private readonly now: () => number;
   private readonly persist?: (state: CodexCompletionDeliveryState) => void;
+  private readonly onExpire?: (deliveries: PendingCodexCompletionDelivery[]) => void;
   private readonly pending = new Map<string, PendingCodexCompletionDelivery>();
   private readonly delivered = new Map<string, DeliveredCodexCompletionDelivery>();
+  private readonly expired = new Map<string, number>();
   private readonly inFlight = new Set<string>();
 
   constructor(options: CodexCompletionDeliveryQueueOptions = {}) {
     this.now = options.now ?? Date.now;
     this.persist = options.persist;
+    this.onExpire = options.onExpire;
     const initial = normalizeCodexCompletionDeliveryState(
       options.initial,
       this.now(),
@@ -308,6 +331,9 @@ export class CodexCompletionDeliveryQueue {
     for (const delivery of initial.delivered) {
       this.delivered.set(delivery.key, { ...delivery });
     }
+    // 构造阶段不主动清理：此时 onExpire 监听方尚未就绪。getPending /
+    // deliver / enqueue / snapshot 都会先做一次带通知的清理，daemon 启动
+    // 后的第一轮重试即可丢弃过期积压并留下日志。
   }
 
   snapshot(): CodexCompletionDeliveryState {
@@ -339,6 +365,8 @@ export class CodexCompletionDeliveryQueue {
   enqueue(input: {
     key: string;
     threadId: string;
+    adapter?: BridgeAdapterKind;
+    attachments?: CompletionAttachment[];
     turnId?: string;
     title?: string;
     completedAt?: string;
@@ -354,6 +382,10 @@ export class CodexCompletionDeliveryQueue {
     if (this.delivered.has(key)) {
       return { status: "delivered" };
     }
+    if (this.expired.has(key)) {
+      // 已经过期作废的通知不允许被重放事件重新入队。
+      return { status: "expired" };
+    }
     const existing = this.pending.get(key);
     if (existing) {
       return { status: "pending", delivery: clonePending(existing) };
@@ -365,6 +397,8 @@ export class CodexCompletionDeliveryQueue {
     const delivery: PendingCodexCompletionDelivery = {
       key,
       threadId: input.threadId.trim(),
+      ...(input.adapter ? { adapter: input.adapter } : {}),
+      ...(input.attachments?.length ? { attachments: input.attachments.map((item) => ({ ...item })), nextAttachmentIndex: 0 } : {}),
       ...(input.turnId?.trim() ? { turnId: input.turnId.trim() } : {}),
       ...(input.title?.trim() ? { title: input.title.trim() } : {}),
       ...(normalizeTimestamp(input.completedAt)
@@ -388,7 +422,8 @@ export class CodexCompletionDeliveryQueue {
     for (const key of keys) {
       if (this.inFlight.has(key)) continue;
       const delivery = this.pending.get(key);
-      if (!delivery || (delivery.images?.length ?? 0) > (delivery.nextImageIndex ?? 0)) continue;
+      if (!delivery || (delivery.images?.length ?? 0) > (delivery.nextImageIndex ?? 0) ||
+          (delivery.attachments?.length ?? 0) > (delivery.nextAttachmentIndex ?? 0)) continue;
       this.pending.delete(key);
       this.delivered.delete(key);
       this.delivered.set(key, {
@@ -412,6 +447,7 @@ export class CodexCompletionDeliveryQueue {
       checkpoint: () => void,
     ) => Promise<number>,
     sendImage?: (delivery: PendingCodexCompletionDelivery, imagePath: string) => Promise<void>,
+    sendAttachment?: (delivery: PendingCodexCompletionDelivery, attachment: CompletionAttachment) => Promise<void>,
   ): Promise<CodexCompletionDeliveryResult> {
     if (this.pruneExpired()) {
       this.persistState();
@@ -461,6 +497,17 @@ export class CodexCompletionDeliveryQueue {
           delivery.nextImageIndex = (delivery.nextImageIndex ?? 0) + 1;
           this.persistState();
         }
+        const attachments = delivery.attachments ?? [];
+        while ((delivery.nextAttachmentIndex ?? 0) < attachments.length) {
+          if (!sendAttachment) return { status: "pending", sentCount, totalCount: delivery.texts.length, delivery: clonePending(delivery) };
+          try {
+            await sendAttachment(clonePending(delivery), attachments[delivery.nextAttachmentIndex ?? 0]!);
+          } catch {
+            return { status: "pending", sentCount, totalCount: delivery.texts.length, delivery: clonePending(delivery) };
+          }
+          delivery.nextAttachmentIndex = (delivery.nextAttachmentIndex ?? 0) + 1;
+          this.persistState();
+        }
         this.markDelivered(delivery);
         return { status: "delivered", sentCount, totalCount: delivery.texts.length, delivery: clonePending(delivery) };
       }
@@ -503,20 +550,51 @@ export class CodexCompletionDeliveryQueue {
   }
 
   private pruneExpired(): boolean {
-    const cutoff = this.now() - CODEX_COMPLETION_RETENTION_MS;
+    const nowMs = this.now();
+    const retentionCutoff = nowMs - CODEX_COMPLETION_RETENTION_MS;
+    const deliverableCutoff = nowMs - CODEX_COMPLETION_DELIVERABLE_WINDOW_MS;
     let changed = false;
+    const expired: PendingCodexCompletionDelivery[] = [];
     for (const [key, delivery] of this.pending) {
-      if (Date.parse(delivery.createdAt) < cutoff) {
+      // 正在发送中的条目不能在此刻作废：send 回调返回后仍会按 nextTextIndex
+      // 收尾，提前删除会让一次已完成的分段发送状态与记录不一致。
+      if (this.inFlight.has(key)) {
+        continue;
+      }
+      const createdAtMs = Date.parse(delivery.createdAt);
+      // 超过投递窗口的积压通知直接作废：既不补推，也不允许之后被同 key
+      // 的事件重新入队，否则重放会把它“复活”成一条新通知。
+      if (createdAtMs < deliverableCutoff) {
+        this.pending.delete(key);
+        this.rememberExpired(key);
+        expired.push(clonePending(delivery));
+        changed = true;
+        continue;
+      }
+      if (createdAtMs < retentionCutoff) {
         this.pending.delete(key);
         changed = true;
       }
     }
     for (const [key, delivery] of this.delivered) {
-      if (Date.parse(delivery.deliveredAt) < cutoff) {
+      if (Date.parse(delivery.deliveredAt) < retentionCutoff) {
         this.delivered.delete(key);
         changed = true;
       }
     }
+    if (expired.length > 0) {
+      this.onExpire?.(expired);
+    }
     return changed;
+  }
+
+  private rememberExpired(key: string): void {
+    this.expired.delete(key);
+    this.expired.set(key, this.now());
+    while (this.expired.size > MAX_DELIVERED_CODEX_COMPLETIONS) {
+      const oldestKey = this.expired.keys().next().value;
+      if (typeof oldestKey !== "string") break;
+      this.expired.delete(oldestKey);
+    }
   }
 }

@@ -1,3 +1,4 @@
+import { parseMobileNewTaskSettings, type MobileNewTaskSettings } from "./mobile-new-task-settings.ts";
 import fs from "node:fs";
 import { createHash } from "node:crypto";
 import { findFailedMessageExecution, taskCanCoverFailedMessage, type ReconciliationTask } from "./failed-mobile-message-reconciliation.ts";
@@ -13,8 +14,22 @@ export type MobileMessageOutboxStatus =
   | "retrying"
   | "queued"
   | "submitted"
+  | "unconfirmed"
   | "failed"
-  | "delivered";
+  | "delivered"
+  | "cancelled";
+
+/**
+ * 等待原生确认的最长时间。超过后仍无法确认的待发送消息不再以「待发送」呈现，
+ * 而是转为未确认状态并回到正文，避免永远挂着一条既不能确认也不能操作的条目。
+ * 只改变展示与后续动作，不重发、不删除内容。超过 1 小时仍未确认即视为过时。
+ */
+export const MOBILE_PENDING_CONFIRMATION_TIMEOUT_MS = 60 * 60 * 1_000;
+
+/** 需要等待原生确认的中间状态；这些状态超时后转为未确认。 */
+function isAwaitingConfirmation(status: MobileMessageOutboxStatus): boolean {
+  return status === "queued" || status === "submitted" || status === "sending";
+}
 
 export type MobileMessageOutboxImage = {
   path: string;
@@ -28,6 +43,7 @@ export type MobileMessageOutboxEntry = {
   threadId: string;
   originalThreadId?: string;
   createTaskSourceThreadId?: string;
+  newTaskSettings?: MobileNewTaskSettings;
   text: string;
   images: MobileMessageOutboxImage[];
   createdAtMs: number;
@@ -39,10 +55,15 @@ export type MobileMessageOutboxEntry = {
   lastError?: string;
   turnId?: string;
   queuedMessageId?: string;
+  queueMissing?: boolean;
   queuePosition?: number;
   submittedAtMs?: number;
   deliveredAtMs?: number;
+  cancelledAtMs?: number;
   failureNotifiedAt?: number;
+  newTaskSettingsApplied?: boolean;
+  nativeReceiptKey?: string;
+  deliveryUncertain?: boolean;
 };
 
 export type MobileMessageOutboxAcceptInput = {
@@ -51,6 +72,7 @@ export type MobileMessageOutboxAcceptInput = {
   threadId: string;
   originalThreadId?: string;
   createTaskSourceThreadId?: string;
+  newTaskSettings?: MobileNewTaskSettings;
   text: string;
   images: MobileMessageOutboxImage[];
   createdAtMs?: number;
@@ -97,8 +119,10 @@ function normalizeStatus(value: unknown): MobileMessageOutboxStatus | null {
     case "retrying":
     case "queued":
     case "submitted":
+    case "unconfirmed":
     case "failed":
     case "delivered":
+    case "cancelled":
       return value;
     default:
       return null;
@@ -131,17 +155,21 @@ function normalizeEntry(value: unknown): MobileMessageOutboxEntry | null {
     clientId,
     adapter,
     threadId,
+    ...(normalizeOptionalText(value.nativeReceiptKey) ? {nativeReceiptKey: normalizeOptionalText(value.nativeReceiptKey)} : {}),
     ...(normalizeOptionalText(value.originalThreadId)
       ? { originalThreadId: normalizeOptionalText(value.originalThreadId) }
       : {}),
     ...(normalizeOptionalText(value.createTaskSourceThreadId)
       ? { createTaskSourceThreadId: normalizeOptionalText(value.createTaskSourceThreadId) }
       : {}),
+    ...(value.newTaskSettings ? { newTaskSettings: parseMobileNewTaskSettings(value.newTaskSettings) } : {}),
+    ...(value.newTaskSettingsApplied === true ? { newTaskSettingsApplied: true } : {}),
     text: normalizeText(value.text),
     images,
     createdAtMs: Math.max(0, normalizeNumber(value.createdAtMs, Date.now())),
     sequence: Math.max(1, Math.floor(normalizeNumber(value.sequence, 1))),
     status: restoredStatus,
+    ...(value.deliveryUncertain === true || status === "sending" ? {deliveryUncertain: true} : {}),
     attempts: Math.max(0, Math.floor(normalizeNumber(value.attempts, 0))),
     nextAttemptAtMs: restoredStatus === "retrying"
       ? 0
@@ -153,6 +181,7 @@ function normalizeEntry(value: unknown): MobileMessageOutboxEntry | null {
       ? { lastError: normalizeOptionalText(value.lastError) }
       : {}),
     ...(normalizeOptionalText(value.turnId) ? { turnId: normalizeOptionalText(value.turnId) } : {}),
+    ...(typeof value.queueMissing === "boolean" ? { queueMissing: value.queueMissing } : {}),
     ...(normalizeOptionalText(value.queuedMessageId)
       ? { queuedMessageId: normalizeOptionalText(value.queuedMessageId) }
       : {}),
@@ -162,6 +191,7 @@ function normalizeEntry(value: unknown): MobileMessageOutboxEntry | null {
     ...(normalizeNumber(value.submittedAtMs) > 0
       ? { submittedAtMs: normalizeNumber(value.submittedAtMs) }
       : {}),
+    ...(normalizeNumber(value.cancelledAtMs) > 0 ? { cancelledAtMs: normalizeNumber(value.cancelledAtMs) } : {}),
     ...(normalizeNumber(value.deliveredAtMs) > 0
       ? { deliveredAtMs: normalizeNumber(value.deliveredAtMs) }
       : {}),
@@ -193,13 +223,25 @@ function messageOccurredAtMs(message: BridgeSessionMessage): number | null {
   return null;
 }
 
+function nativeMessageReceiptKey(message: BridgeSessionMessage): string {
+  return message.id ? `id:${message.id}` : JSON.stringify([message.turnId, message.createdAtMs, message.text]);
+}
+
 function messageMatchesEntry(message: BridgeSessionMessage, entry: MobileMessageOutboxEntry): boolean {
-  if (entry.turnId && message.turnId === entry.turnId) return true;
+  const clientId = (message as BridgeSessionMessage & { clientId?: string }).clientId;
+  if (clientId) return clientId === entry.clientId;
+  if (entry.turnId && message.turnId === entry.turnId && normalizedMessageText(message.text) === normalizedMessageText(entry.text)) return true;
+  if (entry.turnId && message.turnId && message.turnId !== entry.turnId) return false;
   if (entry.status !== "submitted" && entry.status !== "queued") return false;
   if (normalizedMessageText(message.text ?? "") !== normalizedMessageText(entry.text)) {
     return false;
   }
   const messageAtMs = messageOccurredAtMs(message);
+  // A disappearing queue or old identical text is not proof of execution.
+  if (entry.status === "queued") {
+    const earliest = entry.lastAttemptAtMs ?? entry.submittedAtMs ?? entry.createdAtMs;
+    return messageAtMs !== null && messageAtMs >= earliest - 1_000;
+  }
   if (messageAtMs !== null && entry.lastAttemptAtMs !== undefined) {
     return messageAtMs >= entry.lastAttemptAtMs - 1_000;
   }
@@ -251,6 +293,9 @@ export function mobileMessageOutboxEntryToUserMessage(
   attempts: number;
   lastError?: string;
   queuedMessageId?: string;
+  queueMissing?: boolean;
+  lastAttemptAtMs?: number;
+  submittedAtMs?: number;
 } {
   const images: BridgeMessageImage[] = entry.images.map((image) => ({
     source: "local",
@@ -269,6 +314,9 @@ export function mobileMessageOutboxEntryToUserMessage(
     ...(entry.turnId ? { turnId: entry.turnId } : {}),
     ...(entry.lastError ? { lastError: entry.lastError } : {}),
     ...(entry.queuedMessageId ? { queuedMessageId: entry.queuedMessageId } : {}),
+    ...(typeof entry.queueMissing === "boolean" ? { queueMissing: entry.queueMissing } : {}),
+    ...(Number.isFinite(entry.lastAttemptAtMs) ? { lastAttemptAtMs: entry.lastAttemptAtMs } : {}),
+    ...(Number.isFinite(entry.submittedAtMs) ? { submittedAtMs: entry.submittedAtMs } : {}),
     ...(images.length ? { images } : {}),
   };
 }
@@ -301,6 +349,8 @@ export class MobileMessageOutbox {
     if (existing) {
       return { entry: cloneEntry(existing), duplicate: true };
     }
+    const pendingSettings = this.entries.find(entry => entry.adapter === adapter && entry.threadId === threadId && entry.newTaskSettings && !entry.newTaskSettingsApplied)?.newTaskSettings;
+    const newTaskSettings = pendingSettings ?? input.newTaskSettings;
     const entry: MobileMessageOutboxEntry = {
       clientId,
       adapter,
@@ -311,6 +361,7 @@ export class MobileMessageOutbox {
       ...(input.createTaskSourceThreadId?.trim()
         ? { createTaskSourceThreadId: input.createTaskSourceThreadId.trim() }
         : {}),
+      ...(newTaskSettings ? { newTaskSettings: { ...newTaskSettings } } : {}),
       text: input.text,
       images: input.images.map((image) => ({ ...image })),
       createdAtMs: input.createdAtMs ?? this.now(),
@@ -343,9 +394,77 @@ export class MobileMessageOutbox {
       .map(entry => entry.clientId);
   }
 
+  /**
+   * 把长时间等不到原生确认的条目转为未确认：停止以「待发送」呈现，回到正文并
+   * 保留内容与「检查状态」入口。不重发、不删除，避免重复发送。
+   *
+   * 只处理没有原生队列 ID 的条目：有 ID 的条目能由服务端对账，可能只是暂时
+   * 还没出现在队列快照里，不能因为等久了就判定过时。
+   */
+  expireStalePendingConfirmations(
+    nowMs = this.now(),
+    timeoutMs = MOBILE_PENDING_CONFIRMATION_TIMEOUT_MS,
+  ): Array<{ adapter: string; threadId: string }> {
+    const affected = new Map<string, { adapter: string; threadId: string }>();
+    for (const entry of this.entries) {
+      if (!isAwaitingConfirmation(entry.status)) continue;
+      // 有原生队列 ID：交给对账逻辑，不在超时里处理。
+      if (entry.queuedMessageId) continue;
+      const sinceMs = entry.lastAttemptAtMs ?? entry.submittedAtMs ?? entry.createdAtMs;
+      if (!Number.isFinite(sinceMs) || nowMs - sinceMs < timeoutMs) continue;
+      entry.status = "unconfirmed";
+      delete entry.queuedMessageId;
+      delete entry.queueMissing;
+      delete entry.queuePosition;
+      entry.deliveryUncertain = true;
+      affected.set(`${entry.adapter}\0${entry.threadId}`, {
+        adapter: entry.adapter,
+        threadId: entry.threadId,
+      });
+    }
+    if (affected.size) this.persist();
+    return [...affected.values()];
+  }
+
+  /** 用户主动放弃一条尚未获得原生确认的发送（乐观条目没有原生队列 ID）。 */
+  cancelByClientId(adapter: string, threadId: string, clientId: string): boolean {
+    const target = this.findMutable(adapter, threadId, clientId);
+    if (!target) return false;
+    if (target.status === "delivered" || target.status === "cancelled") return false;
+    // 保留幂等墓碑，避免延迟到达的 POST 重新提交同一条消息。
+    target.status = "cancelled";
+    target.cancelledAtMs = this.now();
+    target.nextAttemptAtMs = 0;
+    delete target.queuedMessageId;
+    delete target.queueMissing;
+    this.persist();
+    return true;
+  }
+
+  /**
+   * 最近一条等待原生确认的条目何时应当过期；没有这样的条目时返回 null。
+   * 调度器据此在等待期间保持唤醒，否则等待中的条目永远不会被判定过时。
+   */
+  nextPendingConfirmationExpiryAtMs(
+    nowMs = this.now(),
+    timeoutMs = MOBILE_PENDING_CONFIRMATION_TIMEOUT_MS,
+  ): number | null {
+    let earliest: number | null = null;
+    for (const entry of this.entries) {
+      if (!isAwaitingConfirmation(entry.status)) continue;
+      // 有原生队列 ID 的条目交给对账逻辑，不需要超时调度。
+      if (entry.queuedMessageId) continue;
+      const sinceMs = entry.lastAttemptAtMs ?? entry.submittedAtMs ?? entry.createdAtMs;
+      if (!Number.isFinite(sinceMs)) continue;
+      const expiresAtMs = sinceMs + timeoutMs;
+      if (earliest === null || expiresAtMs < earliest) earliest = expiresAtMs;
+    }
+    return earliest === null ? null : Math.max(nowMs, earliest);
+  }
+
   contentRevision(adapter: string, threadId: string): string {
     const receipts = this.entries.filter(entry => entry.adapter === adapter && entryMatchesThread(entry, threadId))
-      .map(entry => [entry.clientId, entry.status, entry.attempts, entry.turnId, entry.queuedMessageId, entry.lastError]);
+      .map(entry => [entry.clientId, entry.status, entry.attempts, entry.turnId, entry.queuedMessageId, entry.queueMissing, entry.lastError]);
     return createHash("sha256").update(JSON.stringify(receipts)).digest("hex").slice(0, 16);
   }
 
@@ -371,6 +490,16 @@ export class MobileMessageOutbox {
     return heads.length ? Math.min(...heads.map((entry) => entry.nextAttemptAtMs)) : null;
   }
 
+  markNewTaskSettingsApplied(adapter: string, threadId: string, clientId: string): boolean {
+    const target = this.findMutable(adapter, threadId, clientId);
+    if (!target) return false;
+    for (const entry of this.entries) {
+      if (entry.adapter === adapter && entry.threadId === target.threadId && entry.newTaskSettings) entry.newTaskSettingsApplied = true;
+    }
+    this.persist();
+    return true;
+  }
+
   markSending(adapter: string, threadId: string, clientId: string, attemptedAtMs = this.now()): boolean {
     return this.update(adapter, threadId, clientId, (entry) => {
       entry.status = "sending";
@@ -390,6 +519,7 @@ export class MobileMessageOutbox {
     return this.update(adapter, threadId, clientId, (entry) => {
       entry.status = "retrying";
       entry.lastError = truncate(params.error, MAX_ERROR_LENGTH);
+      entry.deliveryUncertain ||= classifyMobileSendFailure(params.error) === "unconfirmed";
       entry.nextAttemptAtMs = params.nextAttemptAtMs;
     });
   }
@@ -407,6 +537,8 @@ export class MobileMessageOutbox {
   ): boolean {
     return this.update(adapter, threadId, clientId, (entry) => {
       entry.status = "queued";
+      delete entry.queueMissing;
+      delete entry.deliveryUncertain;
       entry.submittedAtMs = params.submittedAtMs ?? this.now();
       entry.nextAttemptAtMs = 0;
       delete entry.lastError;
@@ -414,6 +546,26 @@ export class MobileMessageOutbox {
       if (params.queuePosition) entry.queuePosition = params.queuePosition;
       if (params.turnId) entry.turnId = params.turnId;
     });
+  }
+
+  /** Apply only after the desktop owner confirms an explicit queue edit/delete. */
+  updateQueuedEntry(adapter: string, threadId: string, messageId: string, text: string | null): void {
+    let changed = false;
+    for (const entry of this.entries) {
+      if (entry.adapter !== adapter || !entryMatchesThread(entry, threadId) ||
+          entry.queuedMessageId !== messageId || entry.status !== "queued") continue;
+      if (text === null) {
+        // Retain an idempotency tombstone so a delayed POST cannot submit it again.
+        entry.status = "cancelled";
+        entry.cancelledAtMs = this.now();
+        entry.nextAttemptAtMs = 0;
+      } else {
+        entry.text = text;
+      }
+      delete entry.queueMissing;
+      changed = true;
+    }
+    if (changed) this.persist();
   }
 
   markSubmitted(
@@ -424,6 +576,7 @@ export class MobileMessageOutbox {
   ): boolean {
     return this.update(adapter, threadId, clientId, (entry) => {
       entry.status = "submitted";
+      delete entry.deliveryUncertain;
       entry.submittedAtMs = params.submittedAtMs ?? this.now();
       entry.nextAttemptAtMs = 0;
       delete entry.lastError;
@@ -440,6 +593,7 @@ export class MobileMessageOutbox {
     return this.update(adapter, threadId, clientId, (entry) => {
       entry.status = "failed";
       entry.lastError = truncate(error, MAX_ERROR_LENGTH);
+      entry.deliveryUncertain ||= classifyMobileSendFailure(error) === "unconfirmed";
       entry.nextAttemptAtMs = 0;
       delete entry.failureNotifiedAt;
     });
@@ -460,6 +614,30 @@ export class MobileMessageOutbox {
     return this.entries.filter(entry => entry.status === "failed" && (!adapter || entry.adapter === adapter)).map(cloneEntry);
   }
 
+  /** A persisted native user record is acceptance; an assistant reply is not required. */
+  reconcileReceived(adapter: string, threadId: string, clientId: string, messages: BridgeSessionMessage[]): boolean {
+    const entry = this.findMutable(adapter, threadId, clientId);
+    if (!entry || entry.status === "delivered") return entry?.status === "delivered";
+    for (const message of messages) {
+      if (message.role !== "user" || (message as BridgeSessionMessage & {pending?: boolean}).pending) continue;
+      if (entry.turnId && message.turnId && entry.turnId !== message.turnId) continue;
+      const exactTurn = Boolean(entry.turnId && entry.turnId === message.turnId);
+      if (!exactTurn && (message.createdAtMs === undefined || message.createdAtMs < entry.createdAtMs)) continue;
+      if (normalizedMessageText(message.text ?? "") !== normalizedMessageText(entry.text)) continue;
+      if (!entry.text.trim() && !entry.images.length) continue;
+      if (entry.images.some(image => !message.images?.some(actual => actual.source === "local" && actual.path === image.path))) continue;
+      const nativeReceiptKey = message.id ? `id:${message.id}` : JSON.stringify([message.turnId, message.createdAtMs, message.text]);
+      if (this.entries.some(other => other !== entry && other.adapter === adapter && entryMatchesThread(other, threadId) && other.nativeReceiptKey === nativeReceiptKey)) continue;
+      entry.status = "delivered";
+      entry.nativeReceiptKey = nativeReceiptKey;
+      entry.deliveredAtMs = this.now();
+      delete entry.lastError;
+      this.persist();
+      return true;
+    }
+    return false;
+  }
+
   reconcileFailedExecution(
     adapter: string,
     task: ReconciliationTask,
@@ -469,6 +647,11 @@ export class MobileMessageOutbox {
     let matched = 0;
     for (const entry of this.entries) {
       if (entry.adapter !== adapter || !taskCanCoverFailedMessage(entry, task, tasks)) continue;
+      if (entry.status !== "failed") continue;
+      if (entryMatchesThread(entry, task.threadId)) {
+        if (this.reconcileReceived(adapter, entry.threadId, entry.clientId, messages)) matched++;
+        continue;
+      }
       if (!findFailedMessageExecution(entry, task.threadId, messages)) continue;
       entry.status = "delivered";
       entry.deliveredAtMs = this.now();
@@ -487,7 +670,8 @@ export class MobileMessageOutbox {
   }
 
   retry(adapter: string, threadId: string, clientId: string, nowMs = this.now()): boolean {
-    if (this.findMutable(adapter, threadId, clientId)?.status === "delivered") return false;
+    const status = this.findMutable(adapter, threadId, clientId)?.status;
+    if (status === "delivered" || status === "cancelled") return false;
     return this.update(adapter, threadId, clientId, (entry) => {
       entry.status = "accepted";
       entry.attempts = 0;
@@ -495,9 +679,11 @@ export class MobileMessageOutbox {
       delete entry.lastAttemptAtMs;
       delete entry.lastError;
       delete entry.failureNotifiedAt;
-      delete entry.turnId;
-      delete entry.queuedMessageId;
-      delete entry.queuePosition;
+      if (!entry.deliveryUncertain) {
+        delete entry.turnId;
+        delete entry.queuedMessageId;
+        delete entry.queuePosition;
+      }
       delete entry.submittedAtMs;
     });
   }
@@ -518,6 +704,11 @@ export class MobileMessageOutbox {
       if (entry.threadId !== normalized) {
         entry.originalThreadId = entry.originalThreadId ?? originalThreadId;
         entry.threadId = normalized;
+        changed = true;
+      }
+      if (target.newTaskSettings && entry.clientId !== clientId) {
+        entry.newTaskSettings = { ...target.newTaskSettings };
+        entry.newTaskSettingsApplied = target.newTaskSettingsApplied;
         changed = true;
       }
       if (entry.createTaskSourceThreadId !== undefined) {
@@ -541,7 +732,7 @@ export class MobileMessageOutbox {
     threadId: string,
     params: {
       messages: BridgeSessionMessage[];
-      queuedMessages: Array<{ id: string; text: string; imageCount: number }>;
+      queuedMessages?: Array<{ id: string; text: string; imageCount: number }>;
       nowMs?: number;
     },
   ): void {
@@ -550,24 +741,33 @@ export class MobileMessageOutbox {
       .filter((entry) => entry.status === "submitted" || entry.status === "queued")
       .sort((left, right) => left.sequence - right.sequence);
     if (!relevant.length) return;
+    // A native receipt may acknowledge only one send, including after restart.
+    const deliveredKeys = new Set(this.entries
+      .filter(entry => entry.adapter === adapter && entryMatchesThread(entry, threadId) && entry.status === "delivered")
+      .map(entry => entry.nativeReceiptKey).filter(Boolean));
     const usedMessageIndexes = new Set<number>();
     let changed = false;
     for (const entry of relevant) {
-      if (
-        entry.status === "queued" &&
-        entry.queuedMessageId &&
-        params.queuedMessages.some((message) => message.id === entry.queuedMessageId)
-      ) {
-        continue;
+      if (entry.status === "queued" && entry.queuedMessageId && Array.isArray(params.queuedMessages)) {
+        const stillQueued = params.queuedMessages.some(message => message.id === entry.queuedMessageId);
+        if (entry.queueMissing !== !stillQueued) {
+          entry.queueMissing = !stillQueued;
+          changed = true;
+        }
+        if (stillQueued) continue;
       }
       const messageIndex = params.messages.findIndex((message, index) => (
         !usedMessageIndexes.has(index) &&
+        !deliveredKeys.has(nativeMessageReceiptKey(message)) &&
         message.role === "user" &&
         messageMatchesEntry(message, entry)
       ));
       if (messageIndex < 0) continue;
       usedMessageIndexes.add(messageIndex);
       entry.status = "delivered";
+      delete entry.queueMissing;
+      const message = params.messages[messageIndex]!;
+      entry.nativeReceiptKey = nativeMessageReceiptKey(message);
       entry.deliveredAtMs = params.nowMs ?? this.now();
       changed = true;
     }
@@ -631,11 +831,12 @@ export class MobileMessageOutbox {
 
   private prune(persist = true): void {
     const cutoff = this.now() - DELIVERED_RETENTION_MS;
+    const settled = (entry: MobileMessageOutboxEntry) => entry.status === "delivered" || entry.status === "cancelled";
     const retained = this.entries
-      .filter((entry) => entry.status !== "delivered" || (entry.deliveredAtMs ?? 0) >= cutoff)
+      .filter((entry) => !settled(entry) || (entry.cancelledAtMs ?? entry.deliveredAtMs ?? 0) >= cutoff)
       .sort((left, right) => left.sequence - right.sequence);
-    const undelivered = retained.filter((entry) => entry.status !== "delivered");
-    const delivered = retained.filter((entry) => entry.status === "delivered");
+    const undelivered = retained.filter((entry) => !settled(entry));
+    const delivered = retained.filter(settled);
     const deliveredLimit = Math.max(0, MAX_OUTBOX_ENTRIES - undelivered.length);
     this.entries = undelivered.concat(
       deliveredLimit > 0 ? delivered.slice(-deliveredLimit) : [],

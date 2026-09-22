@@ -43,6 +43,7 @@ describe("LegacyAdapterRuntime optional capabilities", () => {
     expect(runtime.getSessionPermissionState).toBeUndefined();
     expect(runtime.setSessionPermission).toBeUndefined();
     expect(runtime.resolveApprovalRequest).toBeUndefined();
+    expect(runtime.getPendingTaskUserInput).toBeUndefined();
   });
 
   test("forwards optional session and queue methods to the wrapped adapter", async () => {
@@ -177,4 +178,15 @@ describe("LegacyAdapterRuntime optional capabilities", () => {
     await runtime.createSessionInProject?.("source-session");
     await expect(runtime.resolveApprovalRequest?.("approval-1", "deny")).resolves.toBe(true);
   });
+});
+
+
+test("binds task-scoped pending questions to their original adapter owner", () => {
+  const adapter = buildAdapter({ getPendingTaskUserInput(threadId) {
+    expect(this).toBe(adapter);
+    return threadId === "task" ? {summary: "choose", threadId, questions: []} : null;
+  } });
+  const runtime = new LegacyAdapterRuntime(adapter);
+  expect(runtime.getPendingTaskUserInput?.("task")?.threadId).toBe("task");
+  expect(runtime.getPendingTaskUserInput?.("other")).toBeNull();
 });

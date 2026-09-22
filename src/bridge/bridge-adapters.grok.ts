@@ -1,9 +1,10 @@
-import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { execFile, spawn, spawnSync, type ChildProcess } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 
 import {
   type AdapterOptions,
@@ -43,6 +44,8 @@ const grokLiveEventPathCache = new Map<string, {
   expiresAtMs: number;
   paths: Set<string>;
 }>();
+const grokLiveEventPathProbePromises = new Map<string, Promise<Set<string>>>();
+const execFileAsync = promisify(execFile);
 
 type GrokLeaderSocketOptions = {
   platform?: NodeJS.Platform;
@@ -507,6 +510,44 @@ function probeGrokLiveEventPaths(sessionsRoot: string): Set<string> {
   }
 }
 
+async function probeGrokLiveEventPathsAsync(sessionsRoot: string): Promise<Set<string>> {
+  if (process.platform === "win32") return new Set();
+  const cacheKey = path.resolve(sessionsRoot);
+  const cached = grokLiveEventPathCache.get(cacheKey);
+  if (cached && cached.expiresAtMs > Date.now()) return cached.paths;
+  const pending = grokLiveEventPathProbePromises.get(cacheKey);
+  if (pending) return await pending;
+  const probe = (async () => {
+    try {
+      const result = await execFileAsync("lsof", ["-nP", "-Fpn", "-c", "grok"], {
+        encoding: "utf8",
+        windowsHide: true,
+        timeout: 2_000,
+        maxBuffer: GROK_PROCESS_PROBE_MAX_BUFFER_BYTES,
+      });
+      const paths = parseGrokLiveEventPaths(
+        String(result.stdout),
+        sessionsRoot,
+      );
+      grokLiveEventPathCache.set(cacheKey, {
+        expiresAtMs: Date.now() + GROK_LIVE_EVENT_CACHE_TTL_MS,
+        paths,
+      });
+      return paths;
+    } catch {
+      return new Set<string>();
+    }
+  })();
+  grokLiveEventPathProbePromises.set(cacheKey, probe);
+  try {
+    return await probe;
+  } finally {
+    if (grokLiveEventPathProbePromises.get(cacheKey) === probe) {
+      grokLiveEventPathProbePromises.delete(cacheKey);
+    }
+  }
+}
+
 function readGrokEventTail(eventsPath: string): string {
   try {
     const stat = fs.statSync(eventsPath);
@@ -530,10 +571,33 @@ function readGrokEventTail(eventsPath: string): string {
   }
 }
 
-function inferGrokLiveRuntimeStatus(eventsPath: string): BridgeResumeSessionRuntimeStatus {
+async function readGrokEventTailAsync(eventsPath: string): Promise<string> {
+  try {
+    const stat = await fs.promises.stat(eventsPath);
+    const bytesToRead = Math.min(stat.size, GROK_EVENT_TAIL_MAX_BYTES);
+    if (bytesToRead <= 0) return "";
+    const handle = await fs.promises.open(eventsPath, "r");
+    try {
+      const buffer = Buffer.allocUnsafe(bytesToRead);
+      const result = await handle.read(buffer, 0, bytesToRead, stat.size - bytesToRead);
+      let text = buffer.subarray(0, result.bytesRead).toString("utf8");
+      if (bytesToRead < stat.size) {
+        const firstLineBreak = text.indexOf("\n");
+        text = firstLineBreak >= 0 ? text.slice(firstLineBreak + 1) : "";
+      }
+      return text;
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return "";
+  }
+}
+
+function inferGrokLiveRuntimeStatus(eventTail: string): BridgeResumeSessionRuntimeStatus {
   let turnActive = false;
   let sawTurnActivity = false;
-  for (const line of readGrokEventTail(eventsPath).split(/\r?\n/)) {
+  for (const line of eventTail.split(/\r?\n/)) {
     if (!line.trim()) continue;
     let event: unknown;
     try {
@@ -572,6 +636,36 @@ function inferGrokLiveRuntimeStatus(eventsPath: string): BridgeResumeSessionRunt
   }
   if (!sawTurnActivity || !turnActive) return { type: "idle" };
   return { type: "active", activeFlags: [] };
+}
+
+const GROK_ACTIVITY_EVENTS = new Set([
+  "turn_started", "turn_ended", "interjected", "loop_started", "phase_changed",
+  "first_token", "tool_started", "tool_completed", "permission_requested", "permission_resolved",
+]);
+
+function grokActivityTime(summary: Record<string, unknown>, eventTail: string, mtime: Date): string {
+  const timestamp = (value: unknown): number | undefined => {
+    const text = readString(value);
+    const parsed = text ? Date.parse(text) : NaN;
+    return Number.isFinite(parsed) ? parsed : undefined;
+  };
+  let activity: number | undefined;
+  let earliestEvent: number | undefined;
+  for (const line of eventTail.split(/\r?\n/)) {
+    let event: unknown;
+    try { event = JSON.parse(line); } catch { continue; }
+    if (!isRecord(event)) continue;
+    const time = timestamp(event.ts);
+    if (time === undefined) continue;
+    earliestEvent = Math.min(earliestEvent ?? time, time);
+    if (GROK_ACTIVITY_EVENTS.has(String(event.type))) activity = Math.max(activity ?? time, time);
+  }
+  // Grok may refresh last_active_at for many stored sessions at startup. That is
+  // metadata activity, not a conversation turn; never let it outrank real events.
+  const fallback = earliestEvent === undefined
+    ? timestamp(summary.last_active_at) ?? timestamp(summary.updated_at) ?? timestamp(summary.created_at)
+    : timestamp(summary.created_at) ?? earliestEvent;
+  return new Date(activity ?? fallback ?? mtime.getTime()).toISOString();
 }
 
 type ListGrokStoredSessionsOptions = {
@@ -623,10 +717,9 @@ export function listGrokStoredSessions(
       const title = readString(summary.generated_title) ??
         readString(summary.session_summary) ??
         `Grok 会话 ${sessionId.slice(0, 8)}`;
-      const lastUpdatedAt = readString(summary.last_active_at) ??
-        readString(summary.updated_at) ??
-        stat.mtime.toISOString();
       const eventsPath = path.join(directory, "events.jsonl");
+      const eventTail = readGrokEventTail(eventsPath);
+      const lastUpdatedAt = grokActivityTime(summary, eventTail, stat.mtime);
       candidates.push({
         sessionId,
         threadId: sessionId,
@@ -634,7 +727,76 @@ export function listGrokStoredSessions(
         lastUpdatedAt,
         ...(cwd ? { cwd } : {}),
         runtimeStatus: liveEventPaths.has(path.resolve(eventsPath))
-          ? inferGrokLiveRuntimeStatus(eventsPath)
+          ? inferGrokLiveRuntimeStatus(eventTail)
+          : { type: "notLoaded" },
+      });
+    }
+  }
+  return candidates
+    .sort((left, right) => Date.parse(right.lastUpdatedAt) - Date.parse(left.lastUpdatedAt))
+    .slice(0, Math.max(1, limit));
+}
+
+export async function listGrokStoredSessionsAsync(
+  limit = 10,
+  options: ListGrokStoredSessionsOptions = {},
+): Promise<BridgeResumeSessionCandidate[]> {
+  const sessionsRoot = path.join(grokHomeDirectory(), "sessions");
+  const liveEventPaths = options.liveEventPaths === undefined
+    ? await probeGrokLiveEventPathsAsync(sessionsRoot)
+    : new Set([...options.liveEventPaths].map((eventPath) => path.resolve(eventPath)));
+  const candidates: BridgeResumeSessionCandidate[] = [];
+  let projects: fs.Dirent[];
+  try {
+    projects = await fs.promises.readdir(sessionsRoot, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  for (const project of projects) {
+    if (!project.isDirectory()) continue;
+    const projectDirectory = path.join(sessionsRoot, project.name);
+    let sessions: fs.Dirent[];
+    try {
+      sessions = await fs.promises.readdir(projectDirectory, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const session of sessions) {
+      if (!session.isDirectory()) continue;
+      const directory = path.join(projectDirectory, session.name);
+      const summaryPath = path.join(directory, "summary.json");
+      let summary: unknown;
+      let stat: fs.Stats;
+      try {
+        const [summaryText, summaryStat] = await Promise.all([
+          fs.promises.readFile(summaryPath, "utf8"),
+          fs.promises.stat(summaryPath),
+        ]);
+        summary = JSON.parse(summaryText);
+        stat = summaryStat;
+      } catch {
+        continue;
+      }
+      if (!isRecord(summary)) continue;
+      const info = isRecord(summary.info) ? summary.info : null;
+      const sessionId = readString(info?.id) ?? session.name;
+      const cwd = readString(info?.cwd) ?? (() => {
+        try { return decodeURIComponent(project.name); } catch { return undefined; }
+      })();
+      const title = readString(summary.generated_title) ??
+        readString(summary.session_summary) ??
+        `Grok 会话 ${sessionId.slice(0, 8)}`;
+      const eventsPath = path.join(directory, "events.jsonl");
+      const eventTail = await readGrokEventTailAsync(eventsPath);
+      const lastUpdatedAt = grokActivityTime(summary, eventTail, stat.mtime);
+      candidates.push({
+        sessionId,
+        threadId: sessionId,
+        title,
+        lastUpdatedAt,
+        ...(cwd ? { cwd } : {}),
+        runtimeStatus: liveEventPaths.has(path.resolve(eventsPath))
+          ? inferGrokLiveRuntimeStatus(eventTail)
           : { type: "notLoaded" },
       });
     }

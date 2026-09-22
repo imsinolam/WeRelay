@@ -1,4 +1,8 @@
 import { COMPOSER_BEAM_CSS } from "./codex-mobile-composer-beam.ts";
+import {
+  WE_RELAY_LOGO_DARK_DATA_URI,
+  WE_RELAY_LOGO_LIGHT_DATA_URI,
+} from "./codex-mobile-brand.ts";
 
 export const CODEX_MOBILE_HTML = `<!doctype html>
 <html lang="zh-CN">
@@ -14,16 +18,16 @@ export const CODEX_MOBILE_HTML = `<!doctype html>
 <body>
   <section class="boot-screen" id="boot-screen" aria-label="正在打开 WeRelay">
     <div class="boot-content">
-      <div class="boot-wordmark">WeRelay</div>
-      <div class="boot-activity" role="status" aria-label="正在处理"><span class="solving-copy">正在处理</span><span class="solving-dots" aria-hidden="true"><span>·</span><span>·</span><span>·</span></span></div>
-      <div class="boot-status" id="boot-status">正在检查电脑连接状态…</div>
-      <div class="boot-detail" id="boot-detail">正在确认服务器和电脑是否在线。</div>
+      <div class="boot-wordmark brand-logo" role="img" aria-label="WeRelay" style="--brand-logo-width: 132px"></div>
+      <canvas class="boot-orb" id="boot-orb" role="img" aria-label="正在处理" width="56" height="56"></canvas>
+      <div class="boot-status" id="boot-status" role="status"><span id="boot-status-text">正在连接电脑</span></div>
+      <div class="boot-detail" id="boot-detail" hidden></div>
     </div>
   </section>
 
   <section class="auth-screen" id="auth-screen" aria-labelledby="auth-title" hidden>
     <div class="auth-card">
-      <a class="auth-wordmark" href="/about" aria-label="查看 WeRelay 项目说明">WeRelay</a>
+      <a class="auth-wordmark brand-logo" href="/about" aria-label="查看 WeRelay 项目说明" style="--brand-logo-width: 132px"></a>
       <h1 id="auth-title">验证访问</h1>
       <p id="auth-description">请输入移动版访问密码。</p>
       <form class="auth-form" id="auth-form">
@@ -45,7 +49,7 @@ export const CODEX_MOBILE_HTML = `<!doctype html>
       <div class="sidebar-head">
         <div class="workspace-area">
           <button class="workspace-switcher" id="workspace-switcher" type="button" aria-label="切换终端或打开 WeRelay 菜单" aria-expanded="false">
-            <span class="workspace-product">WeRelay</span>
+            <span class="workspace-product brand-logo" role="img" aria-label="WeRelay" style="--brand-logo-width: 100px"></span>
             <span class="workspace-divider">·</span>
             <span class="workspace-adapter" id="active-adapter-label">Codex</span>
             <span class="workspace-switch-progress" id="workspace-switch-progress" aria-hidden="true" hidden></span>
@@ -153,7 +157,7 @@ export const CODEX_MOBILE_HTML = `<!doctype html>
 
       <section class="messages" id="messages" aria-live="polite">
         <div class="empty-state" id="empty-state">
-          <div class="empty-wordmark">WeRelay</div>
+          <div class="empty-wordmark brand-logo" role="img" aria-label="WeRelay" style="--brand-logo-width: 150px"></div>
           <h1>从手机继续任务</h1>
           <p>这里显示电脑端任务的完整上下文。</p>
         </div>
@@ -241,7 +245,7 @@ export const WE_RELAY_ABOUT_HTML = `<!doctype html>
 </head>
 <body class="about-page">
   <header class="about-topbar">
-    <a class="about-logo" href="/about">WeRelay</a>
+    <a class="about-logo brand-logo" href="/about" role="img" aria-label="WeRelay 项目说明" style="--brand-logo-width: 104px"></a>
     <a class="about-open-app" href="/">打开任务</a>
   </header>
 
@@ -439,16 +443,27 @@ button:focus-visible { outline: 2px solid var(--border-strong); outline-offset: 
 .boot-screen { min-height: 100dvh; display: grid; place-items: center; background: var(--canvas); }
 .boot-content { width: min(360px, calc(100vw - 48px)); display: grid; justify-items: center; gap: 9px; }
 .boot-wordmark { color: var(--text); font-size: 24px; font-weight: 650; letter-spacing: -0.035em; }
-.boot-activity { display: inline-flex; align-items: baseline; gap: 3px; min-height: 24px; margin: 8px 0 1px; color: var(--muted-strong); font-size: 14px; font-weight: 560; letter-spacing: -.01em; }
-.solving-copy { background: linear-gradient(100deg, var(--muted) 20%, var(--text) 48%, var(--muted) 76%); background-size: 220% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; animation: solving-shimmer 1.55s ease-in-out infinite; }
-.solving-dots { display: inline-flex; width: 18px; }
-.solving-dots span { display: inline-block; animation: solving-dot 1.15s ease-in-out infinite; }
-.solving-dots span:nth-child(2) { animation-delay: .14s; }
-.solving-dots span:nth-child(3) { animation-delay: .28s; }
+/* 品牌字标：使用与官网同一张字标图（黑字 + 绿弧），暗色模式换用反相版。
+   宽度用 em 跟随各处字号，高度按原图 3.84:1 自动推导，避免变形。 */
+.brand-logo {
+  display: block;
+  width: var(--brand-logo-width, 7em);
+  height: auto;
+  aspect-ratio: 384 / 100;
+  background: url("${WE_RELAY_LOGO_LIGHT_DATA_URI}") center / contain no-repeat;
+  color: transparent;
+  text-indent: -9999px;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+}
+/* 思考球：纯 canvas 点阵动画，无外框、无底色，随主题自动切换墨色。 */
+.boot-orb { width: 56px; height: 56px; display: block; margin: 6px 0 2px; }
 @keyframes solving-shimmer { 0% { background-position: 120% 0; } 100% { background-position: -120% 0; } }
 @keyframes solving-dot { 0%, 60%, 100% { opacity: .2; transform: translateY(0); } 30% { opacity: 1; transform: translateY(-1px); } }
-.boot-status { color: var(--text); font-size: 14px; font-weight: 570; line-height: 1.5; text-align: center; }
-.boot-detail { min-height: 40px; color: var(--muted); font-size: 12px; line-height: 1.65; text-align: center; text-wrap: balance; }
+.boot-status { display: inline-flex; align-items: baseline; gap: 3px; margin-top: 8px; color: var(--text); font-size: 14px; font-weight: 570; line-height: 1.5; text-align: center; }
+.boot-detail { max-width: 300px; color: var(--muted); font-size: 12px; line-height: 1.6; text-align: center; text-wrap: balance; }
+.boot-detail[hidden] { display: none; }
 .auth-screen { min-height: 100dvh; display: grid; place-items: center; padding: max(24px, env(safe-area-inset-top)) 20px max(24px, env(safe-area-inset-bottom)); background: var(--canvas); }
 .auth-card { width: min(100%, 390px); padding: 34px 30px 30px; border: 1px solid var(--border); border-radius: 24px; background: var(--page); box-shadow: var(--shadow); }
 .auth-wordmark { display: inline-block; margin-bottom: 28px; color: var(--text); font-size: 22px; font-weight: 680; letter-spacing: -0.04em; text-decoration: none; }
@@ -721,6 +736,7 @@ svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.75; stro
 .workspace-switcher { min-height: 32px; max-width: min(420px, calc(100vw - 96px)); display: flex; align-items: center; gap: 5px; padding: 0 7px; border: 0; border-radius: 8px; background: transparent; color: var(--muted-strong); font: inherit; white-space: nowrap; cursor: pointer; }
 .workspace-switcher:hover { background: var(--surface-hover); color: var(--text); }
 .workspace-product { flex: 0 0 auto; color: var(--text); font-size: 16px; font-weight: 620; letter-spacing: -0.015em; white-space: nowrap; }
+.sidebar-head .workspace-product.brand-logo { flex: 0 0 auto; }
 .workspace-divider { flex: 0 0 auto; color: var(--muted); font-size: 13px; white-space: nowrap; }
 .workspace-adapter { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 540; }
 .workspace-switch-progress { width: 12px; height: 12px; flex: 0 0 auto; margin-left: 2px; border: 1.5px solid var(--border-strong); border-top-color: var(--green); border-radius: 50%; animation: switch-spin .8s linear infinite; }
@@ -939,11 +955,13 @@ svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.75; stro
 .message-row.assistant.continues { margin-bottom: 10px; }
 .message-row.assistant .message-card { width: 100%; color: var(--text); font-size: 15px; line-height: 1.62; }
 .message-row.assistant.commentary .message-card { padding-left: 0; border-left: 0; color: var(--text); }
+.message-row.task .message-card { width: 100%; padding: 12px 16px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); font-size: 14px; line-height: 1.62; }
+.message-source-task { margin-bottom: 8px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 .message-model { margin-top: 10px; color: var(--muted); font-size: 11px; font-weight: 430; line-height: 1.4; }
 .message-time { margin-top: 6px; color: var(--muted); font-size: 11px; font-weight: 400; line-height: 1.4; }
 .run-header { width: min(100%, var(--thread-max)); display: flex; align-items: center; gap: 9px; margin: -4px auto 13px; color: var(--muted-strong); font-size: 13px; font-weight: 560; }
 .run-header-dot { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: var(--green); }
-.run-header.running .run-header-dot { animation: run-pulse 1.4s ease-in-out infinite; }
+.run-header.running .run-header-dot, .run-header.submitting .run-header-dot, .run-header.syncing .run-header-dot, .run-header.sending .run-header-dot { animation: run-pulse 1.4s ease-in-out infinite; }
 .run-header.approval .run-header-dot { background: var(--orange); }
 .run-header.unknown .run-header-dot { background: var(--muted); }
 .run-header.failed .run-header-dot, .run-header.interrupted .run-header-dot { background: var(--red); }
@@ -951,7 +969,7 @@ svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.75; stro
 .run-failure-title { margin-bottom: 3px; color: var(--red); font-weight: 620; }
 .run-failure-detail { color: var(--muted-strong); white-space: pre-wrap; }
 @keyframes run-pulse { 0%, 100% { opacity: .35; transform: scale(.85); } 50% { opacity: 1; transform: scale(1); } }
-.run-progress { width: min(100%, var(--thread-max)); display: grid; gap: 9px; margin: 0 auto 24px; color: var(--muted); font-size: 14px; font-weight: 400; line-height: 1.45; }
+.run-progress { width: min(100%, var(--thread-max)); display: grid; gap: 9px; margin: 0 auto 4px; color: var(--muted); font-size: 14px; font-weight: 400; line-height: 1.45; }
 .run-progress-item { min-width: 0; display: flex; align-items: flex-start; gap: 9px; font-size: inherit; font-weight: inherit; }
 .run-progress-dot { width: 7px; height: 7px; flex: 0 0 auto; margin-top: 7px; border: 1.5px solid currentColor; border-radius: 50%; opacity: .62; }
 .run-progress-item.running { color: var(--muted-strong); }
@@ -1015,7 +1033,7 @@ body.image-viewer-open { overflow: hidden; }
 .agent-planning-dots span { display: inline-block; animation: solving-dot 1.15s ease-in-out infinite; }
 .agent-planning-dots span:nth-child(2) { animation-delay: .14s; }
 .agent-planning-dots span:nth-child(3) { animation-delay: .28s; }
-@media (prefers-reduced-motion: reduce) { .solving-copy, .agent-planning-copy, .solving-dots span, .agent-planning-dots span { animation: none; color: var(--muted); background: none; opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .agent-planning-copy, .solving-dots span, .agent-planning-dots span { animation: none; color: var(--muted); background: none; opacity: 1; transform: none; } }
 .message-content > :first-child { margin-top: 0; }
 .message-content > :last-child { margin-bottom: 0; }
 .message-content p { margin: 0 0 10px; }
@@ -1059,7 +1077,9 @@ body.image-viewer-open { overflow: hidden; }
   z-index: 12;
 }
 .composer { width: min(100%, var(--thread-max)); margin-left: auto; margin-right: auto; }
-.composer-queue { width: calc(100% - 40px); max-width: calc(var(--thread-max) - 40px); display: grid; gap: 0; max-height: 190px; overflow: hidden auto; overscroll-behavior: contain; scrollbar-width: thin; margin: 0 auto; border: 1px solid var(--border); border-radius: 16px; background: var(--page); }
+/* 队列接到输入框上圆角的切点，保留输入框原有圆角。 */
+.composer-wrap { --composer-radius: 28px; }
+.composer-queue { box-sizing: border-box; width: max(0px, calc(min(100%, var(--thread-max)) - 2 * var(--composer-radius))); min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; max-height: 190px; overflow: hidden auto; overscroll-behavior: contain; scrollbar-width: thin; margin: 0 auto; border: 1px solid var(--border); border-bottom: 0; border-radius: 14px 14px 0 0; background: var(--page); }
 .composer-queue[hidden], .composer-media[hidden] { display: none; }
 .composer-media { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; padding: 2px 2px 4px; }
 .composer-media-item { position: relative; width: 72px; height: 72px; flex: 0 0 auto; }
@@ -1099,20 +1119,20 @@ body.image-viewer-open { overflow: hidden; }
 .composer-model-option-check { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
 .queued-followup { min-width: 0; background: var(--page); }
 .queued-followup + .queued-followup { border-top: 1px solid var(--border); }
-.queued-followup-main { display: flex; align-items: center; gap: 9px; padding: 4px 4px 0px 8px; }
-.queued-followup-icon { width: 20px; height: 20px; flex: 0 0 auto; display: grid; place-items: center; color: var(--muted); }
+.queued-followup-main { min-width: 0; display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 8px; }
+.queued-followup-icon { width: 20px; height: 20px; flex: 0 0 auto; display: grid; place-items: center; color: var(--muted-strong); }
 .queued-followup-icon svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.7; }
 .queued-followup-copy { flex: 1; min-width: 0; }
-.queued-followup-text { max-height: 44px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--text); font-size: 14px; line-height: 1.45; }
-.queued-followup-status, .queued-followup-images { margin-top: 2px; color: var(--muted); font-size: 11px; font-weight: 430; line-height: 1.35; }
+.queued-followup-text { min-width: 0; max-width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--text); font-size: 14px; line-height: 1.45; }
+.queued-followup-status, .queued-followup-images { margin-top: 2px; color: var(--muted-strong); font-size: 12px; font-weight: 430; line-height: 1.4; }
 .queued-followup-status.is-pending { color: var(--muted-strong); }
 .queued-followup-actions { display: flex; align-items: center; gap: 2px; flex: 0 0 auto; }
-.queued-followup-action { min-width: 34px; height: 34px; display: inline-flex; align-items: center; justify-content: center; gap: 4px; padding: 0 7px; border: 0; border-radius: 9px; background: transparent; color: var(--muted-strong); font: inherit; font-size: 13px; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.queued-followup-action { flex: 0 0 auto; min-width: 34px; height: 36px; display: inline-flex; align-items: center; justify-content: center; gap: 4px; padding: 0 7px; border: 0; border-radius: 9px; background: transparent; color: var(--muted-strong); font: inherit; font-size: 13px; cursor: pointer; -webkit-tap-highlight-color: transparent; }
 .queued-followup-action:hover { background: var(--surface); color: var(--text); }
 .queued-followup-action:focus { outline: 0; }
 .queued-followup-action:focus-visible { box-shadow: inset 0 0 0 2px rgba(16,163,127,.24); }
-.queued-followup-action:disabled { opacity: .42; cursor: default; }
-.queued-followup-action svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.7; }
+.queued-followup-action:disabled { opacity: .65; cursor: default; }
+.queued-followup-action svg { flex: 0 0 auto; width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.7; }
 .composer {
   display: grid;
   position: relative;
@@ -1123,7 +1143,7 @@ body.image-viewer-open { overflow: hidden; }
   min-height: 52px;
   padding: 8px;
   border: 0;
-  border-radius: 28px;
+  border-radius: var(--composer-radius);
   background: var(--page);
   box-shadow: 0 0 0 1px rgba(0,0,0,.04), 0 2px 8px rgba(0,0,0,.04), 0 4px 80px 8px rgba(0,0,0,.024);
   transition: box-shadow .16s ease;
@@ -1379,11 +1399,11 @@ body.task-rename-open { overflow: hidden; }
   .message-row.user .message-card { max-width: 88%; padding: 9px 14px; border-radius: 18px; }
   .composer-wrap { padding: 20px 16px max(8px, env(safe-area-inset-bottom)); }
   .composer-queue { max-height: 172px; }
-  .queued-followup-main { gap: 8px; padding-left: 12px; }
+  .queued-followup-main { gap: 6px; padding: 8px 4px; }
   .queued-followup-action { min-width: 32px; width: 32px; padding: 0; }
   .queued-followup-action-label { display: none; }
-  .queued-followup-action-label.steer-label { display: inline; }
-  .queued-followup-action.steer-action { width: auto; padding: 0 6px; }
+  .queued-followup-action-label.steer-label { display: none; }
+  .queued-followup-action.steer-action { width: 32px; padding: 0; }
   .queued-followup-edit { padding-left: 40px; }
   .composer { min-height: 52px; padding: 8px; border-radius: 28px; }
   .composer textarea { width: 100%; }
@@ -1399,6 +1419,8 @@ body.task-rename-open { overflow: hidden; }
 }
 
 @media (prefers-color-scheme: dark) {
+  /* 暗色底上换用反相字标，字形为浅色、绿弧保持品牌绿。 */
+  .brand-logo { background-image: url("${WE_RELAY_LOGO_DARK_DATA_URI}"); }
   :root {
     color-scheme: dark;
     --page: #212121;
@@ -1443,7 +1465,9 @@ export const CODEX_MOBILE_JS = String.raw`
 
   var app = document.getElementById("app");
   var bootScreen = document.getElementById("boot-screen");
+  var bootOrb = document.getElementById("boot-orb");
   var bootStatus = document.getElementById("boot-status");
+  var bootStatusText = document.getElementById("boot-status-text");
   var bootDetail = document.getElementById("boot-detail");
   var authScreen = document.getElementById("auth-screen");
   var authForm = document.getElementById("auth-form");
@@ -1777,6 +1801,15 @@ export const CODEX_MOBILE_JS = String.raw`
     }) || supported[0] || null;
   }
 
+  // 没有项目归属的「最近」分组：只要该终端能直接新建任务就允许。
+  // Grok 等只提供 createSession、没有项目的终端此前完全没有新建入口。
+  function recentTaskCreationSource(tasks) {
+    var supported = (Array.isArray(tasks) ? tasks : []).filter(function (task) {
+      return task && task.canCreateTask === true;
+    });
+    return supported[0] || null;
+  }
+
   function conversationStateKey(adapterId, threadId) {
     return String(adapterId || "") + "\u0000" + String(threadId || "");
   }
@@ -1883,8 +1916,8 @@ export const CODEX_MOBILE_JS = String.raw`
       "threadId", "title", "status", "lastUpdatedAt", "startedAtMs", "completedAt",
       "completedAtMs", "durationMs", "activeTurnId", "selected", "projectId",
       "projectName", "projectOrder", "projectThreadOrder", "canRename",
-      "canCreateInProject", "localCreationState", "localCreationError",
-      "localSourceThreadId"
+      "canCreateInProject", "canCreateTask", "localCreationState", "localCreationError",
+      "localSourceThreadId", "newTaskSettings"
     ].forEach(function (key) {
       if (task[key] !== undefined) sanitized[key] = task[key];
     });
@@ -2003,10 +2036,15 @@ export const CODEX_MOBILE_JS = String.raw`
       "id", "role", "text", "turnId", "phase", "model", "createdAt", "createdAtMs",
       "status", "pending", "clientId", "imageCount", "attempts", "browserAttempts",
       "lastError", "waitingForTaskCreation", "createTaskSourceThreadId", "displayInTranscript",
-      "adapter", "threadId", "imageStoreKey", "retryAtMs", "retryBlocked", "serverAcknowledged"
+      "adapter", "threadId", "imageStoreKey", "retryAtMs", "retryBlocked", "serverAcknowledged",
+      "deliveryConfirmed", "queuedMessageId", "queueMissing", "baselineUserKeys", "baselineUserCount", "sourceMessageId", "newTaskSettings"
     ].forEach(function (key) {
       if (message[key] !== undefined) sanitized[key] = message[key];
     });
+    if (message.role === "task" && message.sourceTask &&
+        typeof message.sourceTask.adapter === "string" && typeof message.sourceTask.sessionId === "string") {
+      sanitized.sourceTask = { adapter: message.sourceTask.adapter, sessionId: message.sourceTask.sessionId };
+    }
     if (Array.isArray(message.images)) {
       var images = message.images.map(sanitizePersistentImage).filter(Boolean);
       if (images.length) sanitized.images = images;
@@ -2026,7 +2064,7 @@ export const CODEX_MOBILE_JS = String.raw`
     var sanitized = {};
     [
       "turnId", "status", "startedAtMs", "completedAtMs", "durationMs", "receivedAtMs",
-      "errorMessage", "model"
+      "errorMessage", "model", "clientId", "baselineTurnId"
     ].forEach(function (key) {
       if (summary[key] !== undefined) sanitized[key] = summary[key];
     });
@@ -2073,7 +2111,8 @@ export const CODEX_MOBILE_JS = String.raw`
       editingQueuedText: "",
       pendingImages: [],
       runSummary: sanitizePersistentRunSummary(snapshot.runSummary),
-      localRunSummary: null,
+      localRunSummary: snapshot.localRunSummary && ["submitting", "syncing"].includes(snapshot.localRunSummary.status)
+        ? sanitizePersistentRunSummary(snapshot.localRunSummary) : null,
       pendingApproval: null,
       approvalResults: [],
       stopRequestedThreadId: "",
@@ -2355,7 +2394,7 @@ export const CODEX_MOBILE_JS = String.raw`
       state.runClockTimer = setInterval(updateRunHeaderClock, 1000);
     }
     state.loadingTasks = false;
-    bootScreen.hidden = true;
+    setBootScreenVisible(false);
     authScreen.hidden = true;
     app.hidden = false;
     setTaskBoardOpen(pageUrl.searchParams.get("view") === "board", false);
@@ -2934,6 +2973,328 @@ export const CODEX_MOBILE_JS = String.raw`
     } catch (_) {}
   }
 
+  // --- 思考球（启动页加载动画）-----------------------------------------
+  // 点阵球体在「打乱 → 复原」之间循环：每条带按四分之一圈转动，随后倒序
+  // 回放，让球体咔哒一声回到已复原状态。几何为纯 CPU 数学，仅使用 2D canvas
+  // 圆弧填充，因此各浏览器像素一致，且不需要 WebGL 或滤镜。
+  //
+  // 改编自 thinking-orbs（MIT License, Copyright (c) 2026 Jakub Antalik）
+  // https://github.com/Jakubantalik/thinking-orbs —— 取其 solving（rubik）
+  // 模式的几何与预设参数，改写为无依赖的纯 JS，并按本站主题取墨色。
+  var BOOT_ORB_PRESET = {
+    speed: 1.82,
+    count: 0.35,
+    size: 1.05
+  };
+  var BOOT_ORB_BASE = {
+    latRings: 15,
+    lonDensity: 40,
+    moveCount: 14,
+    rBase: 0.6,
+    rDepth: 1.7,
+    rActive: 0.3,
+    inkFar: 0.62,
+    inkSpan: 0.54,
+    rsPow: 0.6,
+    rMin: 0.3
+  };
+
+  function bootOrbHash(a, b) {
+    var h = Math.sin(a * 12.9898 + b * 78.233) * 43758.5453;
+    return h - Math.floor(h);
+  }
+
+  function bootOrbMakeMoves(count) {
+    var moves = [];
+    for (var i = 0; i < count; i += 1) {
+      var axis = Math.min(2, Math.floor(bootOrbHash(i, 2.3) * 3));
+      var lo = -1 + 0.5 * Math.min(3, Math.floor(bootOrbHash(i, 5.9) * 4));
+      var dir = bootOrbHash(i, 7.7) < 0.5 ? 1 : -1;
+      moves.push({ axis: axis, lo: lo, hi: lo + 0.5, ang: (dir * Math.PI) / 2 });
+    }
+    return moves;
+  }
+
+  function bootOrbSolveCycle(time, count, slotDur, rest) {
+    var cyc = 2 * count * slotDur + rest;
+    var tc = time % cyc;
+    var amount = [];
+    var i;
+    for (i = 0; i < count; i += 1) amount.push(0);
+    var active = -1;
+    if (tc < 2 * count * slotDur) {
+      var slot = Math.floor(tc / slotDur);
+      var p = (tc - slot * slotDur) / slotDur;
+      var cl = Math.min(1, p / 0.7);
+      var ep = 1 - Math.pow(1 - cl, 3);
+      if (slot < count) {
+        for (i = 0; i < slot; i += 1) amount[i] = 1;
+        amount[slot] = ep;
+        active = slot;
+      } else {
+        var u = 2 * count - 1 - slot;
+        for (i = 0; i < u; i += 1) amount[i] = 1;
+        amount[u] = 1 - ep;
+        active = u;
+      }
+    }
+    return { amount: amount, active: active };
+  }
+
+  function bootOrbApplyMoves(point, moves, cycle) {
+    var x = point[0];
+    var y = point[1];
+    var z = point[2];
+    var inActive = false;
+    for (var i = 0; i < moves.length; i += 1) {
+      if (cycle.amount[i] <= 0) continue;
+      var mv = moves[i];
+      var coord = mv.axis === 0 ? x : mv.axis === 1 ? y : z;
+      if (coord < mv.lo || coord >= mv.hi) continue;
+      if (i === cycle.active) inActive = true;
+      var a = mv.ang * cycle.amount[i];
+      var ca = Math.cos(a);
+      var sa = Math.sin(a);
+      if (mv.axis === 0) {
+        var y2 = y * ca - z * sa;
+        z = y * sa + z * ca;
+        y = y2;
+      } else if (mv.axis === 1) {
+        var x2 = x * ca + z * sa;
+        z = -x * sa + z * ca;
+        x = x2;
+      } else {
+        var x3 = x * ca - y * sa;
+        y = x * sa + y * ca;
+        x = x3;
+      }
+    }
+    return [x, y, z, inActive];
+  }
+
+  function bootOrbScaleCounts(opts, scale) {
+    var out = {};
+    for (var key in opts) if (Object.prototype.hasOwnProperty.call(opts, key)) out[key] = opts[key];
+    var rt = Math.sqrt(scale);
+    if (out.latRings != null && out.lonDensity != null) {
+      out.latRings = Math.max(2, Math.round(out.latRings * rt));
+      out.lonDensity = Math.max(2, Math.round(out.lonDensity * rt));
+    }
+    return out;
+  }
+
+  function bootOrbScaleRadii(opts, scale) {
+    var out = {};
+    var radiusKeys = ["rBase", "rDepth", "rActive"];
+    for (var key in opts) if (Object.prototype.hasOwnProperty.call(opts, key)) out[key] = opts[key];
+    for (var i = 0; i < radiusKeys.length; i += 1) {
+      var k = radiusKeys[i];
+      if (out[k] != null) out[k] = out[k] * scale;
+    }
+    return out;
+  }
+
+  function bootOrbOptions() {
+    var opts = BOOT_ORB_BASE;
+    if (BOOT_ORB_PRESET.count !== 1) opts = bootOrbScaleCounts(opts, BOOT_ORB_PRESET.count);
+    if (BOOT_ORB_PRESET.size !== 1) opts = bootOrbScaleRadii(opts, BOOT_ORB_PRESET.size);
+    return opts;
+  }
+
+  // 依据当前主题决定墨色：浅色底用深墨，深色底反相，保持同样的景深语言。
+  function bootOrbIsDark() {
+    var root = document.documentElement;
+    var attr = String(root.getAttribute("data-theme") || "").toLowerCase();
+    if (attr === "dark") return true;
+    if (attr === "light") return false;
+    if (root.classList.contains("dark")) return true;
+    if (root.classList.contains("light")) return false;
+    return Boolean(
+      window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches
+    );
+  }
+
+  function bootOrbFrame(ctx, size, t, dark, opts) {
+    var cx = size / 2;
+    var cy = size / 2;
+    var R = (size / 2) * 0.82;
+    var yaw = t * 0.55;
+    var tilt = 0.35 + 0.1 * Math.sin(t * 0.9);
+    var st = Math.sin(tilt);
+    var ct = Math.cos(tilt);
+    var sy = Math.sin(yaw);
+    var cyw = Math.cos(yaw);
+    var rs = Math.pow(size / 300, opts.rsPow == null ? 0.6 : opts.rsPow);
+    var moveCount = opts.moveCount == null ? 14 : opts.moveCount;
+    var moves = bootOrbMakeMoves(moveCount);
+    var cycle = bootOrbSolveCycle(t, moveCount, 0.42, 1.2);
+    var latRings = opts.latRings == null ? 15 : opts.latRings;
+    var lonDensity = opts.lonDensity == null ? 40 : opts.lonDensity;
+    var dots = [];
+    for (var li = 0; li <= latRings; li += 1) {
+      var lat = -Math.PI / 2 + (li / latRings) * Math.PI;
+      var cosLat = Math.cos(lat);
+      var sinLat = Math.sin(lat);
+      var lonCount = Math.max(1, Math.round(Math.abs(cosLat) * lonDensity));
+      for (var lj = 0; lj < lonCount; lj += 1) {
+        var lon = (lj / lonCount) * 2 * Math.PI;
+        var moved = bootOrbApplyMoves(
+          [cosLat * Math.cos(lon), sinLat, cosLat * Math.sin(lon)],
+          moves,
+          cycle
+        );
+        var x = moved[0];
+        var y = moved[1];
+        var z = moved[2];
+        var inActive = moved[3];
+        var x1 = x * cyw + z * sy;
+        var z1 = -x * sy + z * cyw;
+        var y1 = y * ct - z1 * st;
+        var z2 = y * st + z1 * ct;
+        var depth = (z2 + 1) / 2;
+        var radius = (
+          (opts.rBase == null ? 0.6 : opts.rBase) +
+          (opts.rDepth == null ? 1.7 : opts.rDepth) * depth +
+          (inActive ? (opts.rActive == null ? 0.3 : opts.rActive) : 0)
+        ) * rs;
+        if (radius < (opts.rMin == null ? 0.3 : opts.rMin)) {
+          radius = opts.rMin == null ? 0.3 : opts.rMin;
+        }
+        var white = (opts.inkFar == null ? 0.62 : opts.inkFar) -
+          (opts.inkSpan == null ? 0.54 : opts.inkSpan) * depth -
+          (inActive ? 0.14 : 0);
+        dots.push({
+          x: cx + x1 * R,
+          y: cy - y1 * R,
+          z: z2,
+          r: radius,
+          white: Math.min(1, Math.max(0, white))
+        });
+      }
+    }
+    dots.sort(function (a, b) { return a.z - b.z; });
+    ctx.clearRect(0, 0, size, size);
+    for (var i = 0; i < dots.length; i += 1) {
+      var dot = dots[i];
+      var g = Math.round((dark ? 1 - dot.white : dot.white) * 255);
+      ctx.fillStyle = "rgb(" + g + "," + g + "," + g + ")";
+      ctx.beginPath();
+      ctx.arc(dot.x, dot.y, dot.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  var bootOrbAnimation = (function () {
+    var raf = 0;
+    var running = false;
+    var reduced = Boolean(
+      window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    );
+    var ctx = null;
+    var size = 56;
+    var dpr = 1;
+
+    function paint(tSec) {
+      if (!ctx) return;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      bootOrbFrame(ctx, size, tSec, bootOrbIsDark(), bootOrbOptions());
+    }
+
+    function loop() {
+      paint((performance.now() / 1000) * BOOT_ORB_PRESET.speed);
+      if (running) raf = requestAnimationFrame(loop);
+    }
+
+    function stop() {
+      running = false;
+      if (raf) cancelAnimationFrame(raf);
+      raf = 0;
+    }
+
+    function start() {
+      if (!ctx || running || reduced) return;
+      if (bootScreen.hidden || document.visibilityState === "hidden") return;
+      running = true;
+      raf = requestAnimationFrame(loop);
+    }
+
+    function setup() {
+      if (!bootOrb) return;
+      // 以 CSS 盒尺寸为准：canvas 的 width/height 属性只作为无 CSS 时的兜底。
+      // 之前直接读属性，属性(112)与 CSS(56px) 不一致时会在 2x 屏上把几何画到
+      // 可视区域之外，表现为「有占位但没有动画」。
+      var cssSize = 0;
+      try {
+        cssSize = Number.parseFloat(window.getComputedStyle(bootOrb).width) || 0;
+      } catch (_) {
+        cssSize = 0;
+      }
+      size = cssSize || Number(bootOrb.getAttribute("width")) || 56;
+      dpr = Math.min(2, window.devicePixelRatio || 1);
+      bootOrb.width = Math.round(size * dpr);
+      bootOrb.height = Math.round(size * dpr);
+      ctx = bootOrb.getContext ? bootOrb.getContext("2d") : null;
+      if (!ctx) return;
+      // 减少动态偏好：只画一帧有代表性的静止画面，仍然跟随主题。
+      if (reduced) {
+        paint(0.6);
+        return;
+      }
+      paint(0);
+      start();
+    }
+
+    return {
+      setup: setup,
+      start: start,
+      stop: stop,
+      repaint: function () {
+        if (reduced) paint(0.6);
+        else if (!running) paint(performance.now() / 1000 * BOOT_ORB_PRESET.speed);
+      }
+    };
+  })();
+
+  if (window.matchMedia) {
+    var bootOrbThemeQuery = window.matchMedia("(prefers-color-scheme: dark)");
+    var onBootOrbThemeChange = function () { bootOrbAnimation.repaint(); };
+    if (bootOrbThemeQuery.addEventListener) {
+      bootOrbThemeQuery.addEventListener("change", onBootOrbThemeChange);
+    } else if (bootOrbThemeQuery.addListener) {
+      bootOrbThemeQuery.addListener(onBootOrbThemeChange);
+    }
+  }
+
+  // 标签页隐藏时停掉动画，回到前台再续上，避免后台空转耗电。
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "hidden") bootOrbAnimation.stop();
+    else if (!bootScreen.hidden) bootOrbAnimation.start();
+  });
+
+  // 启动页可见性统一走这里，顺带控制思考球的启停，避免动画在后台空转。
+  function setBootScreenVisible(visible) {
+    bootScreen.hidden = !visible;
+    if (visible) bootOrbAnimation.start();
+    else bootOrbAnimation.stop();
+  }
+
+  // 启动页只保留一行状态；第二行仅在确实带来新信息（等待时长、重试次数、
+  // 操作指引）时出现。与状态行重复、或没有内容时整行隐藏，避免同一件事
+  // 换句话再说一遍。
+  function setBootStatus(label, detail) {
+    bootStatusText.textContent = label;
+    var text = typeof detail === "string" ? detail.trim() : "";
+    var normalizedLabel = String(label || "").trim().replace(/[。．.！!？?…\s]+$/g, "");
+    var normalizedDetail = text.replace(/[。．.！!？?…\s]+$/g, "");
+    if (!text || normalizedDetail === normalizedLabel) {
+      bootDetail.textContent = "";
+      bootDetail.hidden = true;
+      return;
+    }
+    bootDetail.textContent = text;
+    bootDetail.hidden = false;
+  }
+
   function resolveBootConnectionState(health, waitedMs) {
     var elapsedSeconds = Math.max(0, Math.floor((Number(waitedMs) || 0) / 1000));
     if (health && typeof health.deviceOnline === "boolean") {
@@ -2949,8 +3310,8 @@ export const CODEX_MOBILE_JS = String.raw`
         return {
           mode: "relay",
           ready: false,
-          label: "服务器已连接",
-          detail: "正在等待你的电脑主动连接…"
+          label: "等待电脑连接",
+          detail: "请确认电脑已开机、联网且 WeRelay 正在运行。"
         };
       }
       if (elapsedSeconds < 30) {
@@ -2958,7 +3319,7 @@ export const CODEX_MOBILE_JS = String.raw`
           mode: "relay",
           ready: false,
           label: "电脑尚未连接",
-          detail: "已等待 " + elapsedSeconds + " 秒，WeRelay 会自动重试。"
+          detail: "已等待 " + elapsedSeconds + " 秒，会自动重试。"
         };
       }
       return {
@@ -2986,20 +3347,19 @@ export const CODEX_MOBILE_JS = String.raw`
     if (!state.cachePreviewMode) {
       app.hidden = true;
       authScreen.hidden = true;
-      bootScreen.hidden = false;
+      setBootScreenVisible(true);
     }
     var startedAtMs = Date.now();
     var serverFailureCount = 0;
-    bootStatus.textContent = "正在检查连接状态";
-    bootDetail.textContent = "正在确认服务器和电脑是否在线。";
+    // 这一句已经把「在连接、在检查」说清楚了，不需要再补一句同义解释。
+    setBootStatus("正在连接电脑");
     while (true) {
       try {
         var health = await fetchJson("/health", { cache: "no-store" });
         serverFailureCount = 0;
         var connection = resolveBootConnectionState(health, Date.now() - startedAtMs);
         state.connectionMode = connection.mode;
-        bootStatus.textContent = connection.label;
-        bootDetail.textContent = connection.detail;
+        setBootStatus(connection.label, connection.detail);
         if (state.cachePreviewMode) {
           if (connection.ready) setCacheSyncState("checking");
           else setCacheSyncState("waiting-computer");
@@ -3008,8 +3368,10 @@ export const CODEX_MOBILE_JS = String.raw`
       } catch (_) {
         serverFailureCount += 1;
         state.connectionMode = "unknown";
-        bootStatus.textContent = "暂时无法连接服务器";
-        bootDetail.textContent = "已重试 " + serverFailureCount + " 次，网络恢复后会自动继续。";
+        setBootStatus(
+          "暂时无法连接服务器",
+          "已重试 " + serverFailureCount + " 次，网络恢复后会自动继续。"
+        );
         if (state.cachePreviewMode) setCacheSyncState("server-retry");
       }
       await new Promise(function (resolve) {
@@ -3044,8 +3406,10 @@ export const CODEX_MOBILE_JS = String.raw`
       return false;
     }
 
-    bootStatus.textContent = "检测到与电脑在同一网络，正在切换到高速连接…";
-    bootDetail.textContent = "局域网连接通常更快，失败后会自动返回公网。";
+    setBootStatus(
+      "正在切换到高速连接",
+      "检测到与电脑在同一网络；失败后会自动返回公网。"
+    );
     var handoff;
     try {
       handoff = await fetchJson("/api/network/lan-handoff", {
@@ -3054,13 +3418,11 @@ export const CODEX_MOBILE_JS = String.raw`
         body: JSON.stringify({ target: currentLanHandoffTarget() })
       });
     } catch (_) {
-      bootStatus.textContent = bootReadyStatus();
-      bootDetail.textContent = "正在读取任务和最近消息…";
+      setBootStatus(bootReadyStatus(), "正在读取任务和最近消息…");
       return false;
     }
     if (!handoff || typeof handoff.handoffUrl !== "string" || !handoff.handoffUrl) {
-      bootStatus.textContent = bootReadyStatus();
-      bootDetail.textContent = "正在读取任务和最近消息…";
+      setBootStatus(bootReadyStatus(), "正在读取任务和最近消息…");
       return false;
     }
 
@@ -3076,8 +3438,7 @@ export const CODEX_MOBILE_JS = String.raw`
       return true;
     } catch (_) {
       clearTimeout(fallbackTimer);
-      bootStatus.textContent = bootReadyStatus();
-      bootDetail.textContent = "正在读取任务和最近消息…";
+      setBootStatus(bootReadyStatus(), "正在读取任务和最近消息…");
       return false;
     }
   }
@@ -3281,7 +3642,7 @@ export const CODEX_MOBILE_JS = String.raw`
   }
 
   function permissionLabel(value) {
-    if (value === "read-only") return "只读";
+    if (value === "read-only") return "权限受限";
     if (value === "workspace-write") return "项目内读写";
     if (value === "danger-full-access") return "完全访问";
     if (value === "default") return "标准";
@@ -3318,7 +3679,7 @@ export const CODEX_MOBILE_JS = String.raw`
     label.className = "composer-model-option-label";
     label.textContent = config.label;
     copy.appendChild(label);
-    if (option && option.description) {
+    if (config.kind !== "reasoning" && option && option.description) {
       var description = document.createElement("span");
       description.className = "composer-model-option-description";
       description.textContent = option.description;
@@ -3361,7 +3722,7 @@ export const CODEX_MOBILE_JS = String.raw`
     });
     var currentPermission = permissionState && permissionState.currentPermission || "";
     var permissionOptions = permissionState && Array.isArray(permissionState.options)
-      ? permissionState.options
+      ? permissionState.options.filter(function (option) { return option.id !== "read-only"; })
       : [];
     var currentPermissionOption = permissionOptions.find(function (option) {
       return option.id === currentPermission;
@@ -3371,17 +3732,18 @@ export const CODEX_MOBILE_JS = String.raw`
       : !modelState
         ? "获取中"
         : currentReasoningOption && currentReasoningOption.label ||
-          (currentEffort ? reasoningEffortLabel(currentEffort) : "跟随会话");
+          (currentEffort ? reasoningEffortLabel(currentEffort) : taskNeedsCreation(currentTask()) && !modelState.currentModel ? "先选模型" : "跟随会话");
     var permissionText = state.permissionChanging
       ? "正在切换…"
       : !permissionState
         ? "获取中"
+        : permissionState.draft ? "跟随终端"
         : currentPermissionOption && currentPermissionOption.label ||
           (currentPermission ? permissionLabel(currentPermission) : "暂不可用");
     composerSessionLabelEl.textContent = composerSessionLabel(reasoningText, permissionText);
 
     var canChangeReasoning = Boolean(
-      modelState && modelState.canChangeReasoningEffort && reasoningOptions.length > 0
+      modelState && modelState.canChangeReasoningEffort && reasoningOptions.length > 0 && !draftSettingsSubmitted()
     );
     var canChangePermission = Boolean(
       permissionState && permissionState.canChange && permissionOptions.length > 0
@@ -3463,7 +3825,7 @@ export const CODEX_MOBILE_JS = String.raw`
     var modelState = currentTaskModelState();
     var currentModel = modelState && modelState.currentModel || "";
     var options = modelState && Array.isArray(modelState.options) ? modelState.options : [];
-    if (!state.currentThreadId || (!currentModel && options.length === 0 && !state.modelChanging)) {
+    if (!state.currentThreadId || (!taskNeedsCreation(currentTask()) && !currentModel && options.length === 0 && !state.modelChanging)) {
       composerModelControl.hidden = true;
       closeModelMenu();
       renderSessionControl();
@@ -3472,13 +3834,13 @@ export const CODEX_MOBILE_JS = String.raw`
     composerModelControl.hidden = false;
     var currentOption = options.find(function (option) { return option.id === currentModel; });
     composerModelLabel.textContent = currentOption && currentOption.label ||
-      currentModel || (state.modelChanging ? "正在切换…" : "模型");
+      currentModel || (state.modelChanging ? "正在切换…" : modelState && modelState.loadError ? "重新获取模型" : !modelState ? "获取中" : "选择模型");
     var canChange = Boolean(
-      modelState && modelState.canChange && options.length > 0
+      modelState && modelState.canChange && options.length > 0 && !draftSettingsSubmitted()
     );
     composerModelButton.classList.toggle("is-readonly", !canChange);
     composerModelButton.classList.toggle("is-loading", state.modelChanging);
-    composerModelButton.setAttribute("aria-disabled", canChange && !state.modelChanging ? "false" : "true");
+    composerModelButton.setAttribute("aria-disabled", (canChange || modelState && modelState.loadError) && !state.modelChanging ? "false" : "true");
     composerModelButton.title = !canChange
       ? modelState && modelState.unavailableReason || "当前任务暂时不能切换模型。"
       : currentModel ? "切换当前任务模型" : "查看模型";
@@ -3608,8 +3970,55 @@ export const CODEX_MOBILE_JS = String.raw`
     renderSessionControl();
   }
 
+  function applyDraftModelSelection(payload, selection) {
+    var settings = selection || {};
+    var model = settings.model || payload.currentModel || "";
+    var option = (payload.options || []).find(function (entry) { return entry.id === model; });
+    var efforts = option && Array.isArray(option.reasoningEffortOptions)
+      ? option.reasoningEffortOptions : model ? payload.reasoningEffortOptions || [] : [];
+    var desiredEffort = settings.reasoningEffort ||
+      (model === payload.currentModel ? payload.currentReasoningEffort : "") ||
+      option && option.defaultReasoningEffort || "";
+    var effort = efforts.some(function (entry) { return entry.id === desiredEffort; }) ? desiredEffort : "";
+    return Object.assign({}, payload, {
+      currentModel: model, currentReasoningEffort: effort,
+      reasoningEffortOptions: efforts,
+      canChangeReasoningEffort: Boolean(payload.canChange && model && efforts.length),
+      reasoningEffortUnavailableReason: !model ? "请先选择模型。" : efforts.length ? "" : "当前模型没有可选推理强度。"
+    });
+  }
+
+  function draftSettingsSubmitted() {
+    return taskNeedsCreation(currentTask()) && (state.pendingMessages || []).some(function (message) {
+      return message.threadId === state.currentThreadId && !["failed", "waiting_task_retry"].includes(message.status);
+    });
+  }
+
+  function saveDraftModelSelection(update) {
+    if (draftSettingsSubmitted()) {
+      showToast("消息已提交，新任务创建后再切换设置");
+      return;
+    }
+    var task = currentTask();
+    var modelState = currentTaskModelState();
+    var selection = Object.assign({}, task.newTaskSettings || {}, update);
+    if (update.model) {
+      var projected = applyDraftModelSelection(modelState, { model: update.model });
+      if (!projected.reasoningEffortOptions.some(function (entry) { return entry.id === selection.reasoningEffort; })) {
+        if (projected.currentReasoningEffort) selection.reasoningEffort = projected.currentReasoningEffort;
+        else delete selection.reasoningEffort;
+      }
+    }
+    if (update.reasoningEffort && !selection.model && modelState.currentModel) selection.model = modelState.currentModel;
+    task.newTaskSettings = selection;
+    state.taskModels[currentTaskModelKey()] = applyDraftModelSelection(modelState, selection);
+    rememberLocalTaskDraft(task);
+    saveCurrentConversationSnapshot();
+    closeModelMenu(); closeSessionMenu(); renderModelControl();
+  }
+
   async function loadCurrentTaskModel(force) {
-    if (!state.currentThreadId || taskNeedsCreation(currentTask())) {
+    if (!state.currentThreadId) {
       renderModelControl();
       return null;
     }
@@ -3622,14 +4031,26 @@ export const CODEX_MOBILE_JS = String.raw`
     var requestId = ++state.modelRequestId;
     var requestedAdapter = state.currentAdapter;
     var requestedThreadId = state.currentThreadId;
+    var modelAbort = new AbortController();
+    var modelTimeout;
     try {
-      var path = adapterApiPath("/api/tasks/" + encodeURIComponent(state.currentThreadId) + "/model");
-      var payload = await api(path, { cache: "no-store" });
+      var draft = taskNeedsCreation(currentTask());
+      var path = adapterApiPath(draft ? "/api/new-task/model" : "/api/tasks/" + encodeURIComponent(state.currentThreadId) + "/model");
+      var payload = await Promise.race([
+        api(path, { cache: "no-store", signal: modelAbort.signal }),
+        new Promise(function (_, reject) {
+          modelTimeout = setTimeout(function () {
+            reject(new Error("读取模型超时，请点击重新获取模型。"));
+            modelAbort.abort();
+          }, 15000);
+        })
+      ]);
       if (
         requestId !== state.modelRequestId ||
         requestedAdapter !== state.currentAdapter ||
         requestedThreadId !== state.currentThreadId
       ) return null;
+      if (draft) payload = applyDraftModelSelection(payload, currentTask().newTaskSettings);
       state.taskModels[key] = Object.assign({}, payload, { loadedAtMs: Date.now() });
       renderModelControl();
       return state.taskModels[key];
@@ -3640,6 +4061,7 @@ export const CODEX_MOBILE_JS = String.raw`
         requestedThreadId === state.currentThreadId
       ) {
         state.taskModels[key] = {
+          loadError: true,
           currentModel: cached && cached.currentModel || "",
           options: cached && cached.options || [],
           currentReasoningEffort: cached && cached.currentReasoningEffort || "",
@@ -3653,11 +4075,18 @@ export const CODEX_MOBILE_JS = String.raw`
         renderModelControl();
       }
       return null;
+    } finally {
+      clearTimeout(modelTimeout);
     }
   }
 
   async function loadCurrentTaskPermission(force) {
-    if (!state.currentThreadId || taskNeedsCreation(currentTask())) {
+    if (taskNeedsCreation(currentTask())) {
+      state.taskPermissions[currentTaskPermissionKey()] = { options: [], canChange: false, draft: true };
+      renderSessionControl();
+      return null;
+    }
+    if (!state.currentThreadId) {
       renderSessionControl();
       return null;
     }
@@ -3703,6 +4132,10 @@ export const CODEX_MOBILE_JS = String.raw`
   }
 
   async function selectCurrentTaskPermission(permission) {
+    if (permission === "read-only") {
+      showToast("请选择项目内读写权限");
+      return;
+    }
     var permissionState = currentTaskPermissionState();
     if (!permissionState || !permissionState.canChange) {
       showToast(permissionState && permissionState.unavailableReason || "当前任务暂时不能切换权限范围");
@@ -3772,6 +4205,12 @@ export const CODEX_MOBILE_JS = String.raw`
       showToast(modelState && modelState.unavailableReason || "当前任务暂时不能切换模型");
       return;
     }
+    if (taskNeedsCreation(currentTask())) {
+      if (!(modelState.options || []).some(function (option) { return option.id === model; })) return;
+      saveDraftModelSelection({ model: model });
+      showToast("已为新任务选择模型，发送时生效");
+      return;
+    }
     if (state.modelChanging || model === modelState.currentModel) {
       closeModelMenu();
       renderModelControl();
@@ -3814,6 +4253,12 @@ export const CODEX_MOBILE_JS = String.raw`
     var modelState = currentTaskModelState();
     if (!modelState || !modelState.canChangeReasoningEffort) {
       showToast(modelState && modelState.reasoningEffortUnavailableReason || "当前模型没有可选推理强度");
+      return;
+    }
+    if (taskNeedsCreation(currentTask())) {
+      if (!(modelState.reasoningEffortOptions || []).some(function (option) { return option.id === reasoningEffort; })) return;
+      saveDraftModelSelection({ reasoningEffort: reasoningEffort });
+      showToast("已为新任务选择推理强度，发送时生效");
       return;
     }
     if (state.reasoningChanging || reasoningEffort === modelState.currentReasoningEffort) {
@@ -3974,7 +4419,7 @@ export const CODEX_MOBILE_JS = String.raw`
     state.authMode = mode;
     if (state.liveRefreshTimer) clearTimeout(state.liveRefreshTimer);
     state.liveRefreshTimer = null;
-    bootScreen.hidden = true;
+    setBootScreenVisible(false);
     app.hidden = true;
     authScreen.hidden = false;
     authPassword.value = "";
@@ -4024,7 +4469,7 @@ export const CODEX_MOBILE_JS = String.raw`
           state.authenticated = false;
           app.hidden = true;
           authScreen.hidden = true;
-          bootScreen.hidden = false;
+          setBootScreenVisible(true);
         }
         if (!state.authenticationRetryTimer) {
           state.authenticationRetryTimer = setTimeout(function () {
@@ -4072,7 +4517,7 @@ export const CODEX_MOBILE_JS = String.raw`
     if (needsInitialTask && !state.currentThreadId && !restoredCache) {
       messagesEl.innerHTML = "";
     }
-    bootScreen.hidden = true;
+    setBootScreenVisible(false);
     app.hidden = false;
     setTaskBoardOpen(requestedBoard, false);
     setSettingsOpen(requestedSettings, false);
@@ -4195,24 +4640,29 @@ export const CODEX_MOBILE_JS = String.raw`
   }
 
   function visiblePendingMessages() {
-    applyDeliveredMessageReceipts(state.deliveredClientIds);
-    reconcilePendingMessages(state.serverMessages, state.outboundMessages);
-    var outbound = Array.isArray(state.outboundMessages)
-      ? state.outboundMessages.slice()
-      : [];
-    var acceptedClientIds = new Set(outbound.map(function (message) {
-      return message && message.clientId;
-    }).filter(Boolean));
-    var local = state.pendingMessages.filter(function (pending) {
-      return pending.displayInTranscript !== false && !acceptedClientIds.has(pending.clientId);
+    reconcilePendingMessages(state.serverMessages, state.outboundMessages, state.deliveredClientIds);
+    return state.pendingMessages.filter(function (pending) {
+      return pending.displayInTranscript !== false;
     });
-    return outbound.concat(local);
+  }
+
+  function conversationMessages() {
+    var pending = visiblePendingMessages();
+    var messages = filterVisibleConversationMessages(state.serverMessages).slice();
+    pending.forEach(function (entry) {
+      var message = Object.assign({ role: "user", pending: true }, entry);
+      var position = messages.findIndex(function (existing) {
+        if (entry.turnId && existing.turnId === entry.turnId && existing.role === "assistant") return true;
+        return Number(entry.createdAtMs) > 0 && Number(existing.createdAtMs) > Number(entry.createdAtMs);
+      });
+      if (position < 0) messages.push(message);
+      else messages.splice(position, 0, message);
+    });
+    return messages;
   }
 
   function currentVisibleRunSummary() {
-    var messages = filterVisibleConversationMessages(state.serverMessages).concat(visiblePendingMessages().map(function (pending) {
-      return Object.assign({ role: "user", pending: true }, pending);
-    }));
+    var messages = conversationMessages();
     return resolveVisibleRunSummary(
       messages,
       currentTask(),
@@ -4273,6 +4723,7 @@ export const CODEX_MOBILE_JS = String.raw`
             : "点击上方终端菜单重新连接"
           : "";
     updateActiveDocumentTitle();
+    refreshMessageSourceTaskLabels();
     statusEl.className = "status-label" + (
       state.switchingAdapter
         ? " starting"
@@ -4569,22 +5020,18 @@ export const CODEX_MOBILE_JS = String.raw`
   function revealCurrentTaskInSidebar() {
     if (
       !state.revealCurrentTaskOnSidebarOpen ||
-      !app.classList.contains("sidebar-open") ||
+      (window.matchMedia("(max-width: 760px)").matches && !app.classList.contains("sidebar-open")) ||
       !state.currentThreadId
     ) return;
     var currentTask = taskById(state.currentThreadId);
-    if (!currentTask) {
-      if (!state.loadingTasks && !state.switchingAdapter) {
-        state.revealCurrentTaskOnSidebarOpen = false;
-      }
-      return;
-    }
+    if (!currentTask) return;
     var query = searchInput.value.trim().toLowerCase();
     if (
       query &&
       !(currentTask.title + " " + (currentTask.projectName || "")).toLowerCase().includes(query)
     ) {
-      state.revealCurrentTaskOnSidebarOpen = false;
+      searchInput.value = "";
+      renderTasks();
       return;
     }
     if (state.taskView === "projects") {
@@ -4597,10 +5044,18 @@ export const CODEX_MOBILE_JS = String.raw`
     }
     var button = state.taskNodes[state.currentThreadId];
     if (!button || !button.isConnected) return;
-    state.revealCurrentTaskOnSidebarOpen = false;
+    var requestedThreadId = state.currentThreadId;
     requestAnimationFrame(function () {
-      if (!button.isConnected || !app.classList.contains("sidebar-open")) return;
-      button.scrollIntoView({ behavior: "auto", block: "nearest", inline: "nearest" });
+      if (!state.revealCurrentTaskOnSidebarOpen || requestedThreadId !== state.currentThreadId || !button.isConnected) return;
+      if (window.matchMedia("(max-width: 760px)").matches && !app.classList.contains("sidebar-open")) return;
+      if (!taskList.clientHeight) return;
+      var viewport = taskList.getBoundingClientRect();
+      var row = button.getBoundingClientRect();
+      // Scroll only the task list, never the conversation or the whole page.
+      if (row.top < viewport.top || row.bottom > viewport.bottom) {
+        taskList.scrollTop += row.top - viewport.top - (taskList.clientHeight - row.height) / 2;
+      }
+      state.revealCurrentTaskOnSidebarOpen = false;
     });
   }
 
@@ -4840,13 +5295,16 @@ export const CODEX_MOBILE_JS = String.raw`
       var create = document.createElement("button");
       create.type = "button";
       create.className = "task-group-create";
-      create.title = "在这个项目中新建任务";
-      create.setAttribute("aria-label", "在这个项目中新建任务");
       create.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true"><path class="task-group-create-plus" d="M10 4v12M4 10h12"/><circle class="task-group-create-spinner" cx="10" cy="10" r="6"/></svg>';
       create.addEventListener("click", function () {
+        if (section.dataset.createEnabled !== "true") return;
         var sourceThreadId = section.dataset.createSourceThreadId || "";
         var projectName = section.dataset.projectName || "这个项目";
-        if (sourceThreadId) void createTask(sourceThreadId, projectName);
+        // 「最近」分组没有来源任务，按该终端直接新建（Grok 等无项目终端）。
+        void createTask(
+          section.dataset.createWithoutSource === "true" ? "" : sourceThreadId,
+          section.dataset.createWithoutSource === "true" ? "" : projectName
+        );
       });
       head.appendChild(heading);
       head.appendChild(create);
@@ -4867,8 +5325,11 @@ export const CODEX_MOBILE_JS = String.raw`
     section.dataset.projectName = group.title;
     var createSource = collapsible
       ? projectTaskCreationSource(group.tasks, state.currentThreadId)
-      : null;
+      : recentTaskCreationSource(group.tasks);
     section.dataset.createSourceThreadId = createSource?.threadId || "";
+    // 无项目归属的「最近」分组不需要来源任务：直接按该终端新建。
+    section.dataset.createWithoutSource = !collapsible && createSource ? "true" : "false";
+    section.dataset.createEnabled = createSource ? "true" : "false";
 
     var headingNode = section.querySelector(".task-group-title");
     var headingText = section.querySelector(".task-group-title-text");
@@ -4890,7 +5351,10 @@ export const CODEX_MOBILE_JS = String.raw`
         "is-loading",
         Boolean(state.creatingTask && state.creatingProjectKey === group.key)
       );
-      var createLabel = "在“" + group.title + "”中新建任务";
+      // 「最近」分组没有项目名，直接说新建任务，避免出现「在“最近”中新建任务」。
+      var createLabel = collapsible
+        ? "在“" + group.title + "”中新建任务"
+        : "新建任务";
       createNode.title = createLabel;
       createNode.setAttribute("aria-label", createLabel);
     }
@@ -5894,6 +6358,7 @@ export const CODEX_MOBILE_JS = String.raw`
     var confirmed = (Array.isArray(queuedMessages) ? queuedMessages : []).filter(
       function (message) {
         if (!activeUserText || consumedMatchHidden) return true;
+        if (message.clientId && latestActiveUser.clientId && message.clientId !== latestActiveUser.clientId) return true;
         var queuedText = String(message && message.text || "")
           .replace(/\s+/g, " ").trim();
         if (queuedText !== activeUserText) return true;
@@ -5907,12 +6372,16 @@ export const CODEX_MOBILE_JS = String.raw`
       }
     );
     var confirmedIds = {};
-    confirmed.forEach(function (message) { confirmedIds[message.id] = true; });
+    // Include consumed native IDs: otherwise their provisional twins reappear.
+    (Array.isArray(queuedMessages) ? queuedMessages : []).forEach(function (message) { confirmedIds[message.id] = true; });
     var optimistic = (Array.isArray(pendingMessages) ? pendingMessages : []).flatMap(
       function (pending) {
         if (
-          pending.displayInTranscript ||
+          pending.displayInTranscript || pending.deliveryConfirmed || pending.queueMissing ||
+          pending.status === "delivered" || pending.status === "cancelled" ||
           pending.status === "failed" ||
+          // 未确认：已离开待发列表并回到正文，不能继续留在队列里。
+          pending.status === "unconfirmed" ||
           pending.status === "sent" ||
           pending.queuedMessageId && confirmedIds[pending.queuedMessageId]
         ) return [];
@@ -5988,6 +6457,13 @@ export const CODEX_MOBILE_JS = String.raw`
         return message.id !== messageId;
       });
       state.editingQueuedMessageId = "";
+      // 乐观条目的 ID 是 clientId，已确认条目才带原生队列 ID；两者都要清掉。
+      state.pendingMessages = state.pendingMessages.filter(function (pending) {
+        return pending.queuedMessageId !== messageId && pending.clientId !== messageId;
+      });
+      state.outboundMessages = state.outboundMessages.filter(function (pending) {
+        return pending.queuedMessageId !== messageId && pending.clientId !== messageId;
+      });
       showToast("已删除待发送消息");
       renderQueuedMessages(state.queuedMessages);
       await loadMessages(false);
@@ -6000,10 +6476,18 @@ export const CODEX_MOBILE_JS = String.raw`
   }
 
   function beginQueuedMessageEdit(message) {
-    if (!message || message.optimistic || state.queueActionMessageId) return;
+    // 本地乐观条目也能编辑：先取消本地待发，再把内容放回输入框。
+    // 只有终态（已发送/已取消/失败）才不允许编辑。
+    if (!message || state.queueActionMessageId) return;
+    if (message.status === "delivered" || message.status === "cancelled") return;
     if (composerInput.value.trim() || state.pendingImages.length > 0) {
       showToast("请先发送或清空输入框中的内容");
       composerInput.focus();
+      return;
+    }
+    if (message.optimistic || !message.queuedMessageId) {
+      // 没有原生队列 ID，编辑等价于取消本地待发并回到输入框。
+      void cancelQueuedMessageLocally(message);
       return;
     }
     saveComposerDraft(state.currentAdapter, state.currentThreadId);
@@ -6017,6 +6501,38 @@ export const CODEX_MOBILE_JS = String.raw`
     resizeComposer();
     composerInput.focus();
     composerInput.setSelectionRange(composerInput.value.length, composerInput.value.length);
+  }
+
+  async function cancelQueuedMessageLocally(message) {
+    var messageId = message.queuedMessageId || message.id;
+    try {
+      await api(adapterApiPath(
+        "/api/tasks/" + encodeURIComponent(state.currentThreadId) +
+        "/queue/" + encodeURIComponent(messageId)),
+        { method: "DELETE" }
+      );
+    } catch (error) {
+      showToast("无法取回这条消息：" + (error.message || "请稍后重试"));
+      return;
+    }
+    state.pendingMessages = state.pendingMessages.filter(function (pending) {
+      return pending.queuedMessageId !== messageId && pending.clientId !== messageId;
+    });
+    state.outboundMessages = state.outboundMessages.filter(function (pending) {
+      return pending.queuedMessageId !== messageId && pending.clientId !== messageId;
+    });
+    state.queuedMessages = state.queuedMessages.filter(function (entry) { return entry.id !== messageId; });
+    composerInput.value = String(message.text || "");
+    state.editingQueuedMessageId = "";
+    state.editingQueuedImageCount = 0;
+    state.composerRevision += 1;
+    composerInput.placeholder = "有问题，尽管问";
+    composerImageButton.disabled = false;
+    renderQueuedMessages(state.queuedMessages);
+    resizeComposer();
+    composerInput.focus();
+    composerInput.setSelectionRange(composerInput.value.length, composerInput.value.length);
+    showToast("已取回输入框，可修改后重新发送");
   }
 
   function cancelQueuedMessageEdit() {
@@ -6085,8 +6601,12 @@ export const CODEX_MOBILE_JS = String.raw`
     var summary = effectiveRunSummary();
     return JSON.stringify([
       messages,
-      latestUser && [latestUser.turnId, latestUser.text],
-      summary && [summary.status, summary.turnId]
+      state.pendingMessages.map(function (pending) {
+        return [pending.clientId, pending.queuedMessageId, pending.status, pending.displayInTranscript,
+          pending.deliveryConfirmed, pending.queueMissing, pending.text, pending.imageCount];
+      }),
+      latestUser && [latestUser.id, latestUser.clientId, latestUser.turnId, latestUser.text],
+      summary && [summary.status, summary.turnId, summary.startedAtMs]
     ]);
   }
 
@@ -6124,7 +6644,7 @@ export const CODEX_MOBILE_JS = String.raw`
       main.className = "queued-followup-main";
       var icon = document.createElement("span");
       icon.className = "queued-followup-icon";
-      icon.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h9a4 4 0 0 1 4 4v1M18 7l-3-3m3 3-3 3M19 17h-9a4 4 0 0 1-4-4v-1M6 17l3 3m-3-3 3-3"/></svg>';
+      icon.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 7v5l3 2"/></svg>';
       var copy = document.createElement("div");
       copy.className = "queued-followup-copy";
       var textEl = document.createElement("div");
@@ -6134,7 +6654,7 @@ export const CODEX_MOBILE_JS = String.raw`
       var status = document.createElement("div");
       status.className = "queued-followup-status" + (optimistic ? " is-pending" : "");
       status.textContent = optimistic
-        ? "正在加入待发送…"
+        ? message.status === "queued" ? "已排队 · 正在同步待发送列表" : "正在加入待发送…"
         : busy
           ? "正在更新…"
           : "已排队 · 等待当前任务完成";
@@ -6148,17 +6668,22 @@ export const CODEX_MOBILE_JS = String.raw`
 
       var actions = document.createElement("div");
       actions.className = "queued-followup-actions";
+      // 乐观条目（还没有原生队列 ID）也要能操作：删除=取消本地待发，
+      // 编辑=取回输入框。此前三个按钮对乐观条目一律禁用，用户点击毫无反应。
+      var actionBusy = Boolean(state.queueActionMessageId);
+      var terminal = message.status === "delivered" || message.status === "cancelled";
       var steer = document.createElement("button");
       steer.type = "button";
       steer.className = "queued-followup-action steer-action";
-      steer.disabled = optimistic || Boolean(state.queueActionMessageId);
+      // 引导需要原生队列 ID，乐观条目暂时不可用。
+      steer.disabled = optimistic || actionBusy || terminal;
       steer.setAttribute("aria-label", "引导这条消息");
       steer.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h12M13 8l4 4-4 4"/></svg><span class="queued-followup-action-label steer-label">引导</span>';
       steer.addEventListener("click", function () { void steerQueuedMessage(message.id); });
       var edit = document.createElement("button");
       edit.type = "button";
       edit.className = "queued-followup-action";
-      edit.disabled = optimistic || Boolean(state.queueActionMessageId);
+      edit.disabled = actionBusy || terminal;
       edit.setAttribute("aria-label", "编辑这条消息");
       edit.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 19 3.5-.8L18 8.7 15.3 6 5.8 15.5 5 19Z"/><path d="m13.8 7.5 2.7 2.7"/></svg><span class="queued-followup-action-label">编辑</span>';
       edit.addEventListener("click", function () {
@@ -6167,7 +6692,7 @@ export const CODEX_MOBILE_JS = String.raw`
       var remove = document.createElement("button");
       remove.type = "button";
       remove.className = "queued-followup-action";
-      remove.disabled = optimistic || Boolean(state.queueActionMessageId);
+      remove.disabled = actionBusy || terminal;
       remove.setAttribute("aria-label", "删除这条消息");
       remove.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"/></svg>';
       remove.addEventListener("click", function () { void deleteQueuedMessage(message.id); });
@@ -6175,7 +6700,7 @@ export const CODEX_MOBILE_JS = String.raw`
       actions.appendChild(steer);
       actions.appendChild(edit);
       actions.appendChild(remove);
-      actions.hidden = optimistic;
+      // Keep action icons visible while the native queue ID is being confirmed.
 
       main.appendChild(icon);
       main.appendChild(copy);
@@ -6297,7 +6822,10 @@ export const CODEX_MOBILE_JS = String.raw`
     var summary = effectiveRunSummary();
     var taskRunning = isTaskActivelyRunning(currentTask()) ||
       Boolean(summary && summary.status === "running");
-    return taskRunning &&
+    var awaitingReceipt = (state.pendingMessages || []).some(function (message) {
+      return message.displayInTranscript !== false && !["failed", "waiting_task_retry", "queued"].includes(message.status);
+    });
+    return (taskRunning || awaitingReceipt || Boolean(state.localRunSummary)) &&
       Number(nowMs) - Number(state.lastLiveMessageRefreshAtMs || 0) >= 5000;
   }
 
@@ -6336,6 +6864,7 @@ export const CODEX_MOBILE_JS = String.raw`
       }
       if (latestAssistant && latestUser) break;
     }
+    if (summary && ["submitting", "syncing"].includes(summary.status)) return summary;
     if (isTaskActivelyRunning(task)) {
       if (summary && summary.status === "running") return summary;
       var startedAtMs = Number(task && task.startedAtMs) ||
@@ -6349,11 +6878,21 @@ export const CODEX_MOBILE_JS = String.raw`
       };
     }
     var currentTurnId = task && task.activeTurnId || latestUser && latestUser.turnId || "";
-    var runningProgress = (Array.isArray(progressItems) ? progressItems : []).slice().reverse()
-      .find(function (item) {
-        return item && item.status === "running" &&
-          (!currentTurnId || !item.turnId || item.turnId === currentTurnId);
-      });
+    // 任务的终态是权威的：只要这一轮已经明确结束，即使某条进展项还停在
+    // running（同一轮内 Agent 的进展不会逐条回填终态），也不能把它当成
+    // 仍在运行，否则已完成的任务会一直显示「正在规划 ···」动画。
+    var summarySettledThisTurn = Boolean(
+      summary &&
+      summary.status !== "running" &&
+      (!currentTurnId || !summary.turnId || summary.turnId === currentTurnId)
+    );
+    var runningProgress = summarySettledThisTurn
+      ? null
+      : (Array.isArray(progressItems) ? progressItems : []).slice().reverse()
+        .find(function (item) {
+          return item && item.status === "running" &&
+            (!currentTurnId || !item.turnId || item.turnId === currentTurnId);
+        });
     if (runningProgress) {
       var progressTurnId = runningProgress.turnId || currentTurnId || undefined;
       var summaryMatchesProgress = Boolean(
@@ -6389,7 +6928,7 @@ export const CODEX_MOBILE_JS = String.raw`
 
   function runDurationMs(summary) {
     if (!summary) return 0;
-    if (summary.status === "running") {
+    if (["running", "submitting", "syncing"].includes(summary.status)) {
       if (summary.startedAtMs) return Math.max(Number(summary.durationMs) || 0, Date.now() - summary.startedAtMs);
       return (Number(summary.durationMs) || 0) + Math.max(0, Date.now() - (summary.receivedAtMs || Date.now()));
     }
@@ -6404,6 +6943,11 @@ export const CODEX_MOBILE_JS = String.raw`
     if (summary.status === "running") {
       return (stopping ? "正在停止" : "正在处理") + " · " + duration;
     }
+    if (summary.status === "submitting") {
+      var pending = state.pendingMessages.find(function (message) { return message.clientId === summary.clientId; });
+      return pending ? deliveryHeaderLabel(pending) : "正在同步提交状态 · " + duration;
+    }
+    if (summary.status === "syncing") return "Agent 已收到，正在同步运行状态 · " + duration;
     if (summary.status === "failed") return "处理失败 · " + duration;
     if (summary.status === "interrupted") return "已中断 · " + duration;
     if (summary.status === "completed") return "已完成 · " + duration;
@@ -6415,18 +6959,19 @@ export const CODEX_MOBILE_JS = String.raw`
       return pending.threadId === state.currentThreadId &&
         (!pending.adapter || pending.adapter === state.currentAdapter) &&
         pending.displayInTranscript !== false &&
-        (pending.status === "contacting_computer" ||
-          pending.status === "forwarding_to_agent" ||
-          pending.status === "sending");
+        ["contacting_computer", "forwarding_to_agent", "sending", "accepted", "submitted", "delivered", "retrying", "waiting_to_send"].includes(pending.status);
     }) || null;
   }
 
   function deliveryHeaderLabel(pending) {
     var duration = formatRunDuration(Date.now() - Number(pending.createdAtMs || Date.now()));
-    if (pending.status === "forwarding_to_agent") {
-      return "电脑正在组织发送给 " + adapterName(pending.adapter || state.currentAdapter) + " · " + duration;
+    if (pending.status === "delivered") return "Agent 已收到，正在同步运行状态 · " + duration;
+    if (pending.status === "retrying") return "正在重试并核对接收状态 · " + duration;
+    if (pending.status === "waiting_to_send") return "等待前一条消息提交 · " + duration;
+    if (pending.serverAcknowledged || ["accepted", "submitted", "forwarding_to_agent"].includes(pending.status)) {
+      return "已提交，正在等待 " + adapterName(pending.adapter || state.currentAdapter) + " 接收 · " + duration;
     }
-    return "正在尝试发送给电脑 · " + duration;
+    return "正在提交消息 · " + duration;
   }
 
   function renderDeliveryHeader(pending) {
@@ -6874,9 +7419,7 @@ export const CODEX_MOBILE_JS = String.raw`
       if (deliveryLabel) deliveryLabel.textContent = deliveryHeaderLabel(delivery);
     }
     var header = document.getElementById("run-header");
-    var messages = filterVisibleConversationMessages(state.serverMessages).concat(visiblePendingMessages().map(function (pending) {
-      return Object.assign({ role: "user", pending: true }, pending);
-    }));
+    var messages = conversationMessages();
     var summary = resolveVisibleRunSummary(
       messages,
       currentTask(),
@@ -6896,18 +7439,38 @@ export const CODEX_MOBILE_JS = String.raw`
   }
 
   function reconcilePendingMessages(messages, outboundMessages, deliveredClientIds) {
-    applyDeliveredMessageReceipts(deliveredClientIds);
-    var acceptedClientIds = new Set((Array.isArray(outboundMessages) ? outboundMessages : []).map(function (message) {
-      return message && message.clientId;
-    }).filter(Boolean));
-    state.pendingMessages = state.pendingMessages.filter(function (pending) {
-      if (acceptedClientIds.has(pending.clientId)) {
-        pending.serverAcknowledged = true;
-        if (pending.imageStoreKey) void pendingImageStoreOperation(pending.imageStoreKey, null).catch(function () {});
-        return false;
+    (Array.isArray(outboundMessages) ? outboundMessages : []).forEach(function (remote) {
+      if (!remote || !remote.clientId) return;
+      if (remote.status === "cancelled") {
+        state.pendingMessages = state.pendingMessages.filter(function (pending) { return pending.clientId !== remote.clientId; });
+        if (Array.isArray(state.outboundMessages)) state.outboundMessages = state.outboundMessages.filter(function (pending) { return pending.clientId !== remote.clientId; });
+        return;
       }
-      return true;
+      if (messages.some(function (message) { return message.role === "user" && message.clientId === remote.clientId; })) return;
+      var pending = state.pendingMessages.find(function (entry) { return entry.clientId === remote.clientId; });
+      if (!pending) {
+        pending = Object.assign({ threadId: state.currentThreadId, adapter: state.currentAdapter }, remote);
+        state.pendingMessages.push(pending);
+      } else {
+        // Preserve the original object (an in-flight POST still owns it), baseline and render identity.
+        ["status", "turnId", "queuedMessageId", "queueMissing", "attempts", "lastError", "lastAttemptAtMs", "submittedAtMs"].forEach(function (key) {
+          if (remote[key] !== undefined) pending[key] = remote[key];
+        });
+        if (remote.status === "queued" && typeof remote.text === "string") pending.text = remote.text;
+        if (Array.isArray(remote.images) && remote.images.length) pending.images = remote.images;
+      }
+      pending.serverAcknowledged = true;
+      if (["failed", "queued", "waiting_task_retry"].includes(pending.status) && state.localRunSummary && state.localRunSummary.clientId === pending.clientId) {
+        state.localRunSummary = null;
+        state.optimisticProgressTurnId = null;
+      }
+      if (state.localRunSummary && state.localRunSummary.clientId === pending.clientId && pending.turnId) {
+        state.localRunSummary.turnId = pending.turnId;
+        state.localRunSummary.status = "syncing";
+      }
     });
+    applyDeliveredMessageReceipts(deliveredClientIds);
+    reconcilePendingQueueState();
     var users = messages.filter(function (message) { return message.role === "user"; });
     var used = {};
     var confirmedKeys = [];
@@ -6926,6 +7489,7 @@ export const CODEX_MOBILE_JS = String.raw`
       function normalizedText(value) {
         return String(value || "").replace(/\r\n?/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
       }
+      if (message && message.clientId && message.clientId !== pending.clientId) return false;
       var actual = normalizedText(message && message.text);
       var expected = normalizedText(pending && pending.text);
       if (actual === expected) return true;
@@ -6940,8 +7504,10 @@ export const CODEX_MOBILE_JS = String.raw`
       var baselineKeys = Array.isArray(pending.baselineUserKeys)
         ? new Set(pending.baselineUserKeys)
         : null;
-      var matchIndex = -1;
-      if (pending.sourceMessageId) {
+      var matchIndex = users.findIndex(function (message, index) {
+        return !used[index] && message.clientId === pending.clientId;
+      });
+      if (matchIndex < 0 && pending.sourceMessageId) {
         matchIndex = users.findIndex(function (message, index) {
           return !used[index] && String(message && message.id || "") === pending.sourceMessageId;
         });
@@ -6956,18 +7522,11 @@ export const CODEX_MOBILE_JS = String.raw`
       if (matchIndex < 0) {
         matchIndex = users.findIndex(function (message, index) {
           if (used[index] || !matchesPendingText(message, pending)) return false;
+          if (pending.turnId && message.turnId && pending.turnId !== message.turnId) return false;
+          if (!baselineKeys && pending.createdAtMs && (!message.createdAtMs || message.createdAtMs < pending.createdAtMs) && !(pending.turnId && pending.turnId === message.turnId)) return false;
           if (baselineKeys) return !baselineKeys.has(userMessageKey(message));
           return index >= pending.baselineUserCount;
         });
-      }
-      if (
-        matchIndex < 0 &&
-        pending.turnId &&
-        pending.imageCount > 0 &&
-        !pending.text.trim() &&
-        messages.some(function (message) { return message.turnId === pending.turnId; })
-      ) {
-        return false;
       }
       if (matchIndex < 0) return true;
       var matchedMessage = users[matchIndex];
@@ -6981,6 +7540,15 @@ export const CODEX_MOBILE_JS = String.raw`
       }
       used[matchIndex] = true;
       pending.deliveryConfirmed = true;
+      matchedMessage.clientId = pending.clientId;
+      if (state.localRunSummary && state.localRunSummary.clientId === pending.clientId) {
+        state.localRunSummary.turnId = matchedMessage.turnId || pending.turnId || "";
+        state.localRunSummary.status = "syncing";
+      }
+      if (pending.imageStoreKey) void pendingImageStoreOperation(pending.imageStoreKey, null).catch(function () {});
+      if (Array.isArray(state.outboundMessages)) {
+        state.outboundMessages = state.outboundMessages.filter(function (entry) { return entry.clientId !== pending.clientId; });
+      }
       confirmedKeys.push(userMessageKey(matchedMessage));
       return false;
     });
@@ -6992,18 +7560,61 @@ export const CODEX_MOBILE_JS = String.raw`
     });
   }
 
+  // 与服务端 MOBILE_PENDING_CONFIRMATION_TIMEOUT_MS 保持一致：等待原生确认
+  // 超过这个时间的待发送消息视为过时，离开待发列表并回到正文。
+  var PENDING_CONFIRMATION_TIMEOUT_MS = 60 * 60 * 1_000;
+
+  function isAwaitingNativeConfirmation(pending) {
+    if (!pending) return false;
+    var status = pending.status;
+    if (status !== "queued" && status !== "submitted" && status !== "sending") return false;
+    // 已经拿到原生队列 ID 的条目由服务端对账，不在客户端判定过时。
+    return !pending.queuedMessageId;
+  }
+
+  function pendingConfirmationSinceMs(pending) {
+    var candidates = [pending.lastAttemptAtMs, pending.submittedAtMs, pending.createdAtMs];
+    for (var i = 0; i < candidates.length; i += 1) {
+      var value = Number(candidates[i]);
+      if (Number.isFinite(value) && value > 0) return value;
+    }
+    return Date.now();
+  }
+
+  function reconcilePendingQueueState() {
+    state.pendingMessages = state.pendingMessages.filter(function (pending) { return pending.status !== "cancelled"; });
+    state.pendingMessages.forEach(function (pending) {
+      if (pending.deliveryConfirmed || pending.status === "delivered") {
+        pending.displayInTranscript = true;
+        return;
+      }
+      if (pending.status === "queued" && typeof pending.queueMissing === "boolean") {
+        // Preserve uncertain content in the conversation; never resend or erase it on a timer.
+        pending.displayInTranscript = pending.queueMissing;
+        return;
+      }
+      // 兜底：服务端尚未把超时条目转为未确认时（例如页面离线期间），
+      // 客户端也不能让等待原生确认的条目无限期留在待发列表。内容同样保留。
+      if (isAwaitingNativeConfirmation(pending) &&
+          Date.now() - pendingConfirmationSinceMs(pending) >= PENDING_CONFIRMATION_TIMEOUT_MS) {
+        pending.status = "unconfirmed";
+        pending.queuedMessageId = "";
+        pending.queueMissing = false;
+        pending.displayInTranscript = true;
+      }
+    });
+  }
+
   function applyDeliveredMessageReceipts(deliveredClientIds) {
     var delivered = new Set(Array.isArray(deliveredClientIds) ? deliveredClientIds : []);
-    if (Array.isArray(state.outboundMessages)) {
-      state.outboundMessages = state.outboundMessages.filter(function (message) { return !delivered.has(message.clientId); });
-    }
-    state.pendingMessages = state.pendingMessages.filter(function (pending) {
-      if (pending.serverAcknowledged || pending.status === "delivered" || delivered.has(pending.clientId)) {
+    // A receipt stops resubmission; only a visible native user message removes the provisional bubble.
+    state.pendingMessages.forEach(function (pending) {
+      if (pending.status === "delivered" || delivered.has(pending.clientId)) {
         pending.serverAcknowledged = true;
-        if (pending.imageStoreKey) void pendingImageStoreOperation(pending.imageStoreKey, null).catch(function () {});
-        return false;
+        pending.deliveryConfirmed = true;
+        pending.status = "delivered";
+        delete pending.lastError;
       }
-      return true;
     });
   }
 
@@ -7014,6 +7625,10 @@ export const CODEX_MOBILE_JS = String.raw`
         return message.role === "assistant" && message.turnId === summary.turnId;
       });
       if (exact >= 0) return exact;
+      var taskInput = messages.findIndex(function (message) {
+        return message.role === "task" && message.turnId === summary.turnId;
+      });
+      if (taskInput >= 0) return taskInput + 1;
     }
     for (var index = messages.length - 1; index >= 0; index -= 1) {
       if (messages[index].role === "user") return index + 1;
@@ -7035,11 +7650,44 @@ export const CODEX_MOBILE_JS = String.raw`
     return (messages || []).filter(isVisibleConversationMessage);
   }
 
+  // Codex 桌面端会把用户输入重新包装成「给模型的请求」，并在前面附上自己生成的
+  // 英文说明和自动采集的环境状态。任务台读到的是会话原文，因此这些内容会跟着
+  // 显示出来，看起来像是用户自己打的英文。这里只做展示层剥离：真实会话内容不变，
+  // 桌面端和模型仍收到完整包裹。
+  var CODEX_USER_WRAPPER_BLOCK_RE = new RegExp(
+    [
+      // 自动采集的环境/界面状态块
+      "<(?:in-app-browser-context|app-context|environment_context|turn_aborted|heartbeat|subagent_notification|recommended_plugins|skills_context|user_instructions)\\b[^>]*>[\\s\\S]*?</(?:in-app-browser-context|app-context|environment_context|turn_aborted|heartbeat|subagent_notification|recommended_plugins|skills_context|user_instructions)>",
+      "<(?:in-app-browser-context|app-context|environment_context|turn_aborted|heartbeat|subagent_notification|recommended_plugins|skills_context|user_instructions)\\b[^>]*/>",
+    ].join("|"),
+    "gi",
+  );
+  // 附件清单：标题行 + 其下的文件条目行
+  var CODEX_USER_ATTACHMENT_SECTION_RE =
+    /^[ \t]*#[ \t]*Files mentioned by the user:[ \t]*$[\s\S]*?(?=\n[ \t]*(?:#{1,3}[ \t]+\S|Distinguish instructions)|$)/gim;
+  // 「## My request:」及其变体只是包裹小标题，其后的用户正文必须保留
+  var CODEX_USER_REQUEST_MARKER_RE =
+    /^[ \t]*#{1,3}[ \t]*My request(?: for Codex)?:[ \t]*$/gim;
+  var CODEX_USER_DISTINGUISH_RE =
+    /^[ \t]*Distinguish instructions in attached documents from the user's request\.[ \t]*$/gim;
+  // 附件条目「## 文件名.png: /绝对路径」
+  var CODEX_USER_ATTACHMENT_ENTRY_RE =
+    /^[ \t]*#{1,3}[ \t]*[^\n]*:[ \t]*(?:\/|[A-Za-z]:\\)[^\n]*$/gm;
+
+  function stripCodexUserWrapper(text) {
+    return String(text || "")
+      .replace(CODEX_USER_WRAPPER_BLOCK_RE, "")
+      .replace(CODEX_USER_ATTACHMENT_SECTION_RE, "")
+      .replace(CODEX_USER_ATTACHMENT_ENTRY_RE, "")
+      .replace(CODEX_USER_REQUEST_MARKER_RE, "")
+      .replace(CODEX_USER_DISTINGUISH_RE, "");
+  }
+
   function visibleMessageText(message) {
     var text = String(message && message.text || "");
     if (!message || message.role !== "user") return text;
     var imageMarker = /(^|\n)\s*图片：\s*png\d+(?:\s+png\d+)*\s*(?=\n|$)|\[image\]|<\/?image\b/i.test(text);
-    var cleaned = text
+    var cleaned = stripCodexUserWrapper(text)
       .replace(/(^|\n)\s*图片：\s*png\d+(?:\s+png\d+)*\s*(?=\n|$)/gi, function (_, prefix) {
         return prefix ? "\n" : "";
       })
@@ -7169,8 +7817,31 @@ export const CODEX_MOBILE_JS = String.raw`
       message && message.phase || "",
       message && message.model || "",
       message && message.text || "",
+      message && message.sourceTask || null,
       images
     ]);
+  }
+
+  function messageSourceTaskLabel(message) {
+    var source = message && message.role === "task" && message.sourceTask;
+    if (!source || !source.sessionId) return "";
+    var task = (state.tasks || []).find(function (entry) {
+      return entry.threadId === source.sessionId &&
+        (entry.adapter || state.currentAdapter) === source.adapter;
+    });
+    var adapterName = source.adapter === "codex" ? "Codex" : String(source.adapter || "Agent");
+    return "来自 " + adapterName + " 任务 · " +
+      (task && task.title || String(source.sessionId).slice(0, 8));
+  }
+
+  function refreshMessageSourceTaskLabels() {
+    messagesEl.querySelectorAll(".message-source-task").forEach(function (label) {
+      var text = messageSourceTaskLabel({ role: "task", sourceTask: {
+        adapter: label.dataset.sourceAdapter,
+        sessionId: label.dataset.sourceSession
+      } });
+      if (label.textContent !== text) label.textContent = text;
+    });
   }
 
   function messageNodeKey(message, duplicateIndex) {
@@ -7197,6 +7868,7 @@ export const CODEX_MOBILE_JS = String.raw`
   function messageRowRenderKey(message, nextMessage) {
     return JSON.stringify([
       message && message.role || "",
+      messageSourceTaskLabel(message),
       message && message.text || "",
       message && message.id || "",
       message && message.turnId || "",
@@ -7204,6 +7876,7 @@ export const CODEX_MOBILE_JS = String.raw`
       message && message.model || "",
       Boolean(message && message.pending),
       message && message.status || "",
+      Boolean(message && message.queueMissing),
       message && message.clientId || "",
       Array.isArray(message && message.images) ? message.images.map(function (image) {
         return [
@@ -7219,8 +7892,12 @@ export const CODEX_MOBILE_JS = String.raw`
     ]);
   }
 
-  function getMessageNode(message, index, nextMessage, nodeKey, isLatest) {
-    var renderKey = messageRowRenderKey(message, nextMessage) + "\u0000" + (isLatest ? "1" : "0");
+  function getMessageNode(message, index, nextMessage, nodeKey, isLatest, runStatus) {
+    // 运行状态会改变页脚内容（运行中显示更新时间、结束后补上模型名），
+    // 因此必须计入渲染键，否则结束瞬间会复用旧的运行中行。
+    var renderKey = messageRowRenderKey(message, nextMessage) +
+      "\u0000" + (isLatest ? "1" : "0") +
+      "\u0000" + String(runStatus || "");
     var existing = state.messageNodes[nodeKey];
     if (existing && existing.__deskRelayMessageRenderKey === renderKey) {
       return existing;
@@ -7231,24 +7908,49 @@ export const CODEX_MOBILE_JS = String.raw`
     return row;
   }
 
-  function resolveMessageTimeLabel(message, summary, isLatest, nowMs) {
-    if (!message || message.role !== "assistant") return "";
-    var running = Boolean(summary && summary.status === "running");
-    var sameTurn = Boolean(
-      summary && summary.turnId && message.turnId &&
-      String(summary.turnId) === String(message.turnId)
-    );
+  // 一轮对话常常被拆成多个 assistant 小段。模型名与时间只在整轮的末尾显示
+  // 一次，避免每一小段都重复一遍；运行中只显示不断刷新的更新时间，模型名
+  // 等到这一轮结束再显示。
+  function resolveMessageFooter(message, summary, isSegmentEnd, nowMs) {
+    // 其他任务转来的消息按「收到于」显示时间，且不显示模型名。
+    if (message && message.role === "task") {
+      return {
+        model: "",
+        time: Number.isFinite(message.createdAtMs)
+          ? "收到于 " + formatClockTime(message.createdAtMs, nowMs) : ""
+      };
+    }
+    if (!message || message.role !== "assistant") return { model: "", time: "" };
+    if (!isSegmentEnd) return { model: "", time: "" };
     var createdMs = Number(message.createdAtMs);
-    // 正在进行的那一轮显示最近更新时间，已经结束的显示完成时间。
-    if (running && (sameTurn || isLatest)) {
+    var summaryTurnId = summary && summary.turnId;
+    var messageTurnId = message.turnId;
+    // 只有当运行中的那一轮就是这条消息所属的轮次时，才按「更新于」显示；
+    // 历史轮次即使此刻有别的轮次在跑，也保留自己的完成时间与模型名。
+    var sameTurn = Boolean(
+      summaryTurnId && messageTurnId &&
+      String(summaryTurnId) === String(messageTurnId)
+    );
+    var running = Boolean(
+      summary &&
+      summary.status === "running" &&
+      (sameTurn || !messageTurnId || !summaryTurnId)
+    );
+    var time = "";
+    if (running) {
+      // 运行中：用最近的更新时间覆盖，而不是逐段累加。
       var updatedMs = Number(summary && summary.receivedAtMs) || createdMs || nowMs;
-      return "更新于 " + formatClockTime(updatedMs, nowMs);
+      time = "更新于 " + formatClockTime(updatedMs, nowMs);
+    } else if (sameTurn && Number(summary && summary.completedAtMs)) {
+      time = "完成于 " + formatClockTime(Number(summary.completedAtMs), nowMs);
+    } else if (Number.isFinite(createdMs)) {
+      time = "完成于 " + formatClockTime(createdMs, nowMs);
     }
-    if (sameTurn && Number(summary && summary.completedAtMs)) {
-      return "完成于 " + formatClockTime(Number(summary.completedAtMs), nowMs);
-    }
-    if (!Number.isFinite(createdMs)) return "";
-    return "完成于 " + formatClockTime(createdMs, nowMs);
+    return {
+      // 运行中的进展不显示模型名；这一轮结束后才显示它实际使用的模型。
+      model: running ? "" : visibleMessageModel(message),
+      time: time
+    };
   }
 
   function renderMessageRow(message, index, nextMessage, nodeKey, isLatest) {
@@ -7288,39 +7990,44 @@ export const CODEX_MOBILE_JS = String.raw`
                     : message.status === "unconfirmed"
                       ? "提交状态暂未确认，消息已保留"
                       : message.status === "queued"
-                        ? "已排队，等待当前任务完成"
+                        ? message.queueMissing ? "暂未在待发送列表中找到，接收结果待核对；内容已保留" : "已排队，等待当前任务完成"
                         : message.status === "submitted"
                           ? "已提交，正在等待任务接收"
                           : message.status === "steered"
                             ? "已引导，正在处理"
-                            : "已提交，正在处理";
+                            : message.status === "delivered" ? "已收到，正在同步消息记录" : "已提交，等待运行状态";
       var failed = message.status === "failed" || message.status === "waiting_task_retry";
       var retry = failed || message.status === "unconfirmed"
         ? '<button class="message-retry" type="button" data-retry="' + escapeHtml(message.clientId) + '">' +
           (message.status === "unconfirmed" ? "检查状态" : "重新提交") + "</button>"
         : "";
-      var copy = failed && message.text
+      var copy = (failed || message.queueMissing) && message.text
         ? '<button class="message-retry" type="button" data-copy-message="' + escapeHtml(message.clientId) + '">复制消息</button>'
         : "";
-      deliveryHtml = '<div class="message-delivery ' + (failed ? "failed" : "") + '"><span>' + escapeHtml(statusText) + "</span>" + copy + retry + "</div>";
+      var sharedDeliveryStatus = ["sending", "accepted", "submitted", "delivered", "forwarding_to_agent", "contacting_computer", "retrying"].includes(message.status);
+      if (!sharedDeliveryStatus) deliveryHtml = '<div class="message-delivery ' + (failed ? "failed" : "") + '"><span>' + escapeHtml(statusText) + "</span>" + copy + retry + "</div>";
     }
     var imagesHtml = renderMessageImages(message);
     var visibleText = visibleMessageText(message);
     var textHtml = visibleText ? '<div class="message-content">' + renderMarkdown(visibleText, row.id) + "</div>" : "";
-    var model = visibleMessageModel(message);
-    var modelHtml = model
-      ? '<div class="message-model">' + escapeHtml(model) + "</div>"
-      : "";
-    var timeLabel = resolveMessageTimeLabel(
+    // 只在整轮末尾（后面没有同轮的 assistant 小段）显示模型名与时间。
+    var footer = resolveMessageFooter(
       message,
       effectiveRunSummary(),
-      Boolean(isLatest),
+      !continues,
       Date.now()
     );
-    var timeHtml = timeLabel
-      ? '<div class="message-time">' + escapeHtml(timeLabel) + "</div>"
+    var modelHtml = footer.model
+      ? '<div class="message-model">' + escapeHtml(footer.model) + "</div>"
       : "";
-    row.innerHTML = '<div class="message-card">' + imagesHtml + textHtml + modelHtml + timeHtml + deliveryHtml + "</div>";
+    var timeHtml = footer.time
+      ? '<div class="message-time">' + escapeHtml(footer.time) + "</div>"
+      : "";
+    var sourceLabel = messageSourceTaskLabel(message);
+    var sourceHtml = sourceLabel ? '<div class="message-source-task" data-source-adapter="' +
+      escapeHtml(message.sourceTask.adapter) + '" data-source-session="' + escapeHtml(message.sourceTask.sessionId) +
+      '">' + escapeHtml(sourceLabel) + "</div>" : "";
+    row.innerHTML = '<div class="message-card">' + sourceHtml + imagesHtml + textHtml + modelHtml + timeHtml + deliveryHtml + "</div>";
     var retryButton = row.querySelector("[data-retry]");
     if (retryButton) retryButton.addEventListener("click", function () { retryPendingMessage(message.clientId); });
     var copyButton = row.querySelector("[data-copy-message]");
@@ -7334,9 +8041,8 @@ export const CODEX_MOBILE_JS = String.raw`
     var row = document.createElement("div");
     row.className = "response-pending";
     row.setAttribute("role", "status");
-    row.setAttribute("aria-label", "正在规划");
-    row.innerHTML = '<span class="agent-planning-copy">正在规划</span>' +
-      '<span class="agent-planning-dots" aria-hidden="true"><span>·</span><span>·</span><span>·</span></span>';
+    row.setAttribute("aria-label", "Agent 正在执行");
+    row.innerHTML = '<span class="agent-planning-dots" aria-hidden="true"><span>·</span><span>·</span><span>·</span></span>';
     return row;
   }
 
@@ -7389,9 +8095,7 @@ export const CODEX_MOBILE_JS = String.raw`
     var shouldStick = forceBottom || isNearBottom();
     var previousScrollTop = messagesEl.scrollTop;
     var openFoldState = captureOpenFoldState();
-    var messages = filterVisibleConversationMessages(state.serverMessages).concat(visiblePendingMessages().map(function (pending) {
-      return Object.assign({ role: "user", pending: true }, pending);
-    }));
+    var messages = conversationMessages();
     var summary = resolveVisibleRunSummary(
       messages,
       currentTask(),
@@ -7400,13 +8104,13 @@ export const CODEX_MOBILE_JS = String.raw`
       state.progressItems
     );
     var headerIndex = runHeaderInsertIndex(messages, summary);
-    var pendingDelivery = currentPendingDelivery();
+    var pendingDelivery = summary ? null : currentPendingDelivery();
     if (!messages.length && !summary && !state.pendingApproval && state.approvalResults.length === 0 && state.progressItems.length === 0) {
       state.messageNodes = Object.create(null);
       var emptyTask = currentTask();
       if (isTemporaryTask(emptyTask)) {
         var emptyCreationError = taskCreationErrorText(emptyTask);
-        messagesEl.innerHTML = '<div class="empty-state"><div class="empty-wordmark">WeRelay</div><h1>' +
+        messagesEl.innerHTML = '<div class="empty-state"><div class="empty-wordmark brand-logo" role="img" aria-label="WeRelay" style="--brand-logo-width: 150px"></div><h1>' +
           (emptyTask.localCreationState === "failed"
             ? '任务创建失败'
             : emptyTask.localCreationState === "ready"
@@ -7432,7 +8136,7 @@ export const CODEX_MOBILE_JS = String.raw`
             : '点击上方「WeRelay · ' + escapeHtml(currentAdapterName()) + '」重新连接。') +
           '</p></div>';
       } else {
-        messagesEl.innerHTML = '<div class="empty-state"><div class="empty-wordmark">WeRelay</div><h1>还没有消息</h1><p>可以从手机继续这个任务。</p></div>';
+        messagesEl.innerHTML = '<div class="empty-state"><div class="empty-wordmark brand-logo" role="img" aria-label="WeRelay" style="--brand-logo-width: 150px"></div><h1>还没有消息</h1><p>可以从手机继续这个任务。</p></div>';
       }
       messagesEl.dataset.threadId = state.currentThreadId || "";
       updateUserMessageNavigation();
@@ -7480,7 +8184,8 @@ export const CODEX_MOBILE_JS = String.raw`
           index,
           messages[index + 1],
           nodeKey,
-          index === latestAssistantIndex
+          index === latestAssistantIndex,
+          summary && summary.status
         ));
         return;
       }
@@ -7553,78 +8258,51 @@ export const CODEX_MOBILE_JS = String.raw`
     }
   }
 
-  function updateRunSummary(summary, task, messages) {
+  function updateRunSummary(summary, task, messages, progressItems) {
     var taskRunning = isTaskActivelyRunning(task);
-    var latestUserIndex = -1;
-    var latestAssistantIndex = -1;
-    (Array.isArray(messages) ? messages : []).forEach(function (message, index) {
-      if (!message) return;
-      if (message.role === "user") latestUserIndex = index;
-      if (message.role === "assistant") latestAssistantIndex = index;
-    });
-    var assistantReplySettled = latestUserIndex >= 0 && latestAssistantIndex > latestUserIndex;
-    var previous = state.runSummary;
     var next = summary ? Object.assign({}, summary, { receivedAtMs: Date.now() }) : null;
-    if (taskRunning && next && next.status !== "running") {
-      next = null;
-    } else if (!taskRunning && next && next.status === "running") {
-      var localRunning = state.localRunSummary &&
-        state.localRunSummary.status === "running" &&
-        (!state.localRunSummary.turnId || !next.turnId ||
-          state.localRunSummary.turnId === next.turnId);
-      if (assistantReplySettled || !localRunning) {
-        if (previous && previous.turnId === next.turnId && previous.status !== "running") {
-          next = previous;
-        } else {
-          next = Object.assign({}, next, {
-            status: "unknown",
-            completedAtMs: undefined,
-            durationMs: runDurationMs(next)
-          });
-        }
-      }
+    var previous = state.runSummary;
+    if (!next && previous && previous.status === "running") {
+      var finishedPrevious = (messages || []).some(function (message) {
+        return message.role === "assistant" && message.phase === "final_answer" && message.turnId === previous.turnId;
+      });
+      next = finishedPrevious && task && !taskRunning
+        ? Object.assign({}, previous, { status: "unknown" }) : previous;
+    }
+    var local = state.localRunSummary;
+    // Progress may arrive before both the native user page and the summary.
+    // Only a matching/new turn can release the old-turn progress guard.
+    if (local && (!next || next.turnId === local.baselineTurnId)) {
+      var liveProgress = (progressItems || []).find(function (item) {
+        return item && item.status === "running" && item.turnId &&
+          (local.turnId ? item.turnId === local.turnId :
+            item.turnId !== local.baselineTurnId && Number(item.createdAtMs) >= Number(local.startedAtMs));
+      });
+      if (liveProgress) next = { turnId: liveProgress.turnId, status: "running",
+        startedAtMs: Number(liveProgress.createdAtMs), receivedAtMs: Date.now() };
+    }
+    var localTurnConfirmed = Boolean(local && local.turnId && next && next.turnId === local.turnId);
+    var freshTurn = Boolean(local && next && next.turnId && next.turnId !== local.baselineTurnId &&
+      Number(next.startedAtMs) >= Number(local.startedAtMs) &&
+      (!local.turnId || next.turnId === local.turnId));
+    if (next && next.status === "running" && task && !taskRunning) {
+      var finalForTurn = (messages || []).some(function (message) {
+        return message.role === "assistant" && message.phase === "final_answer" && message.turnId === next.turnId;
+      });
+      if (finalForTurn) next = Object.assign({}, next, {status: "unknown"});
+      else if (previous && previous.turnId === next.turnId && ["completed", "failed", "interrupted"].includes(previous.status)) next = previous;
     }
     state.runSummary = next;
-    if (!taskRunning && state.stopRequestedThreadId === state.currentThreadId) {
-      state.stopRequestedThreadId = "";
-    }
-    if (
-      state.optimisticProgressTurnId &&
-      next &&
-      next.turnId === state.optimisticProgressTurnId &&
-      next.status !== "running"
-    ) {
+    if (local && (localTurnConfirmed || freshTurn) && next.status !== "unknown") {
+      state.localRunSummary = null;
+      state.optimisticProgressTurnId = next.status === "running" ? next.turnId : null;
+    } else if (localTurnConfirmed && next.status === "unknown") {
+      state.localRunSummary = null;
+      state.optimisticProgressTurnId = null;
+    } else if (!local && next && ["completed", "failed", "interrupted"].includes(next.status)) {
       state.optimisticProgressTurnId = null;
     }
-    if (state.localRunSummary) {
-      var localTurnConfirmed = Boolean(
-        state.localRunSummary.turnId &&
-        next &&
-        next.turnId === state.localRunSummary.turnId &&
-        next.status !== "unknown"
-      );
-      var localAgeMs = Date.now() - Number(state.localRunSummary.startedAtMs || Date.now());
-      var remoteSettledForLocal = Boolean(
-        next &&
-        next.status !== "running" &&
-        state.localRunSummary.turnId &&
-        next.turnId &&
-        state.localRunSummary.turnId === next.turnId
-      );
-      var settledEvidence = remoteSettledForLocal || assistantReplySettled;
-      if (
-        localTurnConfirmed ||
-        settledEvidence ||
-        taskRunning && next && next.status === "running"
-      ) {
-        state.localRunSummary = null;
-        if (settledEvidence) state.optimisticProgressTurnId = null;
-      } else if (!taskRunning && !state.pendingMessages.some(function (message) {
-        return message.inFlight;
-      }) && localAgeMs > 120000) {
-        state.localRunSummary = null;
-      }
-    }
+    if (next && ["completed", "failed", "interrupted"].includes(next.status)) state.stopRequestedThreadId = "";
   }
 
   function normalizeMessagePage(payload, messages) {
@@ -7722,7 +8400,12 @@ export const CODEX_MOBILE_JS = String.raw`
 
   function mergeMessagePages(existing, incoming) {
     var previous = existing || [];
-    var next = incoming || [];
+    var clientIds = Object.create(null);
+    previous.forEach(function (message) { if (message.clientId) clientIds[messagePageKey(message)] = message.clientId; });
+    var next = (incoming || []).map(function (message) {
+      var clientId = clientIds[messagePageKey(message)];
+      return clientId ? Object.assign({}, message, {clientId: clientId}) : message;
+    });
     var alignment = messagePageAlignment(previous, next);
     if (alignment) {
       var prefix = previous.slice(0, alignment.first.previousIndex);
@@ -7807,6 +8490,9 @@ export const CODEX_MOBILE_JS = String.raw`
       state.oldestMessageCursor = page.nextBefore;
       state.hasOlderMessages = state.oldestMessageCursor !== null;
       rebuildServerMessages();
+      reconcilePendingMessages(state.serverMessages, payload.outboundMessages, payload.deliveredClientIds);
+      renderQueuedMessages(state.queuedMessages);
+      saveCurrentConversationSnapshot();
       state.transcriptSignature = "";
       renderMessages(false);
       messagesEl.scrollTop = previousTop + Math.max(0, messagesEl.scrollHeight - previousHeight);
@@ -7836,7 +8522,9 @@ export const CODEX_MOBILE_JS = String.raw`
 
   async function loadMessages(forceBottom, historyOnly, forceFullPage) {
     if (!state.authenticated || !state.currentThreadId) return null;
-    if (isTemporaryTask(currentTask())) {
+    if (taskNeedsCreation(currentTask()) && !state.pendingMessages.some(function (message) {
+      return message.threadId === state.currentThreadId && message.serverAcknowledged;
+    })) {
       renderMessages(false);
       updateHeader();
       return null;
@@ -7870,6 +8558,8 @@ export const CODEX_MOBILE_JS = String.raw`
       if (payload.resolvedThreadId && payload.resolvedThreadId !== requestedThreadId) {
         migrateTemporaryConversation(requestedThreadId, payload.resolvedThreadId);
         finishLocalTaskDraft(payload.resolvedThreadId);
+        void loadCurrentTaskModel(true);
+        void loadCurrentTaskPermission(true);
         void loadTasks(false);
       }
       applyLatestMessagePage(payload, historyOnly);
@@ -7904,7 +8594,7 @@ export const CODEX_MOBILE_JS = String.raw`
             payload.runSummary || null
           );
         }
-        updateRunSummary(payload.runSummary || null, payload.task || null, messages);
+        updateRunSummary(payload.runSummary || null, payload.task || null, messages, payload.progressItems || []);
         state.progressItems = filterProgressItemsForOptimisticTurn(
           filterProgressItemsForCurrentTurn(
             payload.progressItems || [],
@@ -8042,6 +8732,14 @@ export const CODEX_MOBILE_JS = String.raw`
 
   function migrateTemporaryConversation(temporaryThreadId, realThreadId, requestedAdapter) {
     var adapter = requestedAdapter || state.currentAdapter;
+    var oldSettingsKey = conversationStateKey(adapter, temporaryThreadId);
+    var newSettingsKey = conversationStateKey(adapter, realThreadId);
+    [state.taskModels, state.taskPermissions].forEach(function (cache) {
+      if (cache && cache[oldSettingsKey]) {
+        cache[newSettingsKey] = Object.assign({}, cache[oldSettingsKey], { loadedAtMs: 0 });
+        delete cache[oldSettingsKey];
+      }
+    });
     if (state.currentAdapter !== adapter || state.currentThreadId !== temporaryThreadId) {
       var oldKey = conversationStateKey(adapter, temporaryThreadId);
       var newKey = conversationStateKey(adapter, realThreadId);
@@ -8130,8 +8828,13 @@ export const CODEX_MOBILE_JS = String.raw`
         history.replaceState(null, "", currentUrl.pathname + currentUrl.search + currentUrl.hash);
       }
       closeSidebar();
+      state.revealCurrentTaskOnSidebarOpen = true;
       renderTasks();
       updateHeader();
+      if (isTemporaryTask(currentTask())) {
+        void loadCurrentTaskModel(false);
+        void loadCurrentTaskPermission(false);
+      }
       if (!isTemporaryTask(currentTask())) {
         void Promise.all([
           refreshMessagesIfChanged(false, true),
@@ -8203,11 +8906,14 @@ export const CODEX_MOBILE_JS = String.raw`
       history.replaceState(null, "", url.pathname + url.search + url.hash);
     }
     closeSidebar();
+    state.revealCurrentTaskOnSidebarOpen = true;
     renderTasks();
     updateHeader();
     rememberCurrentTaskSnapshot();
     schedulePersistentMobileCacheWrite();
     if (isTemporaryTask(currentTask())) {
+      void loadCurrentTaskModel(false);
+      void loadCurrentTaskPermission(false);
       renderMessages(false);
       return;
     }
@@ -8219,7 +8925,11 @@ export const CODEX_MOBILE_JS = String.raw`
     }
     await loadMessages(true, true, false);
     if (threadId === state.currentThreadId) {
-      void loadMessages(false, false, false);
+      // 进入任务要停在最新消息上。历史页刚把滚动位置放到末尾，如果这次续读
+      // 用 forceBottom=false，renderMessages 会读取此刻尚未滚动到位的
+      // previousScrollTop（新任务时为 0）并把它写回去，用户就被留在最顶部，
+      // 需要一直往下滚才能看到新消息。
+      void loadMessages(true, false, false);
     }
   }
 
@@ -8569,6 +9279,7 @@ export const CODEX_MOBILE_JS = String.raw`
         text: pending.text,
         images: images,
         retry: Boolean(pending.manualRetry),
+        newTaskSettings: String(requestedThreadId).startsWith("local-new-") ? pending.newTaskSettings : undefined,
         createTaskSourceThreadId: pending.waitingForTaskCreation
           ? pending.createTaskSourceThreadId || ""
           : undefined
@@ -8640,7 +9351,9 @@ export const CODEX_MOBILE_JS = String.raw`
     state.optimisticProgressTurnId = "";
     state.progressItems = [];
     state.localRunSummary = {
-      status: "running",
+      status: "submitting",
+      clientId: pending.clientId,
+      baselineTurnId: state.runSummary && state.runSummary.turnId || "",
       startedAtMs: Date.now(),
       durationMs: 0,
       receivedAtMs: Date.now()
@@ -8744,13 +9457,23 @@ export const CODEX_MOBILE_JS = String.raw`
     if (!hasContent || !state.currentThreadId) return;
     var pending = makePendingMessage(text, images);
     var waitingForTaskCreation = taskNeedsCreation(task);
-    var likelyQueued = !waitingForTaskCreation && (isTaskActivelyRunning(task) ||
-      state.queuedMessages.length > 0 || Boolean(state.pendingApproval));
-    pending.displayInTranscript = true;
+    var visibleRunSummaryForQueue = effectiveRunSummary();
+    // 只有「当前任务确实在跑」时才进待发队列；空闲时发出应立刻成为正文气泡，
+    // 否则用户会看到自己的消息卡在队列里等一个根本没在跑的任务。
+    var willQueue = shouldQueueComposerSubmission(
+      task,
+      visibleRunSummaryForQueue,
+      state.queuedMessages,
+      state.pendingApproval,
+      waitingForTaskCreation
+    );
+    pending.displayInTranscript = !willQueue;
     if (waitingForTaskCreation) {
       pending.waitingForTaskCreation = true;
       pending.createTaskSourceThreadId = task.localSourceThreadId || "";
+      pending.newTaskSettings = task.newTaskSettings ? Object.assign({}, task.newTaskSettings) : undefined;
       pending.status = "creating_task";
+      pending.displayInTranscript = true;
     }
     // Persist before clearing the composer or waiting behind another send.
     // Otherwise a queued image only exists in RAM and disappears on reload.
@@ -8772,9 +9495,10 @@ export const CODEX_MOBILE_JS = String.raw`
       }
       return;
     }
-    if (!waitingForTaskCreation && !likelyQueued) beginOptimisticRunIfNeeded(pending);
+    if (!waitingForTaskCreation && !willQueue) beginOptimisticRunIfNeeded(pending);
     state.composerRevision += 1;
     state.pendingMessages.push(pending);
+    if (waitingForTaskCreation) renderModelControl();
     if (composerInput.value === text) composerInput.value = "";
     clearComposerDraft(state.currentAdapter, state.currentThreadId);
     state.pendingImages = state.pendingImages.filter(function (image) { return !images.includes(image); });
@@ -8810,8 +9534,14 @@ export const CODEX_MOBILE_JS = String.raw`
 
   composerModelButton.addEventListener("click", function () {
     var modelState = currentTaskModelState();
-    if (!modelState || !modelState.canChange) {
-      showToast(modelState && modelState.unavailableReason || "当前任务暂时不能切换模型");
+    if (!modelState || modelState.loadError) {
+      void loadCurrentTaskModel(true).then(function (loaded) {
+        if (loaded && loaded.canChange) { state.modelMenuOpen = true; renderModelControl(); }
+      });
+      return;
+    }
+    if (!modelState.canChange) {
+      showToast(modelState.unavailableReason || "当前任务暂时不能切换模型");
       return;
     }
     state.modelMenuOpen = !state.modelMenuOpen;
@@ -9161,6 +9891,7 @@ export const CODEX_MOBILE_JS = String.raw`
 
   updateDocumentTitle();
   async function startMobileApplication() {
+    bootOrbAnimation.setup();
     restoreTrustedPersistentMobileCachePreview();
     void waitForComputerConnection();
     await initializeAuthentication();

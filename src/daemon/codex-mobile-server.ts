@@ -1,3 +1,4 @@
+import { parseMobileNewTaskSettings, type MobileNewTaskSettings } from "./mobile-new-task-settings.ts";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import http, {
@@ -140,6 +141,11 @@ export type CodexMobileTask = {
   selected?: boolean;
   canRename?: boolean;
   canCreateInProject?: boolean;
+  /**
+   * 该终端能否不依赖项目直接新建任务。Grok 等只提供 createSession、没有项目
+   * 归属的终端，任务台需要让「最近」分组也能新建任务。
+   */
+  canCreateTask?: boolean;
 };
 
 export type CodexMobileTaskBoardTask = CodexMobileTask & {
@@ -209,6 +215,7 @@ export type CodexMobileMessageInput = {
   createdAtMs?: number;
   retry?: boolean;
   createTaskSourceThreadId?: string;
+  newTaskSettings?: MobileNewTaskSettings;
 };
 
 export type CodexMobileSendResult = {
@@ -309,10 +316,12 @@ export function createCodexMobileTranscriptRevision(
   const payload = {
     threadId: transcript.threadId,
     deliveredClientIds: transcript.deliveredClientIds ?? [],
+    messageCount: transcript.messages.length,
     latestMessage: latestMessage
       ? {
           id: latestMessage.id ?? "",
           role: latestMessage.role,
+          sourceTask: latestMessage.sourceTask ?? null,
           text: latestMessage.text,
           turnId: latestMessage.turnId ?? "",
           phase: latestMessage.phase ?? "",
@@ -442,6 +451,7 @@ export type StartCodexMobileServerOptions = {
     title: string,
     adapter?: string,
   ) => Promise<void>;
+  readNewTaskModel?: (adapter?: string) => Promise<BridgeSessionModelState>;
   readTaskModel?: (
     threadId: string,
     adapter?: string,
@@ -1732,6 +1742,12 @@ function createRequestHandler(
         return;
       }
 
+      if (method === "GET" && url.pathname === "/api/new-task/model") {
+        if (!options.readNewTaskModel) throw new HttpError(409, "当前终端不支持预选新任务模型。");
+        sendJson(response, 200, await options.readNewTaskModel(requestedAdapter));
+        return;
+      }
+
       const modelRoute = url.pathname.match(/^\/api\/tasks\/([^/]+)\/model$/);
       if (modelRoute?.[1] && (method === "GET" || method === "PUT")) {
         const tasks = await options.listTasks(requestedAdapter);
@@ -1881,15 +1897,14 @@ function createRequestHandler(
           const limitValue = url.searchParams.get("limit");
           const requestedLimit = limitValue === null ? undefined : Number(limitValue);
           const historyOnly = url.searchParams.get("history") === "1";
+          const revisionBeforeRead = options.readContentRevision?.(threadId, requestedAdapter);
           const transcript = await options.readMessages(threadId, {
             ...(beforeValue === null ? {} : { before: beforeValue }),
             ...(requestedLimit === undefined ? {} : { limit: requestedLimit }),
             ...(historyOnly ? { historyOnly: true } : {}),
             lightweight: true,
           }, requestedAdapter);
-          const revision = options.readContentRevision
-            ? options.readContentRevision(transcript.threadId, requestedAdapter)
-            : createCodexMobileTranscriptRevision(transcript);
+          const revision = revisionBeforeRead ?? createCodexMobileTranscriptRevision(transcript);
           const fallbackPage = transcript.messagePage
             ? null
             : paginateCodexMobileMessages(transcript.messages, {
@@ -1958,12 +1973,20 @@ function createRequestHandler(
           if (Array.from(text).length > 20_000) {
             throw new HttpError(413, "消息不能超过 20000 个字符。");
           }
+          let newTaskSettings: MobileNewTaskSettings | undefined;
+          try {
+            newTaskSettings = parseMobileNewTaskSettings(body.newTaskSettings);
+            if (newTaskSettings && !threadId.startsWith("local-new-")) throw new Error("预选设置只能用于新任务。");
+          } catch (error) {
+            throw new HttpError(400, error instanceof Error ? error.message : "新任务设置无效。");
+          }
           let result: CodexMobileSendResult;
           try {
             result = await options.sendMessage(
               threadId,
               {
                 clientId,
+                ...(newTaskSettings ? { newTaskSettings } : {}),
                 text,
                 images,
                 ...(typeof body.createdAtMs === "number" && Number.isFinite(body.createdAtMs)

@@ -1618,7 +1618,6 @@ export function formatResumeSessionList(params: {
   }
 
   return [
-    `${providerLabel} 最近任务`,
     ...candidates.map((candidate, index) => {
       const isCurrent = Boolean(
         currentSessionId && candidate.sessionId === currentSessionId,
@@ -2301,6 +2300,22 @@ function parseSingleUserInputAnswer(
     };
   }
 
+  const custom = trimmed.match(/^(\d+)\s*[:：]\s*([\s\S]*)$/u);
+  if (custom) {
+    const otherIndex = question.options.length + 1;
+    if (!question.isOther || Number(custom[1]) !== otherIndex) {
+      return { error: `请选择选项数字；${question.isOther ? `其他答案请回复“${otherIndex}：内容”。` : "此题不支持其他答案。"}` };
+    }
+    const note = custom[2]!.trim();
+    return note ? { answers: [`user_note: ${note}`] } : { error: `请在“${otherIndex}：”后填写答案。` };
+  }
+  if (/^\d+$/u.test(trimmed) && !resolveUserInputOptionLabel(question, trimmed)) {
+    const otherIndex = question.options.length + 1;
+    return { error: question.isOther && Number(trimmed) === otherIndex
+      ? `其他答案请回复“${otherIndex}：内容”，也可直接回复文字。`
+      : `“${question.header}”没有选项 ${trimmed}，请按本题的选项回复。` };
+  }
+
   const separatorIndex = trimmed.indexOf("|");
   const selection = separatorIndex >= 0 ? trimmed.slice(0, separatorIndex).trim() : trimmed;
   let note = separatorIndex >= 0 ? trimmed.slice(separatorIndex + 1).trim() : "";
@@ -2438,7 +2453,7 @@ export function formatUserInputRequestMessage(
 
   pending.questions.forEach((question, index) => {
     lines.push("");
-    lines.push(formatUserInputQuestionLabel(question, index));
+    lines.push(pending.questions.length === 1 ? question.header : formatUserInputQuestionLabel(question, index));
     lines.push(
       hasChineseText(question.question)
         ? truncateMobileText(question.question, 120)
@@ -2447,19 +2462,17 @@ export function formatUserInputRequestMessage(
     if (question.options?.length) {
       lines.push(question.multiSelect ? "选项（可多选）：" : "选项：");
       question.options.forEach((option, optionIndex) => {
+        const label = option.label.replace(/^[A-Z][.．、]\s*/iu, "");
         const description = option.description.trim();
-        lines.push(
-          description && hasChineseText(description)
-            ? `  ${optionIndex + 1}. ${option.label}：${truncatePreview(description, 80)}`
-            : `  ${optionIndex + 1}. ${option.label}`,
-        );
+        lines.push(`${optionIndex + 1}. ${label}`);
+        if (description && hasChineseText(description)) lines.push(`   ${truncatePreview(description, 80)}`);
       });
       if (question.multiSelect) {
         lines.push("多选可用逗号分隔，如 1,3。");
       }
     }
-    if (question.isOther) {
-      lines.push("可补充自定义说明。");
+    if (question.isOther && question.options?.length) {
+      lines.push(`${question.options.length + 1}. 其他答案`);
     }
   });
 
@@ -2470,17 +2483,17 @@ export function formatUserInputRequestMessage(
       return lines.join("\n");
     }
     if (question.options?.length) {
-      lines.push("回复 /answer 1");
+      lines.push(question.multiSelect ? "直接回复数字，多选如：1,3。" : "直接回复数字选择，如：1。");
       if (question.isOther) {
-        lines.push("补充说明：/answer 1 | 说明");
+        lines.push(`其他答案回复“${question.options.length + 1}：内容”，也可直接回复文字。`);
       }
     } else {
-      lines.push("回复 /answer 你的答案");
+      lines.push("直接回复你的答案。");
     }
   } else {
     lines.push("回复 /answer 1=答案; 2=答案");
   }
-  lines.push("/stop 可中断任务。");
+  lines.push("发给其他任务请用“任务3：内容”；/stop 可中断任务。");
 
   return lines.join("\n");
 }
@@ -2493,7 +2506,10 @@ export function formatPendingUserInputReminder(
     if (!question) {
       return "任务等待输入，请回复 /answer。";
     }
-    return `任务等待输入：${question.header}\n请回复 /answer。`;
+    const hint = question.options?.length
+      ? `直接回复选项数字${question.isOther ? `，或“${question.options.length + 1}：其他答案”` : ""}。`
+      : "直接回复你的答案。";
+    return `任务等待输入：${question.header}\n${hint}`;
   }
 
   return `任务等待 ${pending.questions.length} 个答案。\n回复 /answer 1=答案; 2=答案。`;
@@ -2648,4 +2664,25 @@ export function shouldDropStartupBacklogMessage(
   }
 
   return (createdAtMs as number) < bridgeStartedAtMs - graceMs;
+}
+
+/** Explicit task commands escape question mode; bare replies belong to the pending question. */
+export function resolveWechatQuestionReply(params: {
+  text: string;
+  adapter: BridgeAdapterKind;
+  pending: PendingUserInputRequest | null | undefined;
+  awaitingTaskSelection: boolean;
+  hasPendingApproval: boolean;
+  hasAttachments: boolean;
+}): { type: "answer"; raw: string } | null {
+  if (!params.pending || params.hasAttachments) return null;
+  const text = params.text.trim();
+  const command = parseWechatControlCommand(text, {
+    adapter: params.adapter, hasPendingConfirmation: false, hasPendingUserInput: true,
+  });
+  if (command?.type === "answer") return command;
+  if (!text || command || text.startsWith("/") || /^任务\s*\d+\s*[:：]/u.test(text)) return null;
+  if (params.hasPendingApproval) return null;
+  if (params.awaitingTaskSelection && /^\d+(?:\s*[:：][\s\S]*)?$/u.test(text)) return null;
+  return { type: "answer", raw: text };
 }

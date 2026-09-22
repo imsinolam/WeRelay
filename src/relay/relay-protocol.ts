@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 
 export const WERELAY_RELAY_PROTOCOL_VERSION = 1;
+export const WERELAY_RELAY_HEARTBEAT_PATH = "/__werelay/device/heartbeat";
 export const WERELAY_RELAY_POLL_PATH = "/__werelay/device/poll";
 export const WERELAY_RELAY_RESPONSE_PATH = "/__werelay/device/respond";
 export const WERELAY_RELAY_CLIENT_IP_PATH = "/__werelay/client-ip";

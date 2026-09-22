@@ -27,6 +27,35 @@ function candidate(
 }
 
 describe("global task index", () => {
+  test("terminal filters retain root numbers across pages and duplicate session ids", () => {
+    const snapshot = buildGlobalTaskSnapshot([
+      candidate("codex", "shared", "Codex first", "2026-09-12T12:04:00Z"),
+      candidate("deepseek", "shared", "DSH first", "2026-09-12T12:03:00Z"),
+      candidate("codex", "c2", "Codex second", "2026-09-12T12:02:00Z"),
+      candidate("deepseek", "d2", "DSH second", "2026-09-12T12:01:00Z"),
+    ]);
+    const first = formatGlobalTaskList({ snapshot, adapter: "deepseek", startIndex: 0, pageSize: 1 });
+    const second = formatGlobalTaskList({ snapshot, adapter: "deepseek", startIndex: 1, pageSize: 1 });
+    expect(first).toContain("2. [");
+    expect(first).toContain("DSH first");
+    expect(first).not.toContain("Codex first");
+    expect(second).toContain("4. [");
+    expect(second).toContain("DSH second");
+    const page = paginateGlobalTaskSnapshot(snapshot, { adapter: "deepseek", startIndex: 1, pageSize: 1 });
+    expect(page.hasPrevious).toBe(true);
+    expect(page.hasMore).toBe(false);
+    expect(resolveGlobalTaskTargetedMessage({ snapshot, text: "任务 2 ： 继续" })?.candidate.adapter).toBe("deepseek");
+    expect(resolveGlobalTaskTargetedMessage({ snapshot, text: "1:继续" })?.candidate.adapter).toBe("codex");
+    const updated = updateGlobalTaskSnapshot({
+      current: snapshot, refresh: false,
+      latestCandidates: [{ ...snapshot.candidates[3]!, lastUpdatedAt: "2026-09-12T13:00:00Z" }],
+    });
+    expect(formatGlobalTaskList({ snapshot: updated, adapter: "deepseek", startIndex: 0, pageSize: 10 })).toContain("4. [");
+    expect(resolveGlobalTaskCandidate(updated, "4")?.sessionId).toBe("d2");
+    const refreshed = updateGlobalTaskSnapshot({ current: updated, latestCandidates: updated.candidates, refresh: true });
+    expect(resolveGlobalTaskCandidate(refreshed, "1")?.sessionId).toBe("d2");
+  });
+
   test("keeps addresses and file names from becoming links in ClawBot task lists", () => {
     const title = "你是第 6 批评审，请读取 https://example.com/reviews/quality-review.md、short-visual.md，以及 /Users/example/Documents/review.md 后继续处理";
     const displayTitle = formatGlobalTaskDisplayTitle(title);
@@ -412,6 +441,83 @@ describe("global task list project labels", () => {
 });
 
 describe("global task catalog cache", () => {
+  test("retains expired tasks on refresh failure for all concurrent readers", async () => {
+    let clock = 0;
+    let scans = 0;
+    const cache = createGlobalTaskCatalogCache<string[]>({
+      maxAgeMs: 100, now: () => clock,
+      staleOnError: ({ value }) => value,
+    });
+    await cache.load("codex", async () => ["original-task"]);
+    clock = 100;
+    expect(cache.read("codex")).toBeUndefined();
+    const fail = () => cache.load("codex", async () => {
+      scans += 1;
+      throw new Error("Codex 任务目录读取超时。");
+    });
+    expect(await Promise.all([fail(), fail()])).toEqual([["original-task"], ["original-task"]]);
+    expect(scans).toBe(1);
+    expect(cache.read("codex")).toBeUndefined(); // Fallback does not renew freshness.
+    expect(await cache.load("codex", async () => [])).toEqual([]);
+    expect(cache.read("codex")).toEqual([]); // A successful empty catalog is authoritative.
+  });
+
+  test("replaces stale tasks on success and lets fallback omit obsolete runtime status", async () => {
+    let clock = 0;
+    const old = { ...candidate("codex", "old", "Old", "2026-09-12T12:00:00Z"),
+      runtimeStatus: { type: "active" as const, activeFlags: [] } };
+    const cache = createGlobalTaskCatalogCache<GlobalTaskCandidate[]>({
+      maxAgeMs: 100, now: () => clock,
+      staleOnError: ({ value }) => value.map((task) => ({ ...task, runtimeStatus: undefined })),
+    });
+    await cache.load("codex", async () => [old]);
+    clock = 100;
+    const fallback = await cache.load("codex", async () => { throw new Error("timeout"); });
+    const output = formatGlobalTaskList({
+      snapshot: updateGlobalTaskSnapshot({
+        current: buildGlobalTaskSnapshot([old]), latestCandidates: fallback, refresh: true,
+      }), startIndex: 0, pageSize: 10,
+    });
+    expect(output).toContain("Old");
+    expect(output).not.toContain("处理中");
+    expect(old.runtimeStatus.type).toBe("active");
+    const latest = candidate("codex", "new", "New", "2026-09-12T13:00:00Z");
+    expect(await cache.load("codex", async () => [latest])).toEqual([latest]);
+    expect(cache.read("codex")).toEqual([latest]);
+  });
+
+  test("invalidation during a failing refresh prevents stale fallback", async () => {
+    const cache = createGlobalTaskCatalogCache<number>({ maxAgeMs: 0, staleOnError: ({ value }) => value });
+    await cache.load("codex", async () => 1);
+    let reject!: (error: Error) => void;
+    const pending = cache.load("codex", () => new Promise<number>((_resolve, fail) => { reject = fail; }));
+    await Promise.resolve();
+    cache.invalidate("codex");
+    reject(new Error("timeout"));
+    await expect(pending).rejects.toThrow("timeout");
+    expect(await cache.load("codex", async () => 2)).toBe(2);
+  });
+
+  test("never falls back across adapters, after invalidation, or without opt-in", async () => {
+    let clock = 0;
+    const cache = createGlobalTaskCatalogCache<string[]>({
+      maxAgeMs: 100, now: () => clock, staleOnError: ({ value }) => value,
+    });
+    const fail = async (): Promise<string[]> => { throw new Error("timeout"); };
+    await cache.load("codex", async () => ["codex-task"]);
+    clock = 100;
+    await expect(cache.load("deepseek", fail)).rejects.toThrow("timeout");
+    cache.invalidate("codex");
+    await expect(cache.load("codex", fail)).rejects.toThrow("timeout");
+    await cache.load("codex", async () => ["new-task"]);
+    cache.invalidate();
+    await expect(cache.load("codex", fail)).rejects.toThrow("timeout");
+
+    const strict = createGlobalTaskCatalogCache<string[]>({ maxAgeMs: 0 });
+    await strict.load("codex", async () => ["strict-task"]);
+    await expect(strict.load("codex", fail)).rejects.toThrow("timeout");
+  });
+
   test("reuses a recent scan instead of rescanning on every task-board read", async () => {
     let scans = 0;
     let clock = 1_000;
@@ -433,6 +539,24 @@ describe("global task catalog cache", () => {
     clock += 3_000;
     expect(await load()).toEqual(["scan-2"]);
     expect(scans).toBe(2);
+  });
+
+  test("publishes the in-flight marker before a synchronous loader starts", async () => {
+    let scans = 0;
+    let nested: Promise<number> | undefined;
+    const cache = createGlobalTaskCatalogCache<number>({ maxAgeMs: 3_000 });
+    const outer = () => cache.load("grok", async () => {
+      scans += 1;
+      nested = cache.load("grok", async () => {
+        scans += 1;
+        return 2;
+      });
+      return 1;
+    });
+
+    expect(await outer()).toBe(1);
+    await expect(nested).resolves.toBe(1);
+    expect(scans).toBe(1);
   });
 
   test("merges concurrent scans for the same adapter into one traversal", async () => {

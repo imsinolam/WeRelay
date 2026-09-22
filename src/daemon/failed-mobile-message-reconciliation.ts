@@ -88,7 +88,9 @@ export class FailedMobileMessageSweep {
     this.lastChecks.set(params.adapter, now);
     const scan = (async () => {
       try {
-        const tasks = await boundedRead(params.listTasks);
+        // Original-task receipts remain checkable even when task listing is offline.
+        let tasks: ReconciliationTask[] = [];
+        try { tasks = await boundedRead(params.listTasks); } catch { /* Try original IDs below. */ }
         const failed = params.outbox.failedEntries(params.adapter);
         const candidates = tasks.filter(task => failed.some(entry => taskCanCoverFailedMessage(entry, task, tasks)));
         // Include the original task even when it fell off the recent-task list.

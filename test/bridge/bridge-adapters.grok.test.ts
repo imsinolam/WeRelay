@@ -11,6 +11,7 @@ import {
   buildGrokNativeArgs,
   isGrokLeaderCommandLine,
   listGrokStoredSessions,
+  listGrokStoredSessionsAsync,
   parseGrokLeaderSocketOwnerPids,
   resolveGrokLeaderSocket,
   selectGrokLeaderSocketOwnerPids,
@@ -238,6 +239,43 @@ describe("Grok shared owner adapter", () => {
     }
   });
 
+  test("async stored task catalog yields to the event loop", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "werelay-grok-async-"));
+    const previous = process.env.GROK_HOME;
+    process.env.GROK_HOME = home;
+    try {
+      const sessionsRoot = path.join(home, "sessions", encodeURIComponent("/repo/grok-project"));
+      for (let index = 0; index < 40; index += 1) {
+        const sessionId = `grok-session-${index}`;
+        const sessionDir = path.join(sessionsRoot, sessionId);
+        fs.mkdirSync(sessionDir, { recursive: true });
+        fs.writeFileSync(path.join(sessionDir, "summary.json"), JSON.stringify({
+          info: { id: sessionId, cwd: "/repo/grok-project" },
+          generated_title: `Grok 任务 ${index}`,
+          updated_at: `2026-08-28T01:${String(index).padStart(2, "0")}:00.000Z`,
+        }));
+      }
+
+      let yielded = false;
+      const listing = listGrokStoredSessionsAsync(10, { liveEventPaths: [] });
+      await new Promise<void>((resolve) => {
+        setImmediate(() => {
+          yielded = true;
+          resolve();
+        });
+      });
+      const candidates = await listing;
+
+      expect(yielded).toBe(true);
+      expect(candidates).toHaveLength(10);
+      expect(candidates[0]?.sessionId).toBe("grok-session-39");
+    } finally {
+      if (previous === undefined) delete process.env.GROK_HOME;
+      else process.env.GROK_HOME = previous;
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   test("detects a running standalone Grok turn from the live process event file", () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "werelay-grok-running-"));
     const previous = process.env.GROK_HOME;
@@ -302,4 +340,41 @@ describe("Grok shared owner adapter", () => {
     }
   });
 
+});
+
+describe("Grok real activity ordering", () => {
+  test("ignores refreshed summaries and startup events when ranking executed tasks", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "werelay-grok-activity-"));
+    const previous = process.env.GROK_HOME;
+    process.env.GROK_HOME = home;
+    const write = (id: string, events: unknown[], created = "2026-09-01T00:00:00Z") => {
+      const dir = path.join(home, "sessions", encodeURIComponent("/repo/example"), id);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "summary.json"), JSON.stringify({
+        info: { id, cwd: "/repo/example" }, created_at: created,
+        last_active_at: "2026-09-14T12:17:30Z", updated_at: "2026-09-14T12:17:30Z",
+      }));
+      fs.writeFileSync(path.join(dir, "events.jsonl"), events.map(e => JSON.stringify(e)).join("\n") + "\n{partial");
+      return path.join(dir, "events.jsonl");
+    };
+    try {
+      write("old", [{ type: "turn_ended", ts: "2026-09-02T10:00:00Z" },
+        { type: "mcp_init_completed", ts: "2026-09-14T12:17:30Z" }]);
+      write("recent", [{ type: "turn_ended", ts: "2026-09-13T10:00:00Z" }]);
+      write("never-used", [{ type: "mcp_init_completed", ts: "2026-09-14T12:17:30Z" }]);
+      const live = write("running", [{ type: "turn_started", ts: "2026-09-14T12:00:00Z" },
+        { type: "tool_started", ts: "2026-09-14T12:01:00Z" },
+        { type: "tool_completed", ts: "invalid" }]);
+      const options = { liveEventPaths: [live] };
+      const sync = listGrokStoredSessions(10, options);
+      expect(sync.map(s => s.sessionId)).toEqual(["running", "recent", "old", "never-used"]);
+      expect(sync[0]?.lastUpdatedAt).toBe("2026-09-14T12:01:00.000Z");
+      expect(sync[0]?.runtimeStatus?.type).toBe("active");
+      expect(sync[3]?.lastUpdatedAt).toBe("2026-09-01T00:00:00.000Z");
+      expect(await listGrokStoredSessionsAsync(10, options)).toEqual(sync);
+    } finally {
+      if (previous === undefined) delete process.env.GROK_HOME; else process.env.GROK_HOME = previous;
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
 });

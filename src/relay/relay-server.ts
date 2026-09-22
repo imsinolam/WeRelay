@@ -23,6 +23,7 @@ import {
 import {
   createWeRelayRelayCommandId,
   WERELAY_RELAY_CLIENT_IP_PATH,
+  WERELAY_RELAY_HEARTBEAT_PATH,
   WERELAY_RELAY_POLL_PATH,
   WERELAY_RELAY_PROTOCOL_VERSION,
   WERELAY_RELAY_REQUEST_BODY_LIMIT,
@@ -1097,6 +1098,15 @@ export async function startWeRelayRelayServer(
         });
         lastDeviceSeenAtMs = now();
         sendJson(response, 200, { ok: true });
+        return;
+      }
+
+      if (method === "POST" && url.pathname === WERELAY_RELAY_HEARTBEAT_PATH) {
+        validateDeviceRequest(request, deviceId, deviceToken);
+        await readBody(request, 4_096);
+        lastDeviceSeenAtMs = now();
+        response.writeHead(204, { "cache-control": "no-store" });
+        response.end();
         return;
       }
 

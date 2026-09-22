@@ -13,6 +13,18 @@ export const WERELAY_RELAY_TASK_LINK_REGISTER_PATH =
   "/__werelay/device/task-links";
 export const WERELAY_RELAY_TASK_LINK_ALIAS_LENGTH = 10;
 
+/**
+ * 短别名只使用大写字母与数字。
+ *
+ * 此前用 base64url，会产出 `-` 和 `_`。微信不把以这两个符号结尾的裸链接整体
+ * 识别为链接——实测 https://host/Eg5CwU5rU_ 结尾的下划线被排除在可点击范围
+ * 之外，用户点到的其实是截断后的地址，因而无法访问。
+ *
+ * 改用无歧义的字母数字表即可彻底避免；长度保持不变，因此已注册的旧别名
+ * 仍能按原样解析，不需要迁移既有链接。
+ */
+const TASK_LINK_ALIAS_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+
 const MAX_TASK_LINKS = 100_000;
 const REGISTERED_ALIAS_CACHE_TTL_MS = 30 * 24 * 60 * 60_000;
 const REGISTER_RETRY_MIN_MS = 1_000;
@@ -52,12 +64,58 @@ export function createWeRelayRelayTaskLinkAlias(
     throw new Error("缺少 Relay 设备密钥，无法生成任务短链接。");
   }
   const target = normalizeTarget({ adapter, threadId });
+  const digest = crypto.createHmac("sha256", token)
+    .update(target.adapter)
+    .update("\0")
+    .update(target.threadId)
+    .digest();
+  // 把摘要逐字节映射到字母数字表，保留原有长度与确定性。
+  let alias = "";
+  for (let index = 0; alias.length < WERELAY_RELAY_TASK_LINK_ALIAS_LENGTH; index += 1) {
+    alias += TASK_LINK_ALIAS_ALPHABET[
+      digest[index % digest.length]! % TASK_LINK_ALIAS_ALPHABET.length
+    ];
+  }
+  return alias;
+}
+
+/**
+ * 旧版别名（base64url）。仅用于读取历史注册记录，避免已发出的链接失效；
+ * 新链接一律走 createWeRelayRelayTaskLinkAlias。
+ */
+function createLegacyWeRelayRelayTaskLinkAlias(
+  deviceToken: string,
+  adapter: string,
+  threadId: string,
+): string {
+  const token = deviceToken.trim();
+  if (!token) return "";
+  const target = normalizeTarget({ adapter, threadId });
   return crypto.createHmac("sha256", token)
     .update(target.adapter)
     .update("\0")
     .update(target.threadId)
     .digest("base64url")
     .slice(0, WERELAY_RELAY_TASK_LINK_ALIAS_LENGTH);
+}
+
+/** 别名是否属于该目标（兼容新旧两套生成规则）。 */
+function aliasMatchesTarget(
+  deviceToken: string,
+  alias: string,
+  target: WeRelayRelayTaskLinkTarget,
+): boolean {
+  if (alias === createWeRelayRelayTaskLinkAlias(
+    deviceToken,
+    target.adapter,
+    target.threadId,
+  )) return true;
+  const legacy = createLegacyWeRelayRelayTaskLinkAlias(
+    deviceToken,
+    target.adapter,
+    target.threadId,
+  );
+  return Boolean(legacy) && alias === legacy;
 }
 
 export class WeRelayRelayTaskLinkStore {
@@ -80,13 +138,8 @@ export class WeRelayRelayTaskLinkStore {
   register(alias: string, target: WeRelayRelayTaskLinkTarget): void {
     const normalizedAlias = alias.trim();
     const normalizedTarget = normalizeTarget(target);
-    if (
-      normalizedAlias !== createWeRelayRelayTaskLinkAlias(
-        this.deviceToken,
-        normalizedTarget.adapter,
-        normalizedTarget.threadId,
-      )
-    ) {
+    // 接受新别名，也接受此前已发出的 base64url 别名，避免老链接失效。
+    if (!aliasMatchesTarget(this.deviceToken, normalizedAlias, normalizedTarget)) {
       throw new Error("任务短链接校验失败。");
     }
     const existing = this.entries.get(normalizedAlias);
@@ -119,13 +172,8 @@ export class WeRelayRelayTaskLinkStore {
       for (const entry of parsed.entries.slice(-this.maxEntries)) {
         try {
           const target = normalizeTarget(entry);
-          if (
-            entry.alias === createWeRelayRelayTaskLinkAlias(
-              this.deviceToken,
-              target.adapter,
-              target.threadId,
-            )
-          ) {
+          // 历史记录里的旧别名同样保留，否则重启后老链接会失效。
+          if (aliasMatchesTarget(this.deviceToken, entry.alias, target)) {
             this.entries.set(entry.alias, target);
           }
         } catch {

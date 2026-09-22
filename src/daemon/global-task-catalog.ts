@@ -1,11 +1,4 @@
-import { listClaudeStoredSessions } from "../bridge/bridge-adapters.claude.ts";
-import { readCodexStateDbSessionCatalog } from "../bridge/bridge-adapters.codex.ts";
-import { listCodeBuddySessions } from "../bridge/bridge-adapters.codebuddy.ts";
-import { listDeepSeekHarnessSessions } from "../bridge/bridge-adapters.deepseek.ts";
-import { listGrokStoredSessions } from "../bridge/bridge-adapters.grok.ts";
-import { listOpenCodeStoredSessions } from "../bridge/bridge-adapters.opencode.ts";
-import { listReasonixSessions } from "../bridge/bridge-adapters.reasonix.ts";
-import { listWorkBuddyDesktopSessionCandidates } from "../bridge/bridge-adapters.workbuddy.ts";
+import type { listDeepSeekHarnessSessions } from "../bridge/bridge-adapters.deepseek.ts";
 import type { BridgeResumeSessionCandidate } from "../bridge/bridge-types.ts";
 import type { DaemonAdapterKind } from "../bridge/bridge-providers.ts";
 
@@ -25,20 +18,23 @@ export function mergeSessionRuntimeSignals(
   signals: {
     pendingApprovalIds?: Iterable<string>;
     pendingUserInputIds?: Iterable<string>;
+    activeSessionIds?: Iterable<string>;
   } = {},
 ): BridgeResumeSessionCandidate[] {
   const pendingApprovalIds = new Set(signals.pendingApprovalIds ?? []);
   const pendingUserInputIds = new Set(signals.pendingUserInputIds ?? []);
+  const activeSessionIds = new Set(signals.activeSessionIds ?? []);
   return candidates.map((candidate) => {
-    const activeFlags = [
+    const activeFlags = [...new Set([
+      ...(candidate.runtimeStatus?.type === "active" ? candidate.runtimeStatus.activeFlags ?? [] : []),
       ...(pendingApprovalIds.has(candidate.sessionId)
         ? ["waitingOnApproval" as const]
         : []),
       ...(pendingUserInputIds.has(candidate.sessionId)
         ? ["waitingOnUserInput" as const]
         : []),
-    ];
-    if (activeFlags.length > 0) {
+    ])];
+    if (activeFlags.length > 0 || activeSessionIds.has(candidate.sessionId)) {
       return {
         ...candidate,
         runtimeStatus: { type: "active", activeFlags },
@@ -61,25 +57,27 @@ export async function listLightweightAdapterSessions(
   switch (adapter) {
     case "claude":
     case "tclaude":
-      return markNotLoaded(listClaudeStoredSessions(adapter, limit).map(
+      return markNotLoaded((await import("../bridge/bridge-adapters.claude.ts")).listClaudeStoredSessions(adapter, limit).map(
         ({ transcriptPath: _transcriptPath, ...candidate }) => candidate,
       ));
     case "grok":
-      return listGrokStoredSessions(limit);
+      // The global task board is polled by the mobile page and Relay. Keep
+      // Grok's filesystem catalog off the daemon's synchronous event loop.
+      return await (await import("../bridge/bridge-adapters.grok.ts")).listGrokStoredSessionsAsync(limit);
     case "codebuddy":
-      return markNotLoaded(await listCodeBuddySessions(cwd, limit));
+      return markNotLoaded(await (await import("../bridge/bridge-adapters.codebuddy.ts")).listCodeBuddySessions(cwd, limit));
     case "reasonix":
-      return markNotLoaded(await listReasonixSessions(cwd, limit));
+      return markNotLoaded(await (await import("../bridge/bridge-adapters.reasonix.ts")).listReasonixSessions(cwd, limit));
     case "workbuddy":
-      return await listWorkBuddyDesktopSessionCandidates(limit);
+      return await (await import("../bridge/bridge-adapters.workbuddy.ts")).listWorkBuddyDesktopSessionCandidates(limit);
     case "deepseek":
       return await (
-        dependencies.listDeepSeekSessions ?? listDeepSeekHarnessSessions
+        dependencies.listDeepSeekSessions ?? (await import("../bridge/bridge-adapters.deepseek.ts")).listDeepSeekHarnessSessions
       )(limit, undefined, {
         timeoutMs: DEEPSEEK_GLOBAL_CATALOG_TIMEOUT_MS,
       });
     case "opencode":
-      return markNotLoaded(listOpenCodeStoredSessions(limit).map((session) => ({
+      return markNotLoaded((await import("../bridge/bridge-adapters.opencode.ts")).listOpenCodeStoredSessions(limit).map((session) => ({
         sessionId: session.id,
         threadId: session.id,
         title: session.title || `会话 ${session.id.slice(0, 8)}`,
@@ -87,6 +85,6 @@ export async function listLightweightAdapterSessions(
         cwd: session.directory,
       })));
     case "codex":
-      return (await readCodexStateDbSessionCatalog({ limit }))?.candidates ?? [];
+      return (await (await import("../bridge/bridge-adapters.codex.ts")).readCodexStateDbSessionCatalog({ limit }))?.candidates ?? [];
   }
 }

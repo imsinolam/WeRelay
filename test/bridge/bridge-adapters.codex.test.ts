@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -20,6 +20,7 @@ import {
   parseCodexSessionTaskBoundary,
   readCodexSessionMessagePageFromRollout,
   readCodexStateDbSessionCatalog,
+  shouldReadCodexStateCatalogInProcess,
   readCodexSessionProgressFromRolloutTail,
   readCodexSessionRunSummaryFromRolloutTail,
   resolveCodexAppServerFailureAction,
@@ -256,6 +257,33 @@ describe("codex exit handling", () => {
 
 
 describe("Codex desktop thread listing", () => {
+  test("avoids the Bun Windows catalog worker deadlock without changing Node runtimes", () => {
+    expect(shouldReadCodexStateCatalogInProcess("win32", "1.3.1")).toBe(true);
+    expect(shouldReadCodexStateCatalogInProcess("win32", null)).toBe(false);
+    expect(shouldReadCodexStateCatalogInProcess("darwin", "1.3.1")).toBe(false);
+    expect(shouldReadCodexStateCatalogInProcess("linux", "1.3.1")).toBe(false);
+  });
+
+  test("keeps synchronous SQLite catalog reads off the daemon event loop", () => {
+    const source = fs.readFileSync(
+      path.join(process.cwd(), "src/bridge/bridge-adapters.codex.ts"),
+      "utf8",
+    );
+    const publicReaderStart = source.indexOf(
+      "export async function readCodexStateDbSessionCatalog(",
+    );
+    const nextFunction = source.indexOf(
+      "\nexport function mapCodexDesktopThreadListResponse(",
+      publicReaderStart,
+    );
+    const publicReader = source.slice(publicReaderStart, nextFunction);
+
+    expect(publicReaderStart).toBeGreaterThan(-1);
+    expect(publicReader).toContain("getCodexStateCatalogWorker()");
+    expect(publicReader).not.toContain("DatabaseSync");
+    expect(publicReader).not.toContain("database.prepare(");
+  });
+
   test("reads the Codex task catalog directly from the read-only state database", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-state-catalog-"));
     const databasePath = path.join(directory, "state_5.sqlite");
@@ -1131,6 +1159,38 @@ describe("Codex desktop live conversation messages", () => {
         phase: "commentary",
       },
     ]);
+  });
+
+  test("scans oversized rollout records without repeatedly copying their growing fragments", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-linear-page-"));
+    const filePath = path.join(directory, "rollout.jsonl");
+    const message = (text: string) => JSON.stringify({
+      type: "response_item",
+      payload: { type: "message", role: "user", content: [{ type: "input_text", text }] },
+    });
+    const content = [
+      message("较早消息"),
+      JSON.stringify({ type: "tool_result", payload: { text: "数据".repeat(700_000) } }),
+      message("最近消息"),
+      "",
+    ].join("\n");
+    fs.writeFileSync(filePath, content);
+    const concat = spyOn(Buffer, "concat");
+    try {
+      const page = readCodexSessionMessagePageFromRollout(filePath, { limit: 1, lightweight: true });
+      expect(page?.messages.map((item) => item.text)).toEqual(["最近消息"]);
+      expect(page?.hasMore).toBe(true);
+      const copiedBytes = concat.mock.calls.reduce((total, [chunks]) =>
+        total + chunks.reduce((sum, chunk) => sum + chunk.length, 0), 0);
+      expect(copiedBytes).toBeLessThan(Buffer.byteLength(content) * 2);
+      const older = readCodexSessionMessagePageFromRollout(filePath, {
+        limit: 1, lightweight: true, before: page?.nextBefore,
+      });
+      expect(older?.messages.map((item) => item.text)).toEqual(["较早消息"]);
+    } finally {
+      concat.mockRestore();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   test("reads recent rollout messages from the file tail and continues with an opaque cursor", () => {
@@ -5749,4 +5809,37 @@ test("retains real timestamps and distinguishes saving memory from subagent acti
     {id: "memory-1", text: "已保存记忆", status: "completed", createdAtMs: 1000},
     {id: "memory-2", text: "正在保存记忆", status: "running", createdAtMs: 2000},
   ]);
+});
+
+
+test("Codex latest summary stops reading after the newest task boundary", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-summary-early-stop-"));
+  const file = path.join(directory, "rollout.jsonl");
+  const boundary = JSON.stringify({
+    timestamp: "2026-09-12T10:00:00.000Z", type: "event_msg",
+    payload: { type: "task_complete", turn_id: "latest-turn", started_at: "2026-09-12T09:59:58.000Z", duration_ms: 2000 },
+  });
+  fs.writeFileSync(file, JSON.stringify({ type: "irrelevant", content: "界".repeat(700_000) }) + "\n" + boundary + "\n");
+  const read = spyOn(fs, "readSync");
+  try {
+    expect(readCodexSessionRunSummaryFromRolloutTail(file)).toMatchObject({ turnId: "latest-turn", status: "completed" });
+    const bytesRequested = read.mock.calls.reduce((total, call) => total + (typeof call[3] === "number" ? call[3] : 0), 0);
+    expect(bytesRequested).toBeLessThanOrEqual(64 * 1024);
+  } finally {
+    read.mockRestore();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("new task model choices read only the catalog without opening or creating a desktop task", async () => {
+  const adapter = new CodexPtyAdapter({kind:"codex",command:"codex",cwd:process.cwd(),renderMode:"headless",codexTransport:"desktop"}) as any;
+  const calls: string[] = [];
+  adapter.sendRpcRequest = async (method: string) => {
+    calls.push(method);
+    if (method !== "model/list") throw new Error("Unexpected task RPC");
+    return {data:[{id:"model-a",model:"model-a",isDefault:true,defaultReasoningEffort:"medium",supportedReasoningEfforts:[{reasoningEffort:"medium"},{reasoningEffort:"high"}]}]};
+  };
+  adapter.getDesktopThreadStateViewWithRefresh = () => {throw new Error("Must not read a task");};
+  expect(await adapter.getNewSessionModelState()).toMatchObject({currentModel:"model-a",canChange:true,currentReasoningEffort:"medium",canChangeReasoningEffort:true});
+  expect(calls).toEqual(["model/list"]);
 });

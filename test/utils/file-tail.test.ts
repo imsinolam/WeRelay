@@ -1,10 +1,10 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, spyOn } from "bun:test";
 
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { readFileTail, scanFileTail } from "../../src/utils/file-tail.ts";
+import { readFileTail, scanFileTail, scanFileTailReverse } from "../../src/utils/file-tail.ts";
 
 function writeTempFile(content: string): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "werelay-file-tail-"));
@@ -14,6 +14,35 @@ function writeTempFile(content: string): string {
 }
 
 describe("file-tail primitive", () => {
+  test("stops reverse I/O after the newest requested line", () => {
+    const file = writeTempFile("x".repeat(2_000_000) + "\nolder\nnewest\n");
+    const read = spyOn(fs, "readSync");
+    try {
+      const seen: string[] = [];
+      expect(scanFileTailReverse(file, { scanLimitBytes: 4_000_000 }, (line) => {
+        seen.push(line); return false;
+      })).toBe(1);
+      expect(seen).toEqual(["newest"]);
+      expect(read.mock.calls.length).toBe(1);
+      expect(read.mock.calls[0]?.[3]).toBe(65_536);
+    } finally { read.mockRestore(); }
+  });
+
+  test("drops only the incomplete leading fragment at the byte limit", () => {
+    const file = writeTempFile("older\n甲🙂乙\nlast");
+    const seen: string[] = [];
+    scanFileTailReverse(file, { scanLimitBytes: 7, chunkBytes: 2 }, (line) => { seen.push(line); });
+    expect(seen).toEqual(["last"]);
+  });
+
+  test("decodes a long UTF-8 line once and preserves blank lines", () => {
+    const long = "甲🙂乙".repeat(10_000);
+    const file = writeTempFile("\n" + long + "\r\n\nend");
+    const seen: string[] = [];
+    scanFileTailReverse(file, { scanLimitBytes: 1_000_000, chunkBytes: 31 }, (line) => { seen.push(line); });
+    expect(seen).toEqual(["end", "", long, ""]);
+  });
+
   test("reads the bounded tail of a small file in order", () => {
     const file = writeTempFile("line1\nline2\nline3\n");
     const lines = readFileTail(file, { scanLimitBytes: 1024 * 1024 });
@@ -58,4 +87,13 @@ describe("file-tail primitive", () => {
     const file = writeTempFile("");
     expect(readFileTail(file, { scanLimitBytes: 1024 * 1024 })).toEqual([]);
   });
+  test("preserves UTF-8 characters and CRLF split across tiny chunks", () => {
+    const file = writeTempFile("甲🙂乙\r\n\r\n丙丁\n末尾");
+    for (const chunkBytes of [1, 2, 3, 5, 7]) {
+      expect(readFileTail(file, { scanLimitBytes: 1024, chunkBytes })).toEqual([
+        "甲🙂乙", "", "丙丁", "末尾",
+      ]);
+    }
+  });
+
 });

@@ -3132,7 +3132,7 @@ describe("OpenCode message formatting", () => {
       currentSessionId: "session_1",
     });
 
-    expect(output).toContain("OpenCode 最近任务");
+    expect(output).not.toContain("OpenCode 最近任务");
     expect(output).not.toContain("session_1");
     expect(output).toContain(" · 当前");
   });

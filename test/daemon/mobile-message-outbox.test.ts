@@ -26,6 +26,76 @@ function createStateFile(): string {
 }
 
 describe("MobileMessageOutbox", () => {
+  test("retains missing queues without resending, persists their state, and cleans up on native evidence", () => {
+    const stateFile = createStateFile();
+    let outbox = new MobileMessageOutbox({ stateFile });
+    outbox.accept({ clientId: "queued", adapter: "codex", threadId: "thread", text: "排队内容", images: [], createdAtMs: 10_000 });
+    outbox.markQueued("codex", "thread", "queued", { queuedMessageId: "native", submittedAtMs: 11_000 });
+    const revision = outbox.contentRevision("codex", "thread");
+    outbox.reconcile("codex", "thread", { messages: [] });
+    expect(outbox.list("codex", "thread")[0]?.queueMissing).toBeUndefined();
+    outbox.reconcile("codex", "thread", { messages: [], queuedMessages: [] });
+    expect(outbox.contentRevision("codex", "thread")).not.toBe(revision);
+    outbox = new MobileMessageOutbox({ stateFile });
+    expect(outbox.list("codex", "thread")[0]).toMatchObject({ status: "queued", queueMissing: true, text: "排队内容" });
+    expect(outbox.readyEntries()).toEqual([]);
+    outbox.reconcile("codex", "thread", { messages: [], queuedMessages: [{ id: "native", text: "排队内容", imageCount: 0 }] });
+    expect(outbox.list("codex", "thread")[0]?.queueMissing).toBe(false);
+    outbox.reconcile("codex", "thread", { messages: [{ role: "user", text: "排队内容" }], queuedMessages: [] });
+    expect(outbox.list("codex", "thread")).toHaveLength(1);
+    outbox.reconcile("codex", "thread", { messages: [{ id: "real", role: "user", text: "排队内容", createdAtMs: 12_000 }], queuedMessages: [] });
+    expect(outbox.list("codex", "thread")).toEqual([]);
+    expect(new MobileMessageOutbox({ stateFile }).deliveredClientIds("codex", "thread")).toEqual(["queued"]);
+  });
+
+  test("does not reuse a delivered receipt for a later identical queued input across polls", () => {
+    const stateFile = createStateFile();
+    let outbox = new MobileMessageOutbox({ stateFile });
+    for (const clientId of ["first", "second"]) {
+      outbox.accept({ clientId, adapter: "codex", threadId: "thread", text: "继续", images: [], createdAtMs: 10_000 });
+      outbox.markQueued("codex", "thread", clientId, { queuedMessageId: clientId, submittedAtMs: 10_100 });
+    }
+    const messages = [{ id: "receipt", role: "user" as const, text: "继续", createdAtMs: 11_000 }];
+    outbox.reconcile("codex", "thread", { messages, queuedMessages: [] });
+    outbox = new MobileMessageOutbox({ stateFile });
+    outbox.reconcile("codex", "thread", { messages, queuedMessages: [] });
+    expect(outbox.list("codex", "thread").map(entry => entry.clientId)).toEqual(["second"]);
+  });
+
+  test("confirmed queue edits and deletions persist without resurrecting an old send", () => {
+    const stateFile = createStateFile();
+    let outbox = new MobileMessageOutbox({ stateFile });
+    const input = { clientId: "client", adapter: "codex", threadId: "thread", text: "原文", images: [], createdAtMs: 10_000 };
+    outbox.accept(input);
+    outbox.markQueued("codex", "thread", "client", { queuedMessageId: "native" });
+    outbox.updateQueuedEntry("claude", "thread", "native", "错误终端");
+    expect(outbox.get("codex", "thread", "client")?.text).toBe("原文");
+    outbox.updateQueuedEntry("codex", "thread", "native", "编辑后的完整内容");
+    outbox = new MobileMessageOutbox({ stateFile });
+    expect(outbox.get("codex", "thread", "client")?.text).toBe("编辑后的完整内容");
+    outbox.updateQueuedEntry("codex", "thread", "native", null);
+    outbox = new MobileMessageOutbox({ stateFile });
+    expect(outbox.accept(input)).toMatchObject({ duplicate: true, entry: { status: "cancelled" } });
+    expect(outbox.retry("codex", "thread", "client")).toBe(false);
+    expect(outbox.readyEntries()).toEqual([]);
+    expect(outbox.deliveredClientIds("codex", "thread")).toEqual([]);
+  });
+
+  test("expires only settled tombstones, never unresolved queue content", () => {
+    const stateFile = createStateFile();
+    let now = 10_000;
+    let outbox = new MobileMessageOutbox({ stateFile, now: () => now });
+    for (const clientId of ["cancelled", "unresolved"]) {
+      outbox.accept({ clientId, adapter: "codex", threadId: "thread", text: "保留请求", images: [], createdAtMs: now });
+      outbox.markQueued("codex", "thread", clientId, { queuedMessageId: clientId });
+    }
+    outbox.updateQueuedEntry("codex", "thread", "cancelled", null);
+    now += 8 * 24 * 60 * 60_000;
+    outbox = new MobileMessageOutbox({ stateFile, now: () => now });
+    expect(outbox.get("codex", "thread", "cancelled")).toBeNull();
+    expect(outbox.get("codex", "thread", "unresolved")?.text).toBe("保留请求");
+  });
+
   test("returns durable delivered ids scoped to the adapter and task, and changes the content revision", () => {
     const stateFile = createStateFile();
     const outbox = new MobileMessageOutbox({stateFile});
@@ -391,4 +461,99 @@ test("classifies permanent image failures separately from safe reconnects and un
   expect(classifyMobileSendFailure('attachment-error: Model does not support image input')).toBe("permanent");
   expect(classifyMobileSendFailure("Codex 暂未确认收到这条消息")).toBe("unconfirmed");
   expect(classifyMobileSendFailure("session.prompt timed out")).toBe("unconfirmed");
+});
+
+test("draft settings survive restart and apply only to the first input of the new task", () => {
+  const stateFile = createStateFile();
+  let outbox = new MobileMessageOutbox({stateFile});
+  const input = {adapter:"codex",threadId:"local-new-draft",text:"检查",images:[],newTaskSettings:{model:"model-a",reasoningEffort:"high"}};
+  outbox.accept({...input,clientId:"first"});outbox.accept({...input,clientId:"second"});
+  outbox = new MobileMessageOutbox({stateFile});
+  expect(outbox.get("codex","local-new-draft","first")?.newTaskSettings).toEqual(input.newTaskSettings);
+  outbox.resolveThread("codex","local-new-draft","first","real-new-task");
+  expect(outbox.get("codex","real-new-task","first")?.newTaskSettings).toEqual(input.newTaskSettings);
+  expect(outbox.get("codex","real-new-task","second")?.newTaskSettings).toEqual(input.newTaskSettings);
+  outbox.accept({...input, threadId:"real-new-task", clientId:"third", newTaskSettings:undefined});
+  expect(outbox.get("codex","real-new-task","third")?.newTaskSettings).toEqual(input.newTaskSettings);
+  outbox.markNewTaskSettingsApplied("codex","real-new-task","first");
+  expect(outbox.get("codex","real-new-task","second")?.newTaskSettingsApplied).toBe(true);
+  expect(outbox.get("codex","real-new-task","third")?.newTaskSettingsApplied).toBe(true);
+  outbox = new MobileMessageOutbox({stateFile});
+  outbox.retry("codex","real-new-task","first");
+  expect(outbox.get("codex","real-new-task","first")?.newTaskSettingsApplied).toBe(true);
+});
+
+test("expires a queued send that never gets a native queue id", () => {
+  // 真实场景：DeepSeek 在任务运行中返回 queued，但不提供 queuedMessageId。
+  // 对账逻辑要求有原生 ID 才检查，因此该条目永远无法确认，会永久留在待发列表。
+  const stateFile = createStateFile();
+  const outbox = new MobileMessageOutbox({ stateFile });
+  outbox.accept({ clientId: "c1", adapter: "deepseek", threadId: "t1", text: "排队内容", images: [], createdAtMs: 1_000 });
+  outbox.markQueued("deepseek", "t1", "c1", { submittedAtMs: 1_000 });
+  expect(outbox.get("deepseek", "t1", "c1")?.status).toBe("queued");
+  expect(outbox.get("deepseek", "t1", "c1")?.queuedMessageId).toBeUndefined();
+
+  // 未到期：保持原状。
+  expect(outbox.expireStalePendingConfirmations(1_000 + 60_000)).toEqual([]);
+  expect(outbox.get("deepseek", "t1", "c1")?.status).toBe("queued");
+
+  // 超过 1 小时仍未确认：转为未确认，内容保留，不再占用待发列表。
+  const affected = outbox.expireStalePendingConfirmations(1_000 + 60 * 60 * 1_000 + 1);
+  expect(affected).toEqual([{ adapter: "deepseek", threadId: "t1" }]);
+  expect(outbox.get("deepseek", "t1", "c1")).toMatchObject({ status: "unconfirmed", text: "排队内容" });
+  // 已转为未确认后不会重复过期。
+  expect(outbox.expireStalePendingConfirmations(1_000 + 10 * 60 * 60 * 1_000)).toEqual([]);
+});
+
+test("expires an unconfirmed submitted send and keeps a real queued entry", () => {
+  const stateFile = createStateFile();
+  const outbox = new MobileMessageOutbox({ stateFile });
+  outbox.accept({ clientId: "submitted", adapter: "codex", threadId: "t1", text: "已提交", images: [], createdAtMs: 5_000 });
+  outbox.markSubmitted("codex", "t1", "submitted", { submittedAtMs: 5_000 });
+  outbox.accept({ clientId: "queued", adapter: "codex", threadId: "t1", text: "真排队", images: [], createdAtMs: 5_000 });
+  outbox.markQueued("codex", "t1", "queued", { queuedMessageId: "native-1", submittedAtMs: 5_000 });
+
+  const affected = outbox.expireStalePendingConfirmations(5_000 + 60 * 60 * 1_000 + 1);
+  expect(affected).toEqual([{ adapter: "codex", threadId: "t1" }]);
+  expect(outbox.get("codex", "t1", "submitted")?.status).toBe("unconfirmed");
+  // 有原生队列 ID 的条目由服务端对账，不在这里过期。
+  expect(outbox.get("codex", "t1", "queued")).toMatchObject({ status: "queued", queuedMessageId: "native-1" });
+});
+
+test("reports the next pending confirmation expiry so the scheduler stays awake", () => {
+  const stateFile = createStateFile();
+  const outbox = new MobileMessageOutbox({ stateFile });
+  expect(outbox.nextPendingConfirmationExpiryAtMs(1_000)).toBeNull();
+  outbox.accept({ clientId: "c1", adapter: "deepseek", threadId: "t1", text: "排队", images: [], createdAtMs: 2_000 });
+  outbox.markQueued("deepseek", "t1", "c1", { submittedAtMs: 2_000 });
+  const timeoutMs = 60 * 60 * 1_000;
+  expect(outbox.nextPendingConfirmationExpiryAtMs(3_000)).toBe(2_000 + timeoutMs);
+  // 已过期时间点应钳制到当前时间，避免立即忙轮询。
+  expect(outbox.nextPendingConfirmationExpiryAtMs(2_000 + timeoutMs + 50_000)).toBe(2_000 + timeoutMs + 50_000);
+  outbox.expireStalePendingConfirmations(2_000 + timeoutMs + 1);
+  expect(outbox.nextPendingConfirmationExpiryAtMs(2_000 + timeoutMs + 2)).toBeNull();
+});
+
+test("cancels a local optimistic send without deleting its content", () => {
+  const stateFile = createStateFile();
+  const outbox = new MobileMessageOutbox({ stateFile });
+  outbox.accept({ clientId: "c1", adapter: "deepseek", threadId: "t1", text: "待取消", images: [], createdAtMs: 1_000 });
+  outbox.markQueued("deepseek", "t1", "c1", { submittedAtMs: 1_000 });
+  expect(outbox.cancelByClientId("deepseek", "t1", "c1")).toBe(true);
+  // 取消是幂等墓碑，内容保留且不可重复提交。
+  expect(outbox.get("deepseek", "t1", "c1")).toMatchObject({ status: "cancelled", text: "待取消" });
+  expect(outbox.cancelByClientId("deepseek", "t1", "c1")).toBe(false);
+  expect(outbox.readyEntries(Number.MAX_SAFE_INTEGER)).toEqual([]);
+});
+
+test("does not expire an already delivered send", () => {
+  const stateFile = createStateFile();
+  const outbox = new MobileMessageOutbox({ stateFile });
+  outbox.accept({ clientId: "c1", adapter: "codex", threadId: "t1", text: "已完成", images: [], createdAtMs: 1_000 });
+  outbox.markQueued("codex", "t1", "c1", { queuedMessageId: "native", submittedAtMs: 1_000 });
+  outbox.reconcileReceived("codex", "t1", "c1", [
+    { id: "m1", role: "user", text: "已完成", createdAtMs: 1_500, clientId: "c1" },
+  ]);
+  expect(outbox.expireStalePendingConfirmations(1_000 + 100 * 60 * 60 * 1_000)).toEqual([]);
+  expect(outbox.get("codex", "t1", "c1")?.status).toBe("delivered");
 });

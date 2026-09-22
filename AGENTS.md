@@ -1,5 +1,9 @@
 # Repository Guidelines
 
+## 当前交付边界（2026-09-13）
+开发完成必须验证、创建提交并登记完整 SHA；没有提交只能报告“未完成交付”。开发提交不自动部署，用户明确要求统一部署后，发布负责人同时盘点本机与开发服务器的提交、逐项恢复已完成但漏提交的工作，记录纳入或暂缓理由，不能静默排除。体验部署不等于 GitHub 正式发布。
+
+
 ## Required Reading For Every Agent
 Before modifying this repository, read `docs/开发协作/更名与版本边界.md` and `docs/开发协作/多Agent协作规范.md`. The first document defines the completed DeskRelay → WeRelay rename, the allowed legacy-name contexts, and the active `0.x.x` version line; the second defines mandatory worktree isolation, commit handoff, dirty-worktree classification, release ownership, and post-release cleanup. Also read `docs/开发协作/任务职责与分工.md` when the task may overlap another long-running Agent.
 
@@ -136,9 +140,11 @@ Do not describe npm Registry as an installation, update, or release channel for 
 ## Multi-Agent Git And Release Ownership
 WeRelay may be edited by multiple Agents at the same time. Every ordinary development Agent must work in its own branch and worktree, preserve existing dirty state, stage only explicitly owned files, and finish with one or more local commits. Development Agents must not push, merge to `main`, create tags, bump the public version, run `npm publish`, deploy shared environments, or perform any GitHub write operation.
 
+Before modifying any file, every Agent must first check the repository up to the latest state and record the baseline SHA; repeat that check whenever the task, branch, or worktree changes. This repository has no GitHub remote configured — GitHub writes happen only on the dedicated publishing server — so "latest state" means the newest local branches, worktrees, and commits, not `git fetch`. If the baseline branch has moved, rebase or reopen the worktree onto the new baseline before editing rather than continuing from a stale one. See `docs/开发协作/多Agent协作规范.md` for the exact commands.
+
 The delivery flow has two separate ownership stages:
 
-1. An **experience integration Agent** is the default next owner after a runtime-changing commit. The user does not need to request deployment for every task. The development Agent must hand off its SHA to the single active integration owner; if no owner exists, the current Agent may take the role only after a full repository inventory. Integration and deployment are serialized, so ordinary Agents must never deploy their own branches concurrently or overwrite a newer candidate. The integration Agent runs the complete gates, creates a traceable preview version and tarball, installs that same artifact locally and on the public Relay, and performs real acceptance checks. It must not push GitHub, create a public tag, or call the candidate a formal release.
+1. An **experience integration Agent** starts a batch only after the user explicitly requests deployment. A runtime-changing commit is registered as pending, not deployed automatically. The development Agent must hand off its SHA to the single active integration owner; if no owner exists, the current Agent may take the role only with user deployment authorization and after a full repository inventory. Integration and deployment are serialized, so ordinary Agents must never deploy their own branches concurrently or overwrite a newer candidate. The integration Agent runs the complete gates, creates a traceable preview version and tarball, installs that same artifact locally and on the public Relay, and performs real acceptance checks. It must not push GitHub, create a public tag, or call the candidate a formal release.
 2. A **public release Agent** may act only after the user explicitly asks to publish a GitHub version. It may publish only the last candidate baseline that completed experience acceptance. Newly discovered commits must not be silently included; they require a new candidate deployment and observation period first. GitHub fetch, public commit, candidate-branch CI, fast-forward `main`, tag, and remote verification still run on the configured publishing server, with no local-push fallback.
 
 Only one integration owner may control a candidate baseline at a time, and only one public release Agent may control a formal version at a time. Either role must inventory every worktree, branch, dirty file, and candidate commit, integrate by explicit SHA in an isolated worktree, rerun validation after conflicts, and never deploy or publish an uncommitted shared working tree.
@@ -146,7 +152,7 @@ Only one integration owner may control a candidate baseline at a time, and only 
 Chinese release notes are the user-facing source of truth. Write them in plain, non-technical Chinese: describe what users can now do, what visible problem was fixed, whether any action is required, and what limitations remain. Keep class names, fields, file paths, commit SHAs, test commands, and implementation details in the technical report or commit body, not in the public change record. Follow `docs/开发协作/多Agent协作规范.md`, `docs/发布/体验部署与正式发布.md`, `docs/发布/对外发布操作手册.md`, and `docs/发布/版本记录/中文版本说明模板.md`.
 
 ## Release Process
-- Development completion means a tested local commit followed by an explicit experience-deployment handoff. The user does not need to repeat a deployment instruction, but this is an Agent completion obligation, not an unattended Git hook or background queue. The responsible Agent must not claim deployment until the candidate tarball is actually installed and verified; if credentials, locking, server access, or validation blocks it, report "committed but not deployed" clearly. Documentation-only, test-description, or CI-maintenance commits do not restart runtime services when the packaged runtime is unchanged.
+- Development completion requires scoped validation, a local commit and registration of the full SHA as pending integration. It does not automatically authorize deployment or wake the release Agent. Only an explicit user request starts a batch deployment, owned by one integration Agent. Report committed-but-not-deployed work clearly; never claim deployment until the same candidate tarball is installed and verified. Documentation-only, test-description or CI-maintenance commits do not restart runtime services when packaged runtime behavior is unchanged.
 - Experience deployment is not a GitHub formal release. Use a traceable preview version such as `0.3.5-preview.20260826.1`, record the candidate SHA and tarball SHA-256, deploy the same tarball locally and to the public Relay, retain a rollback artifact, and start observation from the last successful deployment.
 - If any source or packaged content changes during observation, create a new commit, rerun the complete gates, rebuild and redeploy a new candidate, and restart the observation baseline. Rolling back a service must not delete or rewrite Git history.
 - Only an explicit user instruction to publish a GitHub version starts the public release stage. A formal release must be based on the last experience-approved candidate; new Agent commits default to the next candidate and cannot bypass experience acceptance.
@@ -184,7 +190,7 @@ Missing WeChat replies usually reduce to one of these questions: did the active 
 Prefer surgical fixes backed by focused tests. Avoid broad rewrites of adapter flow, transport state, or release docs unless the user explicitly asks for a larger redesign.
 
 ## Agent Experience Records
-- **不能把“提交后默认部署”的流程约定描述成已经存在的自动部署系统，除非仓库确实有可执行的协调器、串行锁和部署验真。** 用户明确指出其他 Agent 提交后并不会自然让服务器运行新版本；commit 只是交付物，负责当前任务的 Agent 仍必须实际完成整合、安装和验活，做不到时要明确报告“已提交但尚未部署”，否则会让用户误以为线上已经更新。
+- **开发提交不等于部署：开发完成须验证、提交并登记，只有用户明确要求集中部署后才实际安装和验活。** 用户明确指出其他 Agent 提交后并不会自然让服务器运行新版本；commit 只是交付物，负责当前任务的 Agent 仍必须实际完成整合、安装和验活，做不到时要明确报告“已提交但尚未部署”，否则会让用户误以为线上已经更新。
 - **具备多客户端后端的 CLI Agent 应直接共享一个长期 owner，不能让远程端和电脑 TUI 各自启动独立 ACP。** Grok 已验证可用工作区级 `agent leader` 同时承载 ACP 客户端和可见 TUI；共享 socket、稳定 sessionId 和关闭时清理 owner，才能让手机消息实时出现在电脑终端并避免会话分叉。
 - **对外说明“支持某个 Agent”时必须分别标明原任务继续、电脑端可见和已打开界面实时同步，不能把能读取历史、启动命令或加载 ACP 会话统称为完整支持。** 这些能力对应不同的数据 owner 和同步强度；混写会让用户误以为手机消息一定进入当前桌面窗口，掩盖真实 owner 边界，并重新制造对话分叉风险。
 - **恢复用户明确选择的持久任务失败时必须直接报告不可用，不能自动新建任务或切换到“最近任务”。** 相同界面里静默换成另一个 session 会让用户以为仍在原上下文中继续，实际却已产生不可见分叉；Claude、OpenCode、Grok 和 CodeBuddy 等适配器都要保留原任务身份并让用户决定如何恢复。
@@ -279,3 +285,6 @@ Prefer surgical fixes backed by focused tests. Avoid broad rewrites of adapter f
 - **WorkBuddy Desktop 启动恢复不能把持久化任务 ID 当作终端连接成败，旧任务删除或运行时拒绝加载时应清除该 ID，并立即保留“已连接但未选任务”的 slot，而不是依次探测最近任务。** WorkBuddy 的 SQLite 目录会包含多个后台运行或已失效任务，但桌面 renderer 未必能立即加载它们；逐个探测会把网页连接拖慢到数十秒。终端连接本身已足以支持列表和历史读取，用户真正进入或发送某个任务时再精确加载，才能同时保证连续性、速度和状态准确。
 - **手机打开本地页面或文件时，应采用“每次点击重新生成有界静态快照”的应用层部署，而不是把本机端口做成公网代理。** 已验证可行的组合是：本地文件只允许当前工作区、回环页面只抓取同源静态资源、Mac 通过既有设备认证 Relay 上传、服务器使用短期内存存储和已登录会话、最终页面放进无同源沙箱；这样既能保证手机看到点击当下的最新版本，又不会把任意本地文件、端口或任务台权限暴露给预览页面。
 - **从移动网页在 Codex 项目内新建任务时，必须把来源任务的桌面项目归属转换为 app-server 的规范 `projectId` 并随 `thread/start` 提交，不能只继承 `cwd`。** 用户可能把工作目录位于项目根目录之外的任务手动归入项目，只按路径创建会让新任务落入“无项目”；同时还要把 app-server 项目 ID 反向映射为桌面项目名，保证 Codex 与移动任务台刷新后归属一致。
+- **微信媒体补发必须在上传前按“账号范围 + 收件人 + 内容摘要”检查未确认状态，并让新上下文令牌在守护进程重启后也能按单向哈希释放对应阻塞。** 只在 `sendmessage` 前做去重会让已上传但结果超时的图片、文件或视频在每轮补发时重新占用 CDN、网络和发送队列，最终拖慢微信轮询、网页与终端切换；把稳定请求身份持久化且不保存明文收件人，才能同时避免重复上传、恢复补发和保护隐私。
+
+- **微信/DSH 稳定性不能只看“连接已恢复”或任务列表成功。**任务目录读取、DSH `$events`、历史快照、微信长轮询、Relay 保活和主事件循环必须分链路验收；单终端目录超时不得终止其他终端，历史快照不得与长期事件流共用可互相关闭的 mux，详见 `docs/开发协作/微信与DSH连接稳定性.md`。

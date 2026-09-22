@@ -181,7 +181,8 @@ export type BridgeMessageImage =
     };
 
 export type BridgeSessionMessage = {
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "task";
+  sourceTask?: { adapter: string; sessionId: string };
   text: string;
   id?: string;
   turnId?: string;
@@ -431,6 +432,7 @@ export interface BridgeAdapter {
     sessionId: string,
     options?: BridgeSessionReadOptions,
   ): Promise<BridgeSessionRunSummary | null>;
+  getNewSessionModelState?(): Promise<BridgeSessionModelState>;
   getSessionModelState?(sessionId: string): Promise<BridgeSessionModelState>;
   setSessionModel?(
     sessionId: string,
@@ -478,6 +480,8 @@ export interface BridgeAdapter {
   ): Promise<number>;
   getPendingTaskApprovals?(threadId: string): ApprovalRequest[];
   submitUserInput(answers: Record<string, string[]>): Promise<boolean>;
+  /** Authoritative pending question for one exact session, including background sessions. */
+  getPendingTaskUserInput?(threadId: string): UserInputRequest | null;
   submitTaskUserInput?(
     threadId: string,
     answers: Record<string, string[]>,

@@ -75,6 +75,9 @@ export function selectRunningGlobalTaskAdapters(params: {
 export function createGlobalTaskCatalogCache<Value>(options: {
   maxAgeMs: number;
   now?: () => number;
+  // Opt in only for catalogs, not live terminal discovery. The caller can
+  // strip obsolete runtime status while retaining the original task identity.
+  staleOnError?: (entry: { key: string; value: Value; error: unknown }) => Value;
 }): {
   read(key: string): Value | undefined;
   load(key: string, loader: () => Promise<Value>): Promise<Value>;
@@ -88,7 +91,7 @@ export function createGlobalTaskCatalogCache<Value>(options: {
       const entry = entries.get(key);
       if (!entry) return undefined;
       if (now() - entry.cachedAtMs >= options.maxAgeMs) {
-        entries.delete(key);
+        if (!options.staleOnError) entries.delete(key);
         return undefined;
       }
       return entry.value;
@@ -98,9 +101,22 @@ export function createGlobalTaskCatalogCache<Value>(options: {
       if (cached !== undefined) return cached;
       const pending = inFlight.get(key);
       if (pending) return await pending;
-      const promise = loader().then((value) => {
+      // Defer the loader until after the in-flight marker is published. Some
+      // catalog loaders perform synchronous filesystem/process work before
+      // returning their Promise. Calling them inline lets a re-entrant request
+      // start a second scan before `inFlight.set`, which can starve the daemon
+      // event loop when the mobile task board is polled concurrently.
+      const promise = Promise.resolve().then(loader).then((value) => {
         entries.set(key, { value, cachedAtMs: now() });
         return value;
+      }).catch((error: unknown) => {
+        // Read at failure time so explicit invalidation also removes fallback.
+        // Keep the original timestamp: a failed refresh is not a fresh scan.
+        const stale = entries.get(key);
+        if (stale && options.staleOnError) {
+          return options.staleOnError({ key, value: stale.value, error });
+        }
+        throw error;
       });
       inFlight.set(key, promise);
       try {
@@ -191,16 +207,19 @@ export function updateGlobalTaskSnapshot(params: {
 
 export function paginateGlobalTaskSnapshot(
   snapshot: GlobalTaskSnapshot,
-  options: { startIndex: number; pageSize: number },
+  options: { startIndex: number; pageSize: number; adapter?: DaemonAdapterKind | null },
 ): GlobalTaskPage {
+  const candidates = options.adapter
+    ? snapshot.candidates.filter((candidate) => candidate.adapter === options.adapter)
+    : snapshot.candidates;
   const pageSize = Math.max(1, options.pageSize);
-  const startIndex = Math.max(0, Math.min(options.startIndex, snapshot.candidates.length));
+  const startIndex = Math.max(0, Math.min(options.startIndex, candidates.length));
   return {
-    candidates: snapshot.candidates.slice(startIndex, startIndex + pageSize),
+    candidates: candidates.slice(startIndex, startIndex + pageSize),
     startIndex,
     pageSize,
     hasPrevious: startIndex > 0,
-    hasMore: startIndex + pageSize < snapshot.candidates.length,
+    hasMore: startIndex + pageSize < candidates.length,
   };
 }
 
@@ -331,6 +350,7 @@ function candidateProjectLabel(candidate: GlobalTaskCandidate): string {
 
 export function formatGlobalTaskList(params: {
   snapshot: GlobalTaskSnapshot;
+  adapter?: DaemonAdapterKind | null;
   startIndex: number;
   pageSize: number;
 }): string {
@@ -342,10 +362,13 @@ export function formatGlobalTaskList(params: {
   }
   const showAdapterLabels = true;
   return [
-    "全部任务",
-    ...page.candidates.map((candidate, index) => (
-      `${page.startIndex + index + 1}. ${taskIdentityLabel(candidate, showAdapterLabels)}${formatGlobalTaskDisplayTitle(candidate.title)}${runtimeMarker(candidate)}`
-    )),
+    params.adapter ? `${getBridgeProvider(params.adapter).label} 任务` : "全部任务",
+    ...page.candidates.map((candidate) => {
+      const number = params.snapshot.numberByIdentity.get(
+        globalTaskIdentityKey(candidate.adapter, candidate.sessionId),
+      );
+      return `${number ?? "?"}. ${taskIdentityLabel(candidate, showAdapterLabels)}${formatGlobalTaskDisplayTitle(candidate.title)}${runtimeMarker(candidate)}`;
+    }),
     "",
     formatTaskListInstructions(),
   ].join("\n");

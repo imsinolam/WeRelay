@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   CodexCompletionDeliveryQueue,
+  CODEX_COMPLETION_DELIVERABLE_WINDOW_MS,
   formatCodexCompletionBacklogSummary,
   selectCodexCompletionBacklogBatch,
   type CodexCompletionDeliveryState,
@@ -17,6 +18,19 @@ function buildQueue(
     persist: (state) => snapshots.push(structuredClone(state)),
   });
 }
+
+test("backoff-suppressed completion is persisted and delivered after restart", async () => {
+  const snapshots: CodexCompletionDeliveryState[] = [];
+  const queue = buildQueue(undefined, snapshots);
+  queue.enqueue({ key: "deepseek:session:turn", threadId: "session", texts: ["任务完成"] });
+  const rejected = await queue.deliver("deepseek:session:turn", async () => 0);
+  expect(rejected.status).toBe("pending");
+  expect(snapshots.at(-1)?.pending[0]?.nextTextIndex).toBe(0);
+  const restarted = buildQueue(snapshots.at(-1));
+  const recovered = await restarted.deliver("deepseek:session:turn", async (_item, texts) => texts.length);
+  expect(recovered.status).toBe("delivered");
+  expect(restarted.getPending()).toEqual([]);
+});
 
 describe("Codex completion delivery queue", () => {
   test("retains a stale-token 0/N delivery for retry", async () => {
@@ -305,4 +319,115 @@ test("a crash after the first text checkpoint does not repeat that text", async 
   })).rejects.toThrow("process stopped");
   const restored = buildQueue(snapshots.at(-1));
   await restored.deliver("t:crash", async (_delivery, texts) => { expect(texts).toEqual(["链接"]); return 1; });
+});
+
+describe("Codex completion delivery expiry window", () => {
+  function buildExpiryQueue(
+    initial?: CodexCompletionDeliveryState,
+    nowRef: { value: number } = { value: Date.parse("2026-08-08T12:00:00.000Z") },
+    expiredBatches: string[][] = [],
+  ): CodexCompletionDeliveryQueue {
+    return new CodexCompletionDeliveryQueue({
+      initial,
+      now: () => nowRef.value,
+      onExpire: (deliveries) => expiredBatches.push(deliveries.map((item) => item.key)),
+    });
+  }
+
+  test("drops a completion that has been undelivered past the window", async () => {
+    const nowRef = { value: Date.parse("2026-08-08T12:00:00.000Z") };
+    const expiredBatches: string[][] = [];
+    const queue = buildExpiryQueue(undefined, nowRef, expiredBatches);
+    queue.enqueue({ key: "t:stale", threadId: "t", texts: ["完成"] });
+
+    nowRef.value += CODEX_COMPLETION_DELIVERABLE_WINDOW_MS + 1;
+
+    expect(queue.getPending()).toEqual([]);
+    let called = false;
+    const result = await queue.deliver("t:stale", async () => {
+      called = true;
+      return 1;
+    });
+    expect(result.status).toBe("missing");
+    expect(called).toBe(false);
+    expect(expiredBatches).toEqual([["t:stale"]]);
+  });
+
+  test("keeps a completion that is still inside the window", async () => {
+    const nowRef = { value: Date.parse("2026-08-08T12:00:00.000Z") };
+    const expiredBatches: string[][] = [];
+    const queue = buildExpiryQueue(undefined, nowRef, expiredBatches);
+    queue.enqueue({ key: "t:fresh", threadId: "t", texts: ["完成"] });
+
+    nowRef.value += CODEX_COMPLETION_DELIVERABLE_WINDOW_MS - 60_000;
+
+    expect(queue.getPending().map((item) => item.key)).toEqual(["t:fresh"]);
+    const result = await queue.deliver("t:fresh", async (_delivery, texts) => texts.length);
+    expect(result.status).toBe("delivered");
+    expect(expiredBatches).toEqual([]);
+  });
+
+  test("never resurrects an expired completion when the same key is replayed", async () => {
+    const nowRef = { value: Date.parse("2026-08-08T12:00:00.000Z") };
+    const queue = buildExpiryQueue(undefined, nowRef);
+    queue.enqueue({ key: "t:stale", threadId: "t", texts: ["完成"] });
+
+    nowRef.value += CODEX_COMPLETION_DELIVERABLE_WINDOW_MS + 1;
+    expect(queue.getPending()).toEqual([]);
+
+    const replayed = queue.enqueue({ key: "t:stale", threadId: "t", texts: ["重放"] });
+
+    expect(replayed.status).toBe("expired");
+    expect(queue.getPending()).toEqual([]);
+    let called = false;
+    await queue.deliver("t:stale", async () => {
+      called = true;
+      return 1;
+    });
+    expect(called).toBe(false);
+  });
+
+  test("drops an already-expired backlog restored from disk on first retry", () => {
+    const staleState: CodexCompletionDeliveryState = {
+      pending: [{
+        key: "t:stale",
+        threadId: "t",
+        texts: ["旧完成通知"],
+        nextTextIndex: 0,
+        createdAt: "2026-08-08T00:00:00.000Z",
+      }],
+      delivered: [],
+    };
+    const expiredBatches: string[][] = [];
+    const queue = buildExpiryQueue(
+      staleState,
+      { value: Date.parse("2026-08-08T12:00:00.000Z") },
+      expiredBatches,
+    );
+
+    expect(queue.getPending()).toEqual([]);
+    expect(expiredBatches).toEqual([["t:stale"]]);
+  });
+
+  test("does not expire a completion while its own send is in flight", async () => {
+    const nowRef = { value: Date.parse("2026-08-08T12:00:00.000Z") };
+    const expiredBatches: string[][] = [];
+    const queue = buildExpiryQueue(undefined, nowRef, expiredBatches);
+    queue.enqueue({ key: "t:slow", threadId: "t", texts: ["完成"] });
+    let release!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const inFlight = queue.deliver("t:slow", async (_delivery, texts) => {
+      await waiting;
+      return texts.length;
+    });
+
+    nowRef.value += CODEX_COMPLETION_DELIVERABLE_WINDOW_MS + 1;
+    expect(queue.getPending().map((item) => item.key)).toEqual(["t:slow"]);
+
+    release();
+    expect((await inFlight).status).toBe("delivered");
+    expect(expiredBatches).toEqual([]);
+  });
 });

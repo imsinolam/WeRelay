@@ -69,6 +69,7 @@ import {
   resolveCodexTaskCompletionDurationMs,
   selectCodexCompletionReplyText,
   selectCodexCompletionRequestPreview,
+  selectTaskScopedPending,
   sanitizeDaemonVisibleSessionMessage,
   shouldFollowCodexActiveTask,
   shouldInferCodexIdleRecencyCompletion,
@@ -383,32 +384,57 @@ describe("daemon startup resilience", () => {
     expect(retryBlock).toContain("formatCodexCompletionBacklogSummary");
     expect(retryBlock).toContain("this.codexCompletionDeliveries.acknowledge");
     expect(retryBlock.indexOf("formatCodexCompletionBacklogSummary")).toBeLessThan(
-      retryBlock.indexOf("for (const pending of this.codexCompletionDeliveries.getPending())"),
+      retryBlock.indexOf("for (const pending of ordered)"),
     );
   });
 
-  test("retries undelivered approvals before handling the inbound message that refreshed WeChat context", () => {
+  test("does not let the startup completion drain block daemon readiness", () => {
     const source = readRepoFile("src/daemon/werelay-daemon.ts").replace(/\r\n?/g, "\n");
-    const loopStart = source.indexOf(
-      "      for (const [messageIndex, message] of pollResult.messages.entries()) {",
-    );
-    const loopEnd = source.indexOf("\n  async shutdown", loopStart);
-    expect(loopStart).toBeGreaterThan(-1);
-    expect(loopEnd).toBeGreaterThan(loopStart);
+    const pollLoopStart = source.indexOf("    while (!this.shutdownPromise) {");
+    expect(pollLoopStart).toBeGreaterThan(-1);
 
-    const loopBody = source.slice(loopStart, loopEnd);
-    const retryCompletions = loopBody.indexOf(
-      "await this.retryPendingCodexCompletionNotifications(message.senderId);",
+    // The drain must run before the poll loop is entered...
+    const startupDrain = source.indexOf("this.runStartupCompletionDrain()");
+    expect(startupDrain).toBeGreaterThan(-1);
+    expect(startupDrain).toBeLessThan(pollLoopStart);
+
+    // ...but must not be awaited on the readiness path. A stale WeChat context
+    // token is only refreshed by the poll loop that starts below it, so an
+    // awaited drain would deadlock startup permanently.
+    const beforeLoop = source.slice(0, pollLoopStart);
+    expect(beforeLoop).not.toContain(
+      "await this.retryPendingCodexCompletionNotifications(this.authorizedUserId)",
     );
-    const retryApprovals = loopBody.indexOf(
-      "await this.retryUndeliveredApprovalNotifications(message.senderId);",
+    expect(beforeLoop).toContain("this.trackWechatForwardTask(");
+
+    // The bounded drain itself must race the retry against a deadline.
+    const drainStart = source.indexOf("  private async runStartupCompletionDrain(");
+    const drainEnd = source.indexOf(
+      "\n  private async retryPendingCodexCompletionNotifications(",
+      drainStart,
     );
-    const handleInbound = loopBody.indexOf("await this.handleInboundMessage(message, inboundTargets[messageIndex]);");
-    expect(retryCompletions).toBeGreaterThan(-1);
-    expect(retryApprovals).toBeGreaterThan(-1);
-    expect(handleInbound).toBeGreaterThan(-1);
-    expect(retryCompletions).toBeLessThan(handleInbound);
-    expect(retryApprovals).toBeLessThan(handleInbound);
+    expect(drainStart).toBeGreaterThan(-1);
+    expect(drainEnd).toBeGreaterThan(drainStart);
+    const drainBlock = source.slice(drainStart, drainEnd);
+    expect(drainBlock).toContain("Promise.race");
+    expect(drainBlock).toContain("STARTUP_COMPLETION_DRAIN_TIMEOUT_MS");
+    expect(drainBlock).toContain("clearTimeout");
+  });
+
+  test("recovers after inbound dispatch through a single scheduler, prioritizing approvals", () => {
+    const source = readRepoFile("src/daemon/werelay-daemon.ts");
+    const start = source.indexOf("  private async handleInboundBatch(");
+    const end = source.indexOf("\n  async shutdown", start);
+    const body = source.slice(start, end);
+    expect(body.indexOf("void this.outboundRecoveryScheduler.trigger()")).toBeGreaterThan(
+      body.indexOf("await this.handleInboundMessage(message, inboundTargets[messageIndex])"),
+    );
+    expect(source).not.toContain("await this.runOutboundRecoveryPass()");
+    const passStart = source.indexOf("  private async runOutboundRecoveryPass()");
+    const passBody = source.slice(passStart, passStart + 400);
+    expect(passBody.indexOf("retryUndeliveredApprovalNotifications")).toBeLessThan(
+      passBody.indexOf("retryPendingCodexCompletionNotifications"),
+    );
   });
 
   test("keeps restored approval deliveries while the desktop approval index is still warming up", () => {
@@ -611,6 +637,17 @@ describe("werelay-daemon helpers", () => {
     expect(refreshBlock).toContain("this.stateStore.setAdapterUsageOrder");
     expect(source).toContain("this.recordAdapterMessageActivity({");
     expect(adaptersBlock).toContain("orderedAdapters.map");
+  });
+
+  test("keeps the previous Codex catalog when an off-thread refresh times out", () => {
+    const source = readRepoFile("src/daemon/werelay-daemon.ts");
+    const start = source.indexOf("  private async getCodexTaskCandidates(");
+    const end = source.indexOf("\n  private prefixSlotMessage(", start);
+    const block = source.slice(start, end);
+
+    expect(start).toBeGreaterThan(-1);
+    expect(block).toContain("codex_task_catalog_stale_fallback");
+    expect(block).toContain("return slot.taskCandidatesCache");
   });
 
   test("collects running task state across terminal catalogs", () => {
@@ -1208,6 +1245,62 @@ describe("werelay-daemon helpers", () => {
     })).toBe("approval");
   });
 
+  test("never claims another task's pending approval or question", () => {
+    // 非 Codex 终端此前直接取列表第一项，会把 A 任务的审批/提问当成 B 任务的
+    // 待处理，使用户在 B 任务下看到并回复属于 A 的内容。
+    const pending = [
+      { threadId: "task-a", summary: "A 任务的审批" },
+      { threadId: "task-b", summary: "B 任务的审批" },
+    ];
+
+    // 目标为 task-b 时只能拿到 task-b 的记录，绝不能回退成第一项。
+    expect(selectTaskScopedPending({
+      pending,
+      threadId: "task-b",
+      selectedThreadId: "task-a",
+      allowUnscopedFallback: true,
+    })).toMatchObject({ threadId: "task-b" });
+
+    // 目标任务没有待处理项时必须返回空，而不是拿别的任务顶替。
+    expect(selectTaskScopedPending({
+      pending: [{ threadId: "task-a", summary: "A 任务的审批" }],
+      threadId: "task-b",
+      selectedThreadId: "task-a",
+      allowUnscopedFallback: true,
+    })).toBeNull();
+
+    // 缺少目标 threadId 时不认领任何记录。
+    expect(selectTaskScopedPending({
+      pending,
+      threadId: undefined,
+      selectedThreadId: "task-a",
+      allowUnscopedFallback: true,
+    })).toBeNull();
+
+    // 无归属记录只在「目标就是当前选中任务」时认领。
+    const unscoped = [{ summary: "无 threadId 的审批" }];
+    expect(selectTaskScopedPending({
+      pending: unscoped,
+      threadId: "task-a",
+      selectedThreadId: "task-a",
+      allowUnscopedFallback: true,
+    })).toMatchObject({ summary: "无 threadId 的审批" });
+    expect(selectTaskScopedPending({
+      pending: unscoped,
+      threadId: "task-b",
+      selectedThreadId: "task-a",
+      allowUnscopedFallback: true,
+    })).toBeNull();
+
+    // Codex 不允许无归属回退。
+    expect(selectTaskScopedPending({
+      pending: unscoped,
+      threadId: "task-a",
+      selectedThreadId: "task-a",
+      allowUnscopedFallback: false,
+    })).toBeNull();
+  });
+
   test("restores a selected task approval from the desktop runtime after daemon restart", () => {
     const pending = resolveCodexMobilePendingApprovalFromSignals({
       threadId: "thread-a",
@@ -1289,15 +1382,30 @@ describe("werelay-daemon helpers", () => {
     expect(listBlock).not.toContain("prioritizeGlobalTaskAdapterCoverage");
   });
 
-  test("rediscovers the current DeepSeek Harness host while preserving live interaction flags", () => {
+  test("keeps every connected non-Codex catalog read on the lightweight path", () => {
     const source = readRepoFile("src/daemon/werelay-daemon.ts");
     const listStart = source.indexOf("  private async listGlobalTaskCandidates(");
     const listEnd = source.indexOf("\n  private async activateExactGlobalTask(", listStart);
     const listBlock = source.slice(listStart, listEnd);
 
-    expect(listBlock).toContain('slot.adapter === "deepseek"');
-    expect(listBlock).toContain("listLightweightAdapterSessions");
+    expect(listStart).toBeGreaterThan(-1);
+    expect(listEnd).toBeGreaterThan(listStart);
+    expect(listBlock).toContain("this.globalTaskCatalogWorker.load(adapter, this.cwd, 100)");
+    expect(listBlock).not.toContain("slot.runtime.listResumeSessions(100)");
+    expect(listBlock).toContain("activeSessionIds");
+  });
+
+  test("rediscovers lightweight terminal catalogs while preserving live interaction flags", () => {
+    const source = readRepoFile("src/daemon/werelay-daemon.ts");
+    const listStart = source.indexOf("  private async listGlobalTaskCandidates(");
+    const listEnd = source.indexOf("\n  private async activateExactGlobalTask(", listStart);
+    const listBlock = source.slice(listStart, listEnd);
+
+    expect(listBlock).toContain('slot?.adapter === "codex"');
+    expect(listBlock).toContain("globalTaskCatalogWorker");
     expect(listBlock).toContain("mergeSessionRuntimeSignals");
+    expect(listBlock).toContain("pendingApprovalIds");
+    expect(listBlock).toContain("pendingUserInputIds");
   });
 
   test("enumerates disconnected Codex tasks without restoring a desktop task", () => {
@@ -1308,7 +1416,7 @@ describe("werelay-daemon helpers", () => {
 
     expect(listStart).toBeGreaterThan(-1);
     expect(listEnd).toBeGreaterThan(listStart);
-    expect(listBlock).toContain("listLightweightAdapterSessions(adapter, this.cwd, 100)");
+    expect(listBlock).toContain("this.globalTaskCatalogWorker.load(adapter, this.cwd, 100)");
     expect(listBlock).not.toContain("runtime.start()");
     expect(listBlock).not.toContain("createRuntimeHost(buildDaemonTaskCatalogRuntimeOptions");
     expect(listBlock).not.toContain("this.stateStore.getAdapterSessionId(adapter)");
@@ -2172,6 +2280,20 @@ describe("werelay-daemon helpers", () => {
     );
   });
 
+  test("opts catalogs into stale fallback without treating old runtime state as live", () => {
+    const source = readRepoFile("src/daemon/werelay-daemon.ts");
+    const start = source.indexOf("private readonly globalTaskCatalogCache =");
+    const end = source.indexOf("private readonly globalTaskCatalogWorker", start);
+    expect(start).toBeGreaterThan(-1);
+    const block = source.slice(start, end);
+    expect(block).toContain("staleOnError:");
+    expect(block).toContain("global_task_catalog_stale_fallback:");
+    expect(block).toContain("runtimeStatus: undefined");
+    const discovery = source.slice(source.indexOf("private readonly openMobileAdaptersCache ="),
+      source.indexOf("private readonly codexTaskObservations ="));
+    expect(discovery).not.toContain("staleOnError");
+  });
+
   test("reuses the recent background task cache", () => {
     expect(isCodexTaskCandidateCacheFresh({
       cachedAtMs: 8_000,
@@ -2245,7 +2367,7 @@ describe("werelay-daemon helpers", () => {
     expect(switchBlock).toContain("if (!result.activated)");
     expect(switchBlock).toContain("await retrySwitchedAdapterTaskList(");
     expect(switchBlock).toContain("this.activeAdapter = switchAdapter;");
-    expect(switchBlock).toContain("await this.handleSystemCommand(message, switchedSlot, {");
+    expect(switchBlock).toContain("await this.handleGlobalTaskCommand(message, {");
     expect(switchBlock).toContain('type: "resume"');
     expect(switchBlock).toContain("preserveTaskSnapshot: true");
   });
@@ -2301,7 +2423,7 @@ describe("werelay-daemon helpers", () => {
     expect(systemBlock).toContain("await this.handleGlobalTaskCommand(message, command)");
   });
 
-  test("keeps adapter switches scoped to that adapter while mobile task board uses the global catalog", () => {
+  test("filters terminal switches through the root global snapshot without local renumbering", () => {
     const source = readRepoFile("src/daemon/werelay-daemon.ts");
     const switchStart = source.indexOf("const switchCommand = parseDaemonSwitchCommand(message.text);");
     const switchEnd = source.indexOf('\n    if (message.text.trim().toLowerCase() === "/daemon-stop")', switchStart);
@@ -2310,7 +2432,9 @@ describe("werelay-daemon helpers", () => {
     const boardEnd = source.indexOf("\n  private async recordRecentTaskCompletion(", boardStart);
     const boardBlock = source.slice(boardStart, boardEnd);
 
-    expect(switchBlock).toContain('taskListScope: "adapter"');
+    expect(switchBlock).toContain("await this.handleGlobalTaskCommand");
+    expect(switchBlock).toContain("adapterFilter: switchAdapter");
+    expect(switchBlock).not.toContain('taskListScope: "adapter"');
     expect(boardBlock).toContain("await this.listGlobalTaskCandidates()");
     expect(boardBlock).toContain("DAEMON_ADAPTERS.map");
     expect(boardBlock).not.toContain("Array.from(this.slots.values())");
@@ -2806,7 +2930,7 @@ describe("werelay-daemon helpers", () => {
     const retryIndex = switchBlock.indexOf("await retrySwitchedAdapterTaskList(");
     const activationIndex = switchBlock.indexOf("this.activeAdapter = switchAdapter;", retryIndex);
     const successIndex = switchBlock.indexOf(
-      "const detail = formatDaemonSwitchResultDetail(result);",
+      "await this.handleGlobalTaskCommand(message,",
       activationIndex,
     );
 
@@ -2815,7 +2939,39 @@ describe("werelay-daemon helpers", () => {
     expect(activationIndex).toBeGreaterThan(retryIndex);
     expect(successIndex).toBeGreaterThan(activationIndex);
     expect(switchBlock).toContain("formatSwitchedAdapterTaskListFailure({");
+    expect(switchBlock).not.toContain("getCachedSwitchedAdapterTaskCandidates");
+    expect(switchBlock).not.toContain("refreshSwitchedAdapterTaskListInBackground");
+    expect(switchBlock).not.toContain("disposeSlotForUserReconnect(switchedSlot)");
     expect(switchBlock).toContain("preserveTaskSnapshot: true");
+  });
+
+  test("switch-list refresh cannot renumber a snapshot already sent to WeChat", () => {
+    const source = readRepoFile("src/daemon/werelay-daemon.ts");
+    const start = source.indexOf("  private async refreshSwitchedAdapterTaskList(");
+    const end = source.indexOf("  private updateDaemonTaskListSnapshot(", start);
+    const refreshBlock = source.slice(start, end);
+    expect(refreshBlock).toContain("refreshSnapshot = false");
+    expect(refreshBlock).toContain("this.updateDaemonTaskListSnapshot(slot, candidates, refreshSnapshot)");
+    const initial = resolveDaemonTaskListSnapshot({
+      latestCandidates: [
+        { sessionId: "original-1", title: "原任务一" },
+        { sessionId: "original-2", title: "原任务二" },
+      ],
+      refresh: true,
+    });
+    const refreshed = resolveDaemonTaskListSnapshot({
+      current: initial,
+      latestCandidates: [
+        { sessionId: "newest", title: "刚创建" },
+        { sessionId: "original-2", title: "原任务二已更新" },
+        { sessionId: "original-1", title: "原任务一" },
+      ],
+      refresh: false,
+    });
+    expect(resolveDaemonTaskTargetedMessage({ text: "2：继续", snapshot: refreshed })?.candidate.sessionId)
+      .toBe("original-2");
+    expect(refreshed.candidates.map((candidate) => candidate.sessionId)).toEqual(["original-1", "original-2"]);
+    expect(refreshed.numberByThreadId).toBe(initial.numberByThreadId);
   });
 
   test("waitForVisibleClientConnection resolves when the visible companion appears", async () => {
@@ -2896,6 +3052,32 @@ describe("werelay-daemon helpers", () => {
     expect(attempts).toBe(3);
     expect(delays).toEqual([250, 250]);
     expect(now).toBe(500);
+  });
+
+  test("retries transient DeepSeek Desktop timeouts and HTTP 404s", async () => {
+    for (const transientError of [
+      new Error("The operation was aborted due to timeout"),
+      new Error("DeepSeek Harness listSessions transport failed: HTTP 404"),
+    ]) {
+      let now = 0;
+      let attempts = 0;
+      await retrySwitchedAdapterTaskList(
+        async () => {
+          attempts += 1;
+          if (attempts === 1) throw transientError;
+        },
+        {
+          adapter: "deepseek",
+          timeoutMs: 1_000,
+          pollMs: 250,
+          sleep: async (ms) => {
+            now += ms;
+          },
+          now: () => now,
+        },
+      );
+      expect(attempts).toBe(2);
+    }
   });
 
   test("does not retry switched adapter task lists for non-transient errors", async () => {
@@ -3241,5 +3423,78 @@ describe("werelay-daemon helpers", () => {
     expect(packageJson.bin?.["werelay-bridge-reasonix"]).toBe("bin/werelay-bridge-reasonix.mjs");
     expect(packageJson.scripts?.["bridge:reasonix"]).toContain("--adapter reasonix");
     expect(reasonixBinSource).toContain('["--adapter", "reasonix"]');
+  });
+});
+
+describe("daemon debug acknowledgement mode", () => {
+  test("replies with the build version before handling any command", () => {
+    const source = readRepoFile("src/daemon/werelay-daemon.ts").replace(/\r\n?/g, "\n");
+    const handlerStart = source.indexOf("  private async handleInboundMessage(");
+    const ackCall = source.indexOf("this.sendDebugAck(", handlerStart);
+    const authCheck = source.indexOf("if (message.senderId !== this.authorizedUserId)", handlerStart);
+    // The acknowledgement must run at the top of inbound handling, before the
+    // authorization branch and before any command parsing.
+    expect(handlerStart).toBeGreaterThan(-1);
+    expect(ackCall).toBeGreaterThan(handlerStart);
+    expect(ackCall).toBeLessThan(authCheck);
+
+    const ackStart = source.indexOf("  private async sendDebugAck(");
+    const ackEnd = source.indexOf("\n  private async handleInboundMessage(", ackStart);
+    expect(ackStart).toBeGreaterThan(-1);
+    const ackBlock = source.slice(ackStart, ackEnd);
+    expect(ackBlock).toContain("getCurrentVersion");
+    expect(ackBlock).toContain("debug_ack:");
+  });
+
+  test("can be toggled from WeChat without restarting the daemon", () => {
+    const source = readRepoFile("src/daemon/werelay-daemon.ts");
+    expect(source).toContain("debug_ack_toggled");
+    // The toggle must be recognised for both the slash and Chinese forms.
+    expect(source).toMatch(/\\\/debug\|调试/);
+    expect(source).toContain("this.debugAckEnabled = !this.debugAckEnabled");
+  });
+
+  test("is opt-in via the environment", () => {
+    const source = readRepoFile("src/daemon/werelay-daemon.ts");
+    expect(source).toContain('const DEBUG_ACK_ENV = "WERELAY_DEBUG_ACK"');
+    expect(source).toContain('process.env[DEBUG_ACK_ENV] === "1"');
+  });
+});
+
+describe("mobile task list without a live slot", () => {
+  const source = readRepoFile("src/daemon/werelay-daemon.ts");
+
+  test("lists tasks from the read-only catalog instead of reporting not connected", () => {
+    // WorkBuddy 桌面端在线、但守护进程还没建立 slot 时，此前直接抛
+    // 「尚未连接」，界面显示在线却看不到任何任务。列表应改用与任务看板
+    // 相同的只读目录，只读能力不外扩到写操作。
+    expect(source).toContain("private async listMobileTasksFromCatalog(");
+    expect(source).toContain("return this.listMobileTasksFromCatalog(resolvedAdapter);");
+    // 只读：没有 slot 时不提供重命名、项目内新建或直接新建。
+    const start = source.indexOf("private async listMobileTasksFromCatalog(");
+    const end = source.indexOf("private async listMobileTaskBoard(", start);
+    const body = source.slice(start, end);
+    expect(body).toContain("canRename: false");
+    expect(body).toContain("canCreateInProject: false");
+    expect(body).toContain("canCreateTask: false");
+    expect(body).toContain("listGlobalTaskCandidates([adapter])");
+  });
+});
+
+
+describe("recent task group creation wiring", () => {
+  const source = readRepoFile("src/daemon/codex-mobile-web.ts");
+
+  test("routes the recent group through the no-project creation source", () => {
+    // 仅有 helper 还不够：必须真的在「最近」分组里用它取来源，
+    // 否则按钮仍然永远隐藏（这正是修复前的状态）。
+    expect(source).toContain(": recentTaskCreationSource(group.tasks);");
+    expect(source).toContain('section.dataset.createWithoutSource = !collapsible && createSource ? "true" : "false";');
+    expect(source).toContain('section.dataset.createEnabled = createSource ? "true" : "false";');
+    // 新建按钮必须对「最近」分组放行，而不是要求来源任务。
+    expect(source).toContain('if (section.dataset.createEnabled !== "true") return;');
+    // 「最近」分组没有项目名，标题不应出现「在“最近”中新建任务」。
+    expect(source).toContain('? "在“" + group.title + "”中新建任务"');
+    expect(source).toContain(': "新建任务";');
   });
 });

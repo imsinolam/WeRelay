@@ -4,13 +4,15 @@ import { resolveDaemonWechatReplyTarget } from "../../src/daemon/werelay-daemon.
 
 const source = fs.readFileSync(new URL("../../src/daemon/werelay-daemon.ts", import.meta.url), "utf8").replace(/\r\n/g, "\n");
 
-test("captures incoming targets before replaying pending completion notifications", () => {
-  const capture = source.indexOf("const inboundTargets = pollResult.messages.map");
-  const replay = source.indexOf("await this.retryPendingCodexCompletionNotifications(message.senderId)", capture);
-  const dispatch = source.indexOf("await this.handleInboundMessage(message, inboundTargets[messageIndex])", replay);
+test("handles inbound messages before scheduling nonblocking recovery", () => {
+  const capture = source.indexOf("const inboundTargets = messages.map");
+  const dispatch = source.indexOf("await this.handleInboundMessage(message, inboundTargets[messageIndex])", capture);
+  const replay = source.indexOf("void this.outboundRecoveryScheduler.trigger()", dispatch);
   expect(capture).toBeGreaterThan(0);
-  expect(replay).toBeGreaterThan(capture);
-  expect(dispatch).toBeGreaterThan(replay);
+  expect(dispatch).toBeGreaterThan(capture);
+  expect(replay).toBeGreaterThan(dispatch);
+  expect(source).not.toContain("await this.outboundRecoveryScheduler.trigger()");
+  expect(source).not.toContain("await this.runOutboundRecoveryPass()");
 });
 
 test("a later completion cannot redirect an already received reply", () => {
@@ -29,3 +31,30 @@ test("formatting a pending Codex completion does not activate its reply target",
   expect(handler).not.toContain("latestTask: this.latestWechatTaskTarget");
   expect(handler).toContain("latestTask: receivedTaskTarget");
 });
+
+ test("actual inbound batch completes while historical delivery is stuck", async () => {
+   const { WeRelayDaemon } = await import("../../src/daemon/werelay-daemon.ts");
+   const { OutboundRecoveryScheduler } = await import("../../src/daemon/outbound-recovery-scheduler.ts");
+   let release!: () => void;
+   const blocked = new Promise<void>((resolve) => { release = resolve; });
+   const scheduler = new OutboundRecoveryScheduler(() => blocked, () => {});
+   const running = scheduler.trigger();
+   const received: string[] = [];
+   const daemon = Object.assign(Object.create(WeRelayDaemon.prototype), {
+     authorizedUserId: "test", getActiveSlot: () => null,
+     outboundRecoveryScheduler: scheduler,
+     handleInboundMessage: async (message: { text: string }) => { received.push(message.text); },
+   });
+   try {
+     let completed = false;
+     const batch = daemon.handleInboundBatch([{ senderId: "test", text: "任务" }, { senderId: "test", text: "/dsh" }]).then(() => { completed = true; });
+     for (let i = 0; i < 12; i++) await Promise.resolve();
+     expect(completed).toBe(true);
+     expect(received).toEqual(["任务", "/dsh"]);
+     await batch;
+   } finally {
+     release();
+     await running;
+     scheduler.stop();
+   }
+ });

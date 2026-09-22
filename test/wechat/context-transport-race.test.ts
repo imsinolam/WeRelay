@@ -51,3 +51,44 @@ test("uncertain media delivery stays paused even if a retry upload has new ciphe
     expect(calls).toBe(1);
   } finally { globalThis.fetch = original; }
 });
+
+
+test("an uncertain image send is rejected before uploading the same bytes again", async () => {
+  const guard = new ContextSendGuard();
+  const recipient = "recipient";
+  const account = { token: "account", baseUrl: "https://example.invalid" };
+  const requestKey = "sendImage:stable-content-digest";
+  await expect(guard.send({
+    recipient: `${account.token}\0${recipient}`,
+    requestKey,
+    getToken: () => "fresh",
+    isExplicitRejection: () => false,
+    send: async () => { throw new Error("connection lost"); },
+  })).rejects.toThrow("未确认");
+
+  let uploads = 0;
+  const transport = Object.create(WeChatTransport.prototype) as any;
+  transport.contextTokenCache = new Map([[recipient, "fresh"]]);
+  transport.contextSendGuard = guard;
+  transport.resolveRecipient = () => ({ account, recipientId: recipient, contextToken: "fresh" });
+  transport.readUploadSource = () => ({
+    plaintext: Buffer.from("image"),
+    rawsize: 5,
+    rawfilemd5: "unused",
+    contentDigest: "stable-content-digest",
+  });
+  transport.prepareUpload = async () => {
+    uploads += 1;
+    return {
+      contentDigest: "stable-content-digest",
+      rawsize: 5,
+      filesize: 16,
+      aeskey: Buffer.alloc(16),
+      downloadParam: "uploaded-again",
+    };
+  };
+
+  await expect(transport.sendImage("/tmp/same.png", { recipientId: recipient }))
+    .rejects.toThrow("未确认");
+  expect(uploads).toBe(0);
+});

@@ -112,10 +112,10 @@ describe("documentation structure", () => {
     const docsIndex = fs.readFileSync(path.join(root, "docs/README.md"), "utf8");
 
     expect(flow).toContain("体验部署不是 GitHub 正式发布");
-    expect(flow).toContain("运行代码完成提交后默认进入体验部署");
-    expect(flow).toContain("不需要用户逐次下达部署指令");
+    expect(flow).toContain("开发完成必须验证并提交");
+    expect(flow).toContain("等待用户明确的集中部署指令");
     expect(flow).toContain("不能并发覆盖服务器");
-    expect(flow).toContain("不是 Git commit 自动触发的后台服务");
+    expect(flow).not.toContain("运行代码完成提交后默认进入体验部署");
     expect(flow).toContain("已提交但尚未部署");
     expect(flow).toContain("只有用户明确要求“发布 GitHub 新版本”");
     expect(flow).toContain("正式发布只能基于已经完成体验验收的候选基线");
@@ -124,7 +124,9 @@ describe("documentation structure", () => {
     expect(collaboration).toContain("体验整合 Agent");
     expect(collaboration).toContain("正式发布 Agent");
     expect(agents).toContain("experience integration Agent");
-    expect(agents).toContain("not an unattended Git hook or background queue");
+    expect(agents).toContain("Only an explicit user request starts a batch deployment");
+    expect(agents).not.toContain("The user does not need to repeat a deployment instruction");
+    expect(flow).toContain("开发 Agent 在完成验证、提交与登记待整合状态后即可交付");
     expect(agents).toContain("public release Agent");
     expect(publishing).toContain("本文只用于执行两阶段流程的第二阶段");
     expect(docsIndex).toContain("发布/体验部署与正式发布.md");

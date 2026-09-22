@@ -15,6 +15,7 @@ export class LegacyAdapterRuntime implements RuntimeHost {
   readonly getSessionMessagePage: BridgeAdapter["getSessionMessagePage"];
   readonly getSessionProgress: BridgeAdapter["getSessionProgress"];
   readonly getSessionRunSummary: BridgeAdapter["getSessionRunSummary"];
+  readonly getNewSessionModelState: BridgeAdapter["getNewSessionModelState"];
   readonly getSessionModelState: BridgeAdapter["getSessionModelState"];
   readonly setSessionModel: BridgeAdapter["setSessionModel"];
   readonly setSessionReasoningEffort: BridgeAdapter["setSessionReasoningEffort"];
@@ -28,6 +29,7 @@ export class LegacyAdapterRuntime implements RuntimeHost {
   readonly resolveApprovalRequest: BridgeAdapter["resolveApprovalRequest"];
   readonly resolveTaskApprovals: BridgeAdapter["resolveTaskApprovals"];
   readonly getPendingTaskApprovals: BridgeAdapter["getPendingTaskApprovals"];
+  readonly getPendingTaskUserInput: BridgeAdapter["getPendingTaskUserInput"];
   readonly submitTaskUserInput: BridgeAdapter["submitTaskUserInput"];
   private readonly adapter: BridgeAdapter;
 
@@ -45,6 +47,7 @@ export class LegacyAdapterRuntime implements RuntimeHost {
     this.getSessionMessagePage = adapter.getSessionMessagePage?.bind(adapter);
     this.getSessionProgress = adapter.getSessionProgress?.bind(adapter);
     this.getSessionRunSummary = adapter.getSessionRunSummary?.bind(adapter);
+    this.getNewSessionModelState = adapter.getNewSessionModelState?.bind(adapter);
     this.getSessionModelState = adapter.getSessionModelState?.bind(adapter);
     this.setSessionModel = adapter.setSessionModel?.bind(adapter);
     this.setSessionReasoningEffort = adapter.setSessionReasoningEffort?.bind(adapter);
@@ -58,6 +61,7 @@ export class LegacyAdapterRuntime implements RuntimeHost {
     this.resolveApprovalRequest = adapter.resolveApprovalRequest?.bind(adapter);
     this.resolveTaskApprovals = adapter.resolveTaskApprovals?.bind(adapter);
     this.getPendingTaskApprovals = adapter.getPendingTaskApprovals?.bind(adapter);
+    this.getPendingTaskUserInput = adapter.getPendingTaskUserInput?.bind(adapter);
     this.submitTaskUserInput = adapter.submitTaskUserInput?.bind(adapter);
   }
 

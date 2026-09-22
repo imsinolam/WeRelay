@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import crypto from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 
@@ -32,9 +33,55 @@ describe("relay task links", () => {
     );
 
     expect(codex).toHaveLength(10);
-    expect(codex).toMatch(/^[A-Za-z0-9_-]+$/);
+    // 别名必须是纯字母数字：微信不把以 - 或 _ 结尾的裸链接整体识别为链接，
+    // 实测 https://host/Eg5CwU5rU_ 末尾下划线被排除，点击后无法访问。
+    expect(codex).toMatch(/^[A-Za-z0-9]+$/);
     expect(workbuddy).not.toBe(codex);
     expect(createWeRelayRelayTaskLinkAlias("device-secret", "codex", threadId)).toBe(codex);
+  });
+
+  test("never produces a link alias that WeChat would truncate", () => {
+    // 覆盖大量输入，确保别名不含也不会以 - 或 _ 结尾。
+    for (let index = 0; index < 5_000; index += 1) {
+      const alias = createWeRelayRelayTaskLinkAlias(
+        "device-secret",
+        index % 2 === 0 ? "codex" : "grok",
+        `thread-${index}`,
+      );
+      expect(alias).toHaveLength(10);
+      expect(alias).toMatch(/^[A-Za-z0-9]+$/);
+    }
+  });
+
+  test("accepts a legacy base64url alias so old links keep working", () => {
+    // 改算法前发出的别名可能含 - 或 _，重启后必须仍能从持久化记录解析，
+    // 否则用户微信里已收到的历史链接会失效。
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "werelay-task-links-legacy-"));
+    temporaryDirectories.push(directory);
+    const stateFile = path.join(directory, "task-links.json");
+    const deviceToken = "device-secret";
+    const target = {
+      adapter: "codex",
+      threadId: "0000000a-0000-7000-8000-00000000000b",
+    };
+    // 复现旧算法（base64url）生成的别名，并以旧格式写入持久化文件。
+    const legacyAlias = crypto.createHash("sha256")
+      .update("placeholder")
+      .digest("base64url");
+    const oldAlias = crypto.createHmac("sha256", deviceToken)
+      .update(target.adapter)
+      .update("\0")
+      .update(target.threadId)
+      .digest("base64url")
+      .slice(0, 10);
+    fs.writeFileSync(stateFile, JSON.stringify({
+      version: 1,
+      entries: [{ alias: oldAlias, adapter: target.adapter, threadId: target.threadId, updatedAt: new Date().toISOString() }],
+    }));
+    expect(legacyAlias).toBeTruthy();
+
+    const store = new WeRelayRelayTaskLinkStore({ deviceToken, stateFile });
+    expect(store.resolve(oldAlias)).toEqual(target);
   });
 
   test("persists aliases across relay restarts", () => {
