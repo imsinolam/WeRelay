@@ -24,7 +24,9 @@
     "docs/images/werelay-logo.svg",
     "docs/images/werelay-four-panel-white-paper-boy-v10-handoff-comic.png",
     "docs/images/werelay-relationship-simple.svg",
-    "deploy/"
+    "deploy/",
+    "docs/images/werelay-wordmark.png",
+    "docs/images/werelay-relationship.png"
   ],
   "keywords": [
     "wechat",
@@ -48,7 +50,7 @@
   "bugs": {
     "url": "https://github.com/imsinolam/WeRelay/issues"
   },
-  "homepage": "https://github.com/imsinolam/WeRelay#readme",
+  "homepage": "https://werelay.sinolin.com/",
   "bin": {
     "werelay": "bin/werelay.mjs",
     "werelay-daemon": "bin/werelay-daemon.mjs",
