@@ -33,6 +33,38 @@ describe("public README brand assets", () => {
     expect(svg).toContain('marker-end="url(#arrow)"');
   });
 
+  test("presents a playable video cover and privacy-reviewed native mobile examples", () => {
+    const video = `${website}__website/assets/media/WeRelay-60s-Film.mp4`;
+    expect(readme).toContain(`<a href="${video}"><img src="docs/images/werelay-video-preview.png"`);
+    expect(readme).not.toContain("<video");
+    expect(readme).not.toContain("历史配乐版");
+    expect(readme).toContain("截图沿用当前官网的真实界面模板");
+    expect(readme).toContain("使用模拟任务数据和示例网址");
+    expect(readme).toContain("再看微信审批与跨终端任务看板");
+    expect(readme.indexOf("werelay-video-preview.png")).toBeLessThan(readme.indexOf("## 快速开始"));
+    const safety = fs.readFileSync(path.join(root, "scripts/check-public-safety.mjs"), "utf8");
+    const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
+    for (const file of [
+      "werelay-video-preview.png", "clawbot-task-list.png", "clawbot-approval.png",
+      "werelay-task-conversation.png", "werelay-task-board.png",
+    ]) {
+      const relative = `docs/images/${file}`;
+      const data = fs.readFileSync(path.join(root, relative));
+      expect(readme).toContain(`src="${relative}"`);
+      expect(safety).toContain(`"${relative}"`);
+      expect(pkg.files).toContain(relative);
+      expect(data.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))).toBe(true);
+      expect(data.length).toBeLessThan(800_000);
+      const ratio = data.readUInt32BE(20) / data.readUInt32BE(16);
+      if (file === "werelay-video-preview.png") {
+        expect(ratio).toBeCloseTo(9 / 16, 2);
+      } else {
+        expect(ratio).toBeGreaterThan(2);
+        expect(ratio).toBeLessThan(2.3);
+      }
+    }
+  });
+
   test("relative documentation and image links resolve and package metadata points to the official website", () => {
     const links = [
       ...[...readme.matchAll(/\]\(([^)]+)\)/g)].map(match => match[1]),

@@ -15,6 +15,12 @@
 
 **电脑需保持开机、联网并运行 WeRelay。** 各 Agent 的接入与桌面同步范围见[支持说明](#支持的-agent-与会话一致性)。
 
+## 60 秒，看一次完整接力
+
+<p align="center"><a href="https://werelay.sinolin.com/__website/assets/media/WeRelay-60s-Film.mp4"><img src="docs/images/werelay-video-preview.png" width="840" alt="播放 60 秒 WeRelay 产品演示：电脑上的任务、微信审批，以及手机消息回到原任务。"></a></p>
+
+点击封面播放视频。画面为模拟演示，含预览接入；正式支持范围以本文下方的说明为准。
+
 ## 接力如何发生
 
 <p align="center"><img src="docs/images/werelay-relationship.png" width="100%" alt="电脑上的 Agent 通过 WeRelay 双向连接微信 ClawBot 和 WeRelay 任务台：结果送到手机，指令与审批回到原任务。微信无需服务器，同网任务台直连，外网任务台需要自建服务器。"></p>
@@ -25,6 +31,24 @@
 - **处理审批**：按通知里的选项回复数字，允许或拒绝这次操作。
 
 任务、项目和上下文仍在电脑上的原 Agent 中，手机只是换一个入口。[查看官网演示](https://werelay.sinolin.com/)。
+
+## 手机上会看到什么
+
+**微信 ClawBot**：发一句「任务」找到正在做的事，用「序号：内容」继续安排。<br>
+**WeRelay 任务台**：打开任务链接，阅读完整过程、展开代码，再补充要求。
+
+<p align="center"><img src="docs/images/clawbot-task-list.png" width="360" alt="微信 ClawBot 任务列表：五条模拟任务按最近更新排列，来自 Codex、Claude Code 与 DeepSeek Harness。"> <img src="docs/images/werelay-task-conversation.png" width="360" alt="WeRelay 任务台对话：在同一条官网任务中继续要求深色模式，查看处理过程、代码与回复。"></p>
+
+<details>
+<summary>再看微信审批与跨终端任务看板</summary>
+
+在微信按提示回复数字处理审批；在任务台按状态查看正在处理、待审批和待输入的任务。
+
+<p align="center"><img src="docs/images/clawbot-approval.png" width="360" alt="微信 ClawBot 审批示例：查看 git commit 操作，回复 1 允许本次，原任务继续执行。"> <img src="docs/images/werelay-task-board.png" width="360" alt="WeRelay 任务看板：不同 Agent 的模拟任务按处理中、等待你等状态展示，可搜索并进入原任务。"></p>
+
+</details>
+
+截图沿用当前官网的真实界面模板，使用模拟任务数据和示例网址，不含真实会话或访问凭据。实际界面与可用操作以安装版本及 Agent 接入方式为准。
 
 ## 快速开始
 

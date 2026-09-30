@@ -26,7 +26,12 @@
     "docs/images/werelay-relationship-simple.svg",
     "deploy/",
     "docs/images/werelay-wordmark.png",
-    "docs/images/werelay-relationship.png"
+    "docs/images/werelay-relationship.png",
+    "docs/images/werelay-video-preview.png",
+    "docs/images/clawbot-task-list.png",
+    "docs/images/clawbot-approval.png",
+    "docs/images/werelay-task-conversation.png",
+    "docs/images/werelay-task-board.png"
   ],
   "keywords": [
     "wechat",

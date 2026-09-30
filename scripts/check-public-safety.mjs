@@ -55,6 +55,26 @@ const reviewedRasterAssets = new Map([
     "5925764099a46ed1b3536e03ec8f22b4dbecb6376c343c1705bb5ebcaccc2ed3",
   ],
   [
+    "docs/images/werelay-video-preview.png",
+    "38c06747c64e8b871469e471c99a51086a66fe21415b36220ecc225b1c77789c",
+  ],
+  [
+    "docs/images/clawbot-task-list.png",
+    "1cc9284868631672c80a6a7eb6e5dfd9f5afd8a9fd6552c741eec6573cb1595f",
+  ],
+  [
+    "docs/images/clawbot-approval.png",
+    "7c6d25516af0b72be18ba1cfb73ef18c83303f344e3c9b70c14cdd5a7d189ae9",
+  ],
+  [
+    "docs/images/werelay-task-conversation.png",
+    "d27b772b8ea32f62b0aae4e2267c060b7e99918bf0e58c0656012fd65c2c8754",
+  ],
+  [
+    "docs/images/werelay-task-board.png",
+    "a6669c711d6fa9eefebf8184795a934a9c0f96636cce4677568617ad044510fc",
+  ],
+  [
     "docs/images/werelay-four-panel-white-paper-boy-v10-handoff-comic.png",
     "9b1de869315893a4bfacf8bd3e10818207977f4731ab28861d7b37a8ab6dc4fe",
   ],
