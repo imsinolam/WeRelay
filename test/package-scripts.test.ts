@@ -12,6 +12,17 @@ const packageJson = JSON.parse(
 };
 
 describe("package quality scripts", () => {
+  test("uses Bun dependency updates for the committed Bun lockfile", () => {
+    const config = fs.readFileSync(
+      path.resolve(import.meta.dir, "..", ".github/dependabot.yml"),
+      "utf8",
+    );
+    expect(fs.existsSync(path.resolve(import.meta.dir, "..", "bun.lock"))).toBe(true);
+    expect(config).toContain("package-ecosystem: bun");
+    expect(config).not.toMatch(/package-ecosystem:\s*npm\b/);
+    expect(config).toContain("package-ecosystem: github-actions");
+  });
+
   test("scans complete Git history for committed secrets in CI", () => {
     const workflow = fs.readFileSync(
       path.resolve(import.meta.dir, "..", ".github/workflows/ci.yml"),
