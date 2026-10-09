@@ -40,12 +40,20 @@ const binaryExtensions = new Set([
 const rasterImagePattern = /\.(?:gif|jpe?g|png|webp)$/i;
 const reviewedRasterAssets = new Map([
   [
+    "docs/images/werelay-wordmark.png",
+    "9b838720ce3b7b64108424f0d603e36483e60189039fb9284d9a6236b1ee39a0",
+  ],
+  [
+    "docs/images/werelay-relationship.png",
+    "5925764099a46ed1b3536e03ec8f22b4dbecb6376c343c1705bb5ebcaccc2ed3",
+  ],
+  [
     "docs/images/werelay-four-panel-white-paper-boy-v10-handoff-comic.png",
     "9b1de869315893a4bfacf8bd3e10818207977f4731ab28861d7b37a8ab6dc4fe",
   ],
   [
     "docs/images/werelay-relationship-simple.svg",
-    "ff53f9931a77cf17e8a402c43e20a94876cfe8e3d74f46099b399dce32fac1fc",
+    "8da7b9cbc600d10a95ccfea65ba09fcd3955bce55bfee4a5ce8594a33f9adc75",
   ],
 ]);
 const forbiddenFilePatterns = [

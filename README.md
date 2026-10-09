@@ -7,7 +7,7 @@
   <img alt="License" src="https://img.shields.io/badge/License-AGPL--3.0-7c3aed?style=for-the-badge&labelColor=1c1917">
 </p>
 
-<p align="center"><img src="docs/images/werelay-logo.svg" width="72%" alt="WeRelay"></p>
+<p align="center"><img src="docs/images/werelay-wordmark.png" width="420" alt="WeRelay"></p>
 
 WeRelay 把电脑上的 AI 编程任务延伸到微信 ClawBot、局域网网页和可选的公网网页。对于已经具备“原任务接入”能力的 Agent，远程消息、审批、停止操作和回复都会进入电脑端原来的任务，不会另开隐藏会话。
 
@@ -17,7 +17,7 @@ WeRelay 把电脑上的 AI 编程任务延伸到微信 ClawBot、局域网网页
 
 ## 它们是什么关系
 
-<p align="center"><img src="docs/images/werelay-relationship-simple.svg" width="100%" alt="手机通过微信、局域网网页或公网网页进入 WeRelay，继续电脑 Agent 中的真实任务；任务在电脑，手机只是入口"></p>
+<p align="center"><img src="docs/images/werelay-relationship.png" width="100%" alt="电脑上的 Agent 通过 WeRelay 双向连接微信 ClawBot 和 WeRelay 任务台；通知与结果送到手机，指令与审批回到原任务。同网任务台直连电脑，外网访问需自建 HTTPS Relay。"></p>
 
 | 组成部分 | 负责什么 | 不负责什么 |
 | --- | --- | --- |
@@ -27,7 +27,7 @@ WeRelay 把电脑上的 AI 编程任务延伸到微信 ClawBot、局域网网页
 | 局域网网页 | 手机与电脑同网时直接访问电脑上的 WeRelay | 不能跨互联网直接访问本机 |
 | 公网网页 | 通过自建 Relay 在外网访问同一任务 | Relay 不运行 Agent，也不开放本机通用端口 |
 
-三个远程入口共享同一个 WeRelay Runtime，因此不会彼此产生三份历史。至于 Runtime 与电脑 Agent 是否已经做到“同一条任务、电脑端实时可见”，取决于具体适配器，见下方能力矩阵。电脑离线或 Agent 不可用时，远程端必须明确显示不可用，不能静默创建替代会话。
+微信 ClawBot 和 WeRelay 任务台接入同一个 WeRelay Runtime，不会各自创建一份任务历史。局域网直连和公网 Relay 是同一个任务台的两种连接方式；微信接力不需要自建服务器。至于 Runtime 与电脑 Agent 是否已经做到“同一条任务、电脑端实时可见”，取决于具体适配器，见下方能力矩阵。电脑离线或 Agent 不可用时，远程端必须明确显示不可用，不能静默创建替代会话。
 
 ## 快速开始
 
