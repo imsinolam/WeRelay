@@ -33,6 +33,9 @@ export type DaemonRecentTaskCompletion = {
   title: string;
   completedAt: string;
   turnId?: string;
+  projectName?: string;
+  projectId?: string;
+  cwd?: string;
 };
 
 const MAX_RECENT_TASK_COMPLETIONS = 80;
@@ -96,6 +99,7 @@ export type DaemonWorkspaceState = {
   mobileAccessToken?: string;
   codexWechatReplyMode?: CodexWechatReplyMode;
   restartNoticeSentAt?: string;
+  lastTaskNotificationAt?: string;
   recentTaskCompletions?: DaemonRecentTaskCompletion[];
   adapterMessageActivities?: DaemonAdapterMessageActivity[];
   adapterUsageOrder?: DaemonAdapterUsageOrder;
@@ -172,6 +176,12 @@ function normalizeRecentTaskCompletion(
     title: value.title.trim(),
     completedAt: value.completedAt.trim(),
     ...(typeof value.turnId === "string" ? { turnId: value.turnId.trim() } : {}),
+    ...(typeof value.projectName === "string" && value.projectName.trim()
+      ? { projectName: value.projectName.trim() } : {}),
+    ...(typeof value.projectId === "string" && value.projectId.trim()
+      ? { projectId: value.projectId.trim() } : {}),
+    ...(typeof value.cwd === "string" && value.cwd.trim()
+      ? { cwd: value.cwd.trim() } : {}),
   };
 }
 
@@ -535,6 +545,8 @@ function normalizeDaemonWorkspaceState(
     taskApprovalAutoApprovals,
     codexCompletionDeliveries,
     approvalNotificationDeliveries,
+    ...(typeof value.lastTaskNotificationAt === "string" && Number.isFinite(Date.parse(value.lastTaskNotificationAt))
+      ? { lastTaskNotificationAt: value.lastTaskNotificationAt } : {}),
     updatedAt: value.updatedAt,
   };
 }
@@ -584,6 +596,11 @@ export class DaemonWorkspaceStateStore {
       cwd: normalizeWorkspacePath(cwd),
       updatedAt: new Date(0).toISOString(),
     };
+  }
+
+  setLastTaskNotificationAt(atMs: number): void {
+    this.state.lastTaskNotificationAt = new Date(atMs).toISOString();
+    this.persist();
   }
 
   getPersistedState(): DaemonWorkspaceState | null {
@@ -762,8 +779,19 @@ export class DaemonWorkspaceStateStore {
       throw new Error("最近完成任务记录无效。");
     }
     const taskKey = `${normalized.adapter}\u0000${normalized.threadId}`;
+    const previous = (this.state.recentTaskCompletions ?? []).find(
+      (candidate) => `${candidate.adapter}\u0000${candidate.threadId}` === taskKey,
+    );
+    const withProject = normalized.projectName || normalized.projectId || normalized.cwd
+      ? normalized
+      : {
+          ...normalized,
+          ...(previous?.projectName ? { projectName: previous.projectName } : {}),
+          ...(previous?.projectId ? { projectId: previous.projectId } : {}),
+          ...(previous?.cwd ? { cwd: previous.cwd } : {}),
+        };
     this.state.recentTaskCompletions = [
-      normalized,
+      withProject,
       ...(this.state.recentTaskCompletions ?? []).filter(
         (candidate) => `${candidate.adapter}\u0000${candidate.threadId}` !== taskKey,
       ),

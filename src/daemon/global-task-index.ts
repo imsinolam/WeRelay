@@ -6,7 +6,7 @@ import {
 } from "../bridge/bridge-providers.ts";
 import type { BridgeResumeSessionCandidate } from "../bridge/bridge-types.ts";
 import { resolveTaskProjectName } from "../bridge/task-list-format.ts";
-import { formatTaskListDisplayTitle } from "../bridge/task-list-display.ts";
+import { formatTaskListAdapterLabel, formatTaskListDisplayTitle } from "../bridge/task-list-display.ts";
 
 export type GlobalTaskCandidate = BridgeResumeSessionCandidate & {
   adapter: DaemonAdapterKind;
@@ -144,6 +144,24 @@ export function sortGlobalTaskCandidates(
   });
 }
 
+function keepKnownProjectMetadata(
+  candidate: GlobalTaskCandidate,
+  previous?: GlobalTaskCandidate,
+): GlobalTaskCandidate {
+  // A lightweight catalog or completion fallback can omit project metadata.
+  // Reuse it only for the same adapter/session and only when the new record
+  // has no project identity of its own (a changed cwd must not inherit it).
+  if (!previous || candidate.projectName || candidate.projectId || candidate.cwd) {
+    return candidate;
+  }
+  return {
+    ...candidate,
+    ...(previous.projectName ? { projectName: previous.projectName } : {}),
+    ...(previous.projectId ? { projectId: previous.projectId } : {}),
+    ...(previous.cwd ? { cwd: previous.cwd } : {}),
+  };
+}
+
 export function buildGlobalTaskSnapshot(
   candidates: GlobalTaskCandidate[],
 ): GlobalTaskSnapshot {
@@ -152,7 +170,9 @@ export function buildGlobalTaskSnapshot(
     const key = globalTaskIdentityKey(candidate.adapter, candidate.sessionId);
     const previous = unique.get(key);
     if (!previous || timestampMs(candidate) >= timestampMs(previous)) {
-      unique.set(key, candidate);
+      unique.set(key, keepKnownProjectMetadata(candidate, previous));
+    } else {
+      unique.set(key, keepKnownProjectMetadata(previous, candidate));
     }
   }
   const ordered = sortGlobalTaskCandidates([...unique.values()]);
@@ -182,7 +202,10 @@ export function updateGlobalTaskSnapshot(params: {
     ]),
   );
   const retained = params.current.candidates.map((candidate) => (
-    latestByIdentity.get(globalTaskIdentityKey(candidate.adapter, candidate.sessionId)) ?? candidate
+    keepKnownProjectMetadata(
+      latestByIdentity.get(globalTaskIdentityKey(candidate.adapter, candidate.sessionId)) ?? candidate,
+      candidate,
+    )
   ));
   const retainedKeys = new Set(
     retained.map((candidate) => globalTaskIdentityKey(candidate.adapter, candidate.sessionId)),
@@ -332,11 +355,26 @@ function taskIdentityLabel(
 ): string {
   const parts: string[] = [];
   if (showAdapterLabel) {
-    parts.push(getBridgeProvider(candidate.adapter).label);
+    parts.push(formatTaskListAdapterLabel(candidate.adapter));
   }
   const projectName = resolveTaskProjectName(candidate);
   if (projectName) parts.push(formatGlobalTaskDisplayTitle(projectName, 36));
-  return parts.length > 0 ? `[${parts.join(" · ")}] ` : "";
+  return parts.length > 0 ? `[${parts.join(" · ")}]` : "";
+}
+
+function formatGlobalTaskEntry(
+  candidate: GlobalTaskCandidate,
+  snapshot: GlobalTaskSnapshot,
+  showAdapterLabel: boolean,
+): string {
+  const number = snapshot.numberByIdentity.get(
+    globalTaskIdentityKey(candidate.adapter, candidate.sessionId),
+  );
+  // A leading "1. " becomes an ordered list in WeChat's rich-text renderer:
+  // its following indented line is then interpreted as the next list item.
+  // Keep the enumerator, but let wrapped titles use the full bubble width.
+  // Blank lines between entries distinguish their boundaries on narrow screens.
+  return `${number ?? "?"}、${taskIdentityLabel(candidate, showAdapterLabel)}\n${formatGlobalTaskDisplayTitle(candidate.title)}${runtimeMarker(candidate)}`;
 }
 
 function candidateProjectLabel(candidate: GlobalTaskCandidate): string {
@@ -361,17 +399,11 @@ export function formatGlobalTaskList(params: {
       : "当前没有可继续的任务。\n终端开始运行任务后，会自动出现在这里。";
   }
   const showAdapterLabels = true;
-  return [
-    params.adapter ? `${getBridgeProvider(params.adapter).label} 任务` : "全部任务",
-    ...page.candidates.map((candidate) => {
-      const number = params.snapshot.numberByIdentity.get(
-        globalTaskIdentityKey(candidate.adapter, candidate.sessionId),
-      );
-      return `${number ?? "?"}. ${taskIdentityLabel(candidate, showAdapterLabels)}${formatGlobalTaskDisplayTitle(candidate.title)}${runtimeMarker(candidate)}`;
-    }),
-    "",
-    formatTaskListInstructions(),
-  ].join("\n");
+  const title = params.adapter ? `${formatTaskListAdapterLabel(params.adapter)} 任务` : "全部任务";
+  const entries = page.candidates
+    .map((candidate) => formatGlobalTaskEntry(candidate, params.snapshot, showAdapterLabels))
+    .join("\n\n");
+  return `${title}\n${entries}\n\n${formatTaskListInstructions()}`;
 }
 
 export function formatGlobalTaskSearchResults(params: {
@@ -380,16 +412,10 @@ export function formatGlobalTaskSearchResults(params: {
   target: string;
 }): string {
   const showAdapterLabels = true;
-  return [
-    `搜索“${formatGlobalTaskDisplayTitle(params.target, 48)}”`,
-    ...params.matches.map((candidate) => {
-      const number = params.snapshot.numberByIdentity.get(
-        globalTaskIdentityKey(candidate.adapter, candidate.sessionId),
-      );
-      return `${number ?? "?"}. ${taskIdentityLabel(candidate, showAdapterLabels)}${formatGlobalTaskDisplayTitle(candidate.title)}${runtimeMarker(candidate)}`;
-    }),
-    "回复序号进入；补充关键词可缩小范围",
-  ].join("\n");
+  const entries = params.matches
+    .map((candidate) => formatGlobalTaskEntry(candidate, params.snapshot, showAdapterLabels))
+    .join("\n\n");
+  return `搜索“${formatGlobalTaskDisplayTitle(params.target, 48)}”\n${entries}\n回复序号进入；补充关键词可缩小范围`;
 }
 
 export async function activateGlobalTaskCandidate<T>(

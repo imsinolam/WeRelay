@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
@@ -10,6 +10,9 @@ import type { BridgeTurnInputItem } from "./bridge-types.ts";
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+// Desktop discovery waits up to 10s for registered clients before no-client-found.
+// A 1s snapshot probe must not also truncate that independent read-only request.
+const OWNER_DISCOVERY_TIMEOUT_MS = 12_000;
 const DEFAULT_RECONNECT_DELAY_MS = 500;
 const MAX_FRAME_BYTES = 256 * 1024 * 1024;
 const INITIALIZING_CLIENT_ID = "initializing-client";
@@ -70,6 +73,16 @@ type ThreadStateEntry = {
   state: CodexDesktopConversationState;
 };
 
+class StartTurnOwnerError extends Error {}
+
+function startTurnNotReady(cause?: unknown): Error {
+  return new Error("Codex 桌面任务状态尚未就绪，消息尚未发送，请稍后再试。", { cause });
+}
+
+function startTurnUnconfirmed(cause?: unknown): Error {
+  return new Error("Codex 暂未确认收到这条消息，请先查看任务状态，避免重复发送。", { cause });
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -114,49 +127,192 @@ export async function isCodexDesktopMainProcessRunning(): Promise<boolean> {
   }
 }
 
-function isCodexDesktopTurnActiveStatus(value: unknown): boolean {
-  const normalized = typeof value === "string"
-    ? value.replace(/[_-]/g, "").trim().toLowerCase()
-    : "";
-  return normalized === "inprogress" || normalized === "active" || normalized === "running";
+type ReceiptCandidate = {
+  key: string;
+  turnId?: string;
+  status?: string;
+  inputFingerprint?: string;
+};
+
+type PendingStartReceipt = {
+  revision: number | null;
+  minimumRevision: number;
+  identityBaselineComplete: boolean;
+  submitted: boolean;
+  candidate: ReceiptCandidate | null;
+  knownTurns: Uint8Array;
+  inputFingerprint: string | null;
+  ready: () => void;
+  confirm: (turn: Record<string, unknown>) => void;
+};
+
+type PendingThreadStarts = {
+  receipts: Set<PendingStartReceipt>;
+  desiredRetention: CodexDesktopThreadRetention | null;
+};
+
+function fingerprintCodexDesktopInput(input: unknown): string | null {
+  if (!Array.isArray(input) || input.length === 0) return null;
+  const hash = createHash("sha256");
+  const append = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      hash.update("[");
+      for (const item of value) append(item);
+      hash.update("]");
+    } else if (isRecord(value)) {
+      hash.update("{");
+      for (const key of Object.keys(value).sort()) {
+        if (value[key] === undefined) continue;
+        hash.update(JSON.stringify(key));
+        append(value[key]);
+      }
+      hash.update("}");
+    } else {
+      hash.update(JSON.stringify(value) ?? "null");
+    }
+    hash.update(",");
+  };
+  for (const item of input) {
+    if (!isRecord(item) || typeof item.type !== "string") return null;
+    append(item.type === "text" ? { ...item, text_elements: item.text_elements ?? [] } : item);
+  }
+  return hash.digest("hex");
 }
 
-function extractCodexDesktopActiveTurn(
-  state: CodexDesktopConversationState | null,
-): Record<string, unknown> | null {
-  if (
-    !state ||
-    !isRecord(state.threadRuntimeStatus) ||
-    state.threadRuntimeStatus.type !== "active" ||
-    !isRecord(state.turnHistory) ||
-    !isRecord(state.turnHistory.history) ||
-    !isRecord(state.turnHistory.history.entitiesByKey)
-  ) {
-    return null;
-  }
-  const entries = Object.entries(state.turnHistory.history.entitiesByKey)
-    .filter((entry): entry is [string, Record<string, unknown>] => isRecord(entry[1]));
-  const tailEntries = entries.filter(([key]) => key.startsWith("tail:"));
-  const candidate = [...(tailEntries.length > 0 ? tailEntries : entries)]
-    .reverse()
-    .find(([, entity]) => isCodexDesktopTurnActiveStatus(entity.status));
-  if (!candidate) {
-    return null;
-  }
-  const entity = candidate[1];
-  const turnId = typeof entity.turnId === "string" && entity.turnId.trim()
-    ? entity.turnId.trim()
-    : typeof entity.id === "string" && entity.id.trim()
-      ? entity.id.trim()
-      : "";
-  if (!turnId) {
-    return null;
-  }
+function receiptTurnId(entity: Record<string, unknown>): string | undefined {
+  const id = typeof entity.turnId === "string" ? entity.turnId : entity.id;
+  return typeof id === "string" && id.trim() ? id.trim() : undefined;
+}
+
+function receiptCandidate(key: string, entity: unknown): ReceiptCandidate | null {
+  if (!isRecord(entity)) return null;
   return {
-    ...cloneValue(entity),
-    id: turnId,
-    status: typeof entity.status === "string" ? entity.status : "inProgress",
+    key,
+    turnId: receiptTurnId(entity),
+    status: typeof entity.status === "string" ? entity.status : undefined,
+    inputFingerprint: isRecord(entity.params)
+      ? fingerprintCodexDesktopInput(entity.params.input) ?? undefined
+      : undefined,
   };
+}
+
+function receiptTurnBits(id: string): number[] {
+  const hash = createHash("sha256").update(id).digest();
+  return [0, 4, 8].map((offset) => hash.readUInt32LE(offset) % (2048 * 8));
+}
+
+function rememberReceiptTurn(receipt: PendingStartReceipt, id: string): void {
+  // 固定 2 KiB 的 Bloom filter 只会保守漏确认，不会把已见过的旧 turn 当作新 turn。
+  for (const bit of receiptTurnBits(id)) {
+    receipt.knownTurns[bit >> 3]! |= 1 << (bit & 7);
+  }
+}
+
+function isKnownReceiptTurn(receipt: PendingStartReceipt, id: string): boolean {
+  return receiptTurnBits(id).every((bit) =>
+    (receipt.knownTurns[bit >> 3]! & (1 << (bit & 7))) !== 0);
+}
+
+function sampleReceiptSnapshot(
+  receipt: PendingStartReceipt,
+  state: CodexDesktopConversationState,
+  revision: number,
+): void {
+  if (revision < receipt.minimumRevision ||
+    (receipt.revision !== null && revision <= receipt.revision)) return;
+  const entities = isRecord(state.turnHistory) && isRecord(state.turnHistory.history)
+    ? state.turnHistory.history.entitiesByKey
+    : null;
+  let candidate: ReceiptCandidate | null = null;
+  if (isRecord(entities)) {
+    for (const key in entities) {
+      const entity = entities[key];
+      if (!isRecord(entity)) continue;
+      const id = receiptTurnId(entity);
+      if (!receipt.submitted && id) rememberReceiptTurn(receipt, id);
+      if (!candidate || key.startsWith("tail:") || !candidate.key.startsWith("tail:")) {
+        // 先选最新实体，再摘要输入；不复制历史、items 或其他输出分支。
+        candidate = { key };
+      }
+    }
+    if (candidate) candidate = receiptCandidate(candidate.key, entities[candidate.key]);
+  }
+  receipt.candidate = candidate;
+  receipt.revision = revision;
+  if (!receipt.submitted) receipt.identityBaselineComplete = isRecord(entities);
+  receipt.ready();
+}
+
+function sampleReceiptPatches(
+  receipt: PendingStartReceipt,
+  patches: CodexDesktopStatePatch[],
+  baseRevision: number,
+  revision: number,
+): void {
+  if (receipt.revision !== baseRevision || revision <= baseRevision) return;
+  for (const patch of patches) {
+    const keys = patch.path;
+    if (keys.length <= 3) {
+      let entities: unknown;
+      if (keys.length === 0 && isRecord(patch.value) && isRecord(patch.value.turnHistory)) {
+        const history = patch.value.turnHistory.history;
+        entities = isRecord(history) ? history.entitiesByKey : null;
+      } else if (keys[0] === "turnHistory") {
+        entities = keys.length === 1 && isRecord(patch.value) && isRecord(patch.value.history)
+          ? patch.value.history.entitiesByKey
+          : keys[1] === "history" && keys.length === 2 && isRecord(patch.value)
+            ? patch.value.entitiesByKey
+            : keys[1] === "history" && keys[2] === "entitiesByKey" ? patch.value : null;
+      } else continue;
+      receipt.candidate = null;
+      if (patch.op !== "remove" && isRecord(entities)) {
+        for (const key in entities) {
+          if (!isRecord(entities[key])) continue;
+          if (!receipt.candidate || key.startsWith("tail:") ||
+            !receipt.candidate.key.startsWith("tail:")) receipt.candidate = { key };
+        }
+        if (receipt.candidate) {
+          receipt.candidate = receiptCandidate(receipt.candidate.key, entities[receipt.candidate.key]);
+        }
+      }
+      continue;
+    }
+    if (keys[0] !== "turnHistory" || keys[1] !== "history" ||
+      keys[2] !== "entitiesByKey" || typeof keys[3] !== "string") continue;
+    const key = keys[3];
+    if (keys.length === 4) {
+      if (patch.op !== "remove") receipt.candidate = receiptCandidate(key, patch.value);
+      else if (receipt.candidate?.key === key) receipt.candidate = null;
+      continue;
+    }
+    const isIdentity = keys.length === 5 && (keys[4] === "turnId" || keys[4] === "id");
+    const isStatus = keys.length === 5 && keys[4] === "status";
+    const isInput = keys[4] === "params" && (keys.length === 5 || keys[5] === "input");
+    if (!isIdentity && !isStatus && !isInput) continue;
+    if (!receipt.candidate || receipt.candidate.key !== key) {
+      if (receipt.candidate && isStatus) continue;
+      receipt.candidate = { key };
+    }
+    const candidate = receipt.candidate;
+    const value = patch.op === "remove" ? undefined : patch.value;
+    if (isIdentity) {
+      const turnId = typeof value === "string" && value.trim() ? value.trim() : undefined;
+      if (candidate.turnId && candidate.turnId !== turnId) {
+        candidate.inputFingerprint = undefined;
+        candidate.status = undefined;
+      }
+      candidate.turnId = turnId;
+    } else if (isStatus) {
+      candidate.status = typeof value === "string" ? value : undefined;
+    } else if (isInput) {
+      candidate.inputFingerprint = keys.length === 5
+        ? isRecord(value) ? fingerprintCodexDesktopInput(value.input) ?? undefined : undefined
+        : keys.length === 6 && keys[5] === "input"
+          ? fingerprintCodexDesktopInput(value) ?? undefined
+          : undefined;
+    }
+  }
+  receipt.revision = revision;
 }
 
 function clonePatchContainer(
@@ -327,6 +483,7 @@ export class CodexDesktopIpcClient {
   private threadStates = new Map<string, ThreadStateEntry>();
   private stateListeners = new Set<CodexDesktopStateListener>();
   private connectionListeners = new Set<CodexDesktopConnectionListener>();
+  private pendingThreadStarts = new Map<string, PendingThreadStarts>();
 
   constructor(options: CodexDesktopIpcClientOptions = {}) {
     this.options = {
@@ -449,6 +606,18 @@ export class CodexDesktopIpcClient {
     if (!normalizedThreadId) {
       throw new Error("请选择一个 Codex 任务。");
     }
+    const requestedRetention = options.retention ?? "full";
+    const pending = this.pendingThreadStarts.get(normalizedThreadId);
+    if (pending) {
+      pending.desiredRetention = pending.desiredRetention === "full" ? "full" : requestedRetention;
+    }
+    await this.ensureThreadFollowed(normalizedThreadId, options);
+  }
+
+  private async ensureThreadFollowed(
+    normalizedThreadId: string,
+    options: { force?: boolean; retention?: CodexDesktopThreadRetention } = {},
+  ): Promise<void> {
     await this.connect();
     const requestedRetention = options.retention ?? "full";
     const currentRetention = this.threadRetentionById.get(normalizedThreadId);
@@ -476,6 +645,11 @@ export class CodexDesktopIpcClient {
 
   async unfollowThread(threadId: string): Promise<void> {
     const normalizedThreadId = threadId.trim();
+    const pending = this.pendingThreadStarts.get(normalizedThreadId);
+    if (pending) {
+      pending.desiredRetention = null;
+      return;
+    }
     const wasFollowing = this.followedThreadIds.delete(normalizedThreadId);
     this.threadRetentionById.delete(normalizedThreadId);
     this.threadStates.delete(normalizedThreadId);
@@ -502,88 +676,171 @@ export class CodexDesktopIpcClient {
     } = {},
   ): Promise<Record<string, unknown>> {
     const normalizedThreadId = threadId.trim();
+    if (!normalizedThreadId) throw new Error("请选择一个 Codex 任务。");
     const items = toCodexDesktopInput(input);
-    const previousTurn = extractCodexDesktopActiveTurn(
-      this.getThreadStateView(normalizedThreadId),
-    );
-    const previousTurnId = typeof previousTurn?.id === "string"
-      ? previousTurn.id
-      : null;
-    let removeStateListener = () => {};
-    const stateConfirmation = new Promise<Record<string, unknown>>((resolve) => {
-      removeStateListener = this.onStateChanged((changedThreadId, state) => {
-        if (changedThreadId !== normalizedThreadId) {
-          return;
+    let pending = this.pendingThreadStarts.get(normalizedThreadId);
+    if (!pending) {
+      pending = {
+        receipts: new Set(),
+        desiredRetention: this.threadRetentionById.get(normalizedThreadId) ?? null,
+      };
+      this.pendingThreadStarts.set(normalizedThreadId, pending);
+    }
+    let ready = () => {};
+    const baselineReady = new Promise<void>((resolve) => { ready = resolve; });
+    let confirm = (_turn: Record<string, unknown>) => {};
+    const stateConfirmation = new Promise<Record<string, unknown>>((resolve) => { confirm = resolve; });
+    const receipt: PendingStartReceipt = {
+      revision: null,
+      minimumRevision: this.getThreadRevision(normalizedThreadId) ?? 0,
+      identityBaselineComplete: false,
+      submitted: false,
+      candidate: null,
+      knownTurns: new Uint8Array(2048),
+      inputFingerprint: fingerprintCodexDesktopInput(items),
+      ready,
+      confirm,
+    };
+    pending.receipts.add(receipt);
+    try {
+      try {
+        await this.prepareStartReceipt(normalizedThreadId, receipt, baselineReady);
+      } catch (error) {
+        throw startTurnNotReady(error);
+      }
+      const requestOutcome = this.sendRequest(
+        "thread-follower-start-turn",
+        2,
+        {
+          conversationId: normalizedThreadId,
+          turnStart: {
+            request: {
+              threadId: normalizedThreadId,
+              input: items,
+              ...(options.model?.trim() ? { model: options.model.trim() } : {}),
+              ...(options.effort?.trim() ? { effort: options.effort.trim() } : {}),
+              ...(options.approvalPolicy?.trim()
+                ? { approvalPolicy: options.approvalPolicy.trim() }
+                : {}),
+              ...(options.approvalsReviewer?.trim()
+                ? { approvalsReviewer: options.approvalsReviewer.trim() }
+                : {}),
+              ...(options.sandbox?.trim() ? { sandbox: options.sandbox.trim() } : {}),
+              ...(options.sandboxPolicy
+                ? { sandboxPolicy: structuredClone(options.sandboxPolicy) }
+                : {}),
+            },
+          },
+        },
+        this.options.requestTimeoutMs,
+        () => { receipt.submitted = true; },
+      ).then(
+        (response) => ({ type: "response" as const,
+          result: response.resultType === "success" ? unwrapFollowerResult(response) : undefined }),
+        (error: unknown) => ({ type: "error" as const, error }),
+      );
+      const outcome = await Promise.race([
+        requestOutcome,
+        stateConfirmation.then((turn) => ({ type: "confirmed" as const, turn })),
+      ]);
+      if (outcome.type === "confirmed") {
+        // 输入关联的新 turn（包括快速终态）只确认接收，不代表执行成功。
+        void requestOutcome;
+        return outcome.turn;
+      }
+      if (outcome.type === "error") {
+        if (outcome.error instanceof StartTurnOwnerError) {
+          if (outcome.error.message === "no-client-found") {
+            // Router 明确未投递。本次不重放，下一次必须重新建立基线并发现 owner。
+            this.threadStates.delete(normalizedThreadId);
+            throw startTurnNotReady(outcome.error);
+          }
+          throw outcome.error;
         }
-        const activeTurn = extractCodexDesktopActiveTurn(state);
-        if (
-          !activeTurn ||
-          typeof activeTurn.id !== "string" ||
-          activeTurn.id === previousTurnId
-        ) {
-          return;
+        throw receipt.submitted ? startTurnUnconfirmed(outcome.error) : startTurnNotReady(outcome.error);
+      }
+      const result = outcome.result;
+      if (!isRecord(result) || !isRecord(result.turn) ||
+        typeof result.turn.id !== "string" || !result.turn.id.trim()) {
+        throw startTurnUnconfirmed(new Error("Codex 桌面端没有返回有效任务运行信息。"));
+      }
+      return result.turn;
+    } finally {
+      pending.receipts.delete(receipt);
+      if (pending.receipts.size === 0) {
+        this.pendingThreadStarts.delete(normalizedThreadId);
+        if (pending.desiredRetention === null) {
+          // 本地订阅先清除；断线或 unfollow 写失败不能覆盖提交结果或核心错误。
+          await this.unfollowThread(normalizedThreadId).catch(() => undefined);
+        } else if (pending.desiredRetention === "summary") {
+          this.threadRetentionById.set(normalizedThreadId, "summary");
+          const entry = this.threadStates.get(normalizedThreadId);
+          if (entry) entry.state = compactCodexDesktopConversationState(entry.state);
         }
-        removeStateListener();
-        resolve(activeTurn);
-      });
-    });
-    const requestOutcome = this.sendFollowerRequest(
-      "thread-follower-start-turn",
+      }
+    }
+  }
+
+  private async prepareStartReceipt(
+    threadId: string,
+    receipt: PendingStartReceipt,
+    baselineReady: Promise<void>,
+  ): Promise<void> {
+    const cached = this.threadStates.get(threadId);
+    if (cached && this.threadRetentionById.get(threadId) === "full") {
+      sampleReceiptSnapshot(receipt, cached.state, cached.revision);
+      await this.ensureThreadFollowed(threadId, { retention: "summary" });
+      return;
+    }
+    const waitForBaseline = async (timeoutMs: number): Promise<boolean> => {
+      if (receipt.revision !== null) return true;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        return await Promise.race([
+          baselineReady.then(() => true),
+          new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), timeoutMs); }),
+        ]);
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+    const probeTimeoutMs = Math.max(100, Math.min(1_000, this.options.requestTimeoutMs));
+    await this.ensureThreadFollowed(threadId, { retention: "summary", force: true });
+    if (await waitForBaseline(probeTimeoutMs)) return;
+    try {
+      // 只读发现真实 owner；缺少 snapshot 本身不是打开任务的依据。
+      await this.sendRequest("thread-owner-discovery", 1, {
+        hostId: "local", conversationId: threadId,
+      }, Math.max(100, Math.min(OWNER_DISCOVERY_TIMEOUT_MS, this.options.requestTimeoutMs)));
+    } catch (error) {
+      if (receipt.revision !== null) return;
+      if (!(error instanceof Error) || error.message !== "no-client-found") throw error;
+      await this.openThread(threadId);
+    }
+    if (receipt.revision !== null) return;
+    await this.ensureThreadFollowed(threadId, { retention: "summary", force: true });
+    if (!await waitForBaseline(Math.max(100, Math.min(3_000, this.options.requestTimeoutMs)))) {
+      throw new Error("Codex 桌面任务基线等待超时。");
+    }
+  }
+
+  async updateThreadSettingsForNextTurn(
+    threadId: string,
+    settings: { model?: string; effort?: string },
+  ): Promise<void> {
+    const normalizedThreadId = threadId.trim();
+    if (!normalizedThreadId) throw new Error("请选择一个 Codex 任务。");
+    const result = await this.sendFollowerRequest(
+      "thread-follower-update-thread-settings",
       2,
       {
         conversationId: normalizedThreadId,
-        turnStart: {
-          request: {
-            threadId: normalizedThreadId,
-            input: items,
-            ...(options.model?.trim() ? { model: options.model.trim() } : {}),
-            ...(options.effort?.trim() ? { effort: options.effort.trim() } : {}),
-            ...(options.approvalPolicy?.trim()
-              ? { approvalPolicy: options.approvalPolicy.trim() }
-              : {}),
-            ...(options.approvalsReviewer?.trim()
-              ? { approvalsReviewer: options.approvalsReviewer.trim() }
-              : {}),
-            ...(options.sandbox?.trim() ? { sandbox: options.sandbox.trim() } : {}),
-            ...(options.sandboxPolicy
-              ? { sandboxPolicy: structuredClone(options.sandboxPolicy) }
-              : {}),
-          },
-        },
+        threadSettings: settings,
       },
-    ).then(
-      (result) => ({ type: "response" as const, result }),
-      (error: unknown) => ({ type: "error" as const, error }),
     );
-    const outcome = await Promise.race([
-      requestOutcome,
-      stateConfirmation.then((turn) => ({ type: "confirmed" as const, turn })),
-    ]);
-    removeStateListener();
-    if (outcome.type === "confirmed") {
-      // Codex can publish the new live turn before its desktop owner replies to
-      // the request. Treat that authoritative state as acceptance instead of
-      // showing a false failure and encouraging a duplicate retry.
-      void requestOutcome;
-      return outcome.turn;
+    if (!isRecord(result) || result.applied !== true) {
+      throw new Error("Codex 桌面端未应用模型设置，请重试。");
     }
-    if (outcome.type === "error") {
-      const message = outcome.error instanceof Error
-        ? outcome.error.message
-        : String(outcome.error);
-      if (message.includes("请求超时：thread-follower-start-turn")) {
-        throw new Error(
-          "Codex 暂未确认收到这条消息，请先查看任务状态，避免重复发送。",
-          { cause: outcome.error },
-        );
-      }
-      throw outcome.error;
-    }
-    const result = outcome.result;
-    if (!isRecord(result) || !isRecord(result.turn)) {
-      throw new Error("Codex 桌面端没有返回任务运行信息。");
-    }
-    return result.turn;
   }
 
   async setQueuedFollowUpsState(
@@ -855,6 +1112,7 @@ export class CodexDesktopIpcClient {
     version: number,
     params: Record<string, unknown>,
     timeoutMs: number,
+    onWriting?: () => void,
   ): Promise<Record<string, unknown>> {
     if (method !== "initialize") {
       await this.connect();
@@ -884,7 +1142,9 @@ export class CodexDesktopIpcClient {
     });
 
     try {
-      socket.write(encodeCodexDesktopIpcMessage(message));
+      const frame = encodeCodexDesktopIpcMessage(message);
+      onWriting?.();
+      socket.write(frame);
     } catch (error) {
       const pending = this.pendingRequests.get(requestId);
       if (pending) {
@@ -1019,11 +1279,13 @@ export class CodexDesktopIpcClient {
     this.pendingRequests.delete(message.requestId);
     clearTimeout(pending.timer);
     if (message.resultType === "error") {
-      pending.reject(new Error(
+      const errorMessage = typeof message.error === "string"
+        ? message.error
+        : `Codex 桌面端请求失败：${pending.method}`;
+      pending.reject(pending.method === "thread-follower-start-turn" &&
         typeof message.error === "string"
-          ? message.error
-          : `Codex 桌面端请求失败：${pending.method}`,
-      ));
+        ? new StartTurnOwnerError(errorMessage)
+        : new Error(errorMessage));
       return;
     }
     pending.resolve(message);
@@ -1037,7 +1299,7 @@ export class CodexDesktopIpcClient {
       ? message.params.conversationId
       : null;
     const change = message.params.change;
-    if (!threadId || !isRecord(change)) {
+    if (!threadId || !isRecord(change) || !this.followedThreadIds.has(threadId)) {
       return;
     }
 
@@ -1046,7 +1308,14 @@ export class CodexDesktopIpcClient {
       typeof change.revision === "number" &&
       isRecord(change.conversationState)
     ) {
-      const previousState = this.threadStates.get(threadId)?.state ?? null;
+      this.sampleStartReceipts(threadId, {
+        type: "snapshot",
+        revision: change.revision,
+        conversationState: change.conversationState,
+      });
+      const previousEntry = this.threadStates.get(threadId);
+      if (previousEntry && change.revision < previousEntry.revision) return;
+      const previousState = previousEntry?.state ?? null;
       const retention = this.threadRetentionById.get(threadId) ?? "full";
       const state = retention === "summary"
         ? compactCodexDesktopConversationState(change.conversationState)
@@ -1083,6 +1352,12 @@ export class CodexDesktopIpcClient {
         return patch.op === "add" || patch.op === "replace" || patch.op === "remove";
       });
       const retention = this.threadRetentionById.get(threadId) ?? "full";
+      this.sampleStartReceipts(threadId, {
+        type: "patches",
+        baseRevision: change.baseRevision,
+        revision: change.revision,
+        patches,
+      });
       const retainedPatches = retention === "summary"
         ? patches.filter(isCodexDesktopSummaryPatch)
         : patches;
@@ -1098,6 +1373,29 @@ export class CodexDesktopIpcClient {
         revision: change.revision,
         patches: retainedPatches,
       });
+    }
+  }
+
+  private sampleStartReceipts(threadId: string, change: CodexDesktopStateChange): void {
+    const pending = this.pendingThreadStarts.get(threadId);
+    if (!pending) return;
+    for (const receipt of pending.receipts) {
+      if (change.type === "snapshot") {
+        sampleReceiptSnapshot(receipt, change.conversationState, change.revision);
+      } else {
+        sampleReceiptPatches(receipt, change.patches, change.baseRevision, change.revision);
+      }
+      const candidate = receipt.candidate;
+      if (!candidate?.turnId) continue;
+      if (!receipt.submitted) {
+        rememberReceiptTurn(receipt, candidate.turnId);
+      } else if (receipt.identityBaselineComplete && !isKnownReceiptTurn(receipt, candidate.turnId)) {
+        if (receipt.inputFingerprint && candidate.inputFingerprint === receipt.inputFingerprint) {
+          receipt.confirm({ id: candidate.turnId, status: candidate.status ?? "unknown" });
+        }
+        // 不完整 metadata 仍可由后续 patch 补齐；完整的其他输入不能稍后冒充本次提交。
+        if (candidate.inputFingerprint) rememberReceiptTurn(receipt, candidate.turnId);
+      }
     }
   }
 

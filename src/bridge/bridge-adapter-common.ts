@@ -89,6 +89,8 @@ export function getLocalCompanionCommandName(kind: BridgeAdapterKind): string {
       return "werelay-codebuddy";
     case "reasonix":
       return "werelay-reasonix";
+    case "pi":
+      return "werelay-pi";
     case "opencode":
       return "werelay-opencode";
     default:

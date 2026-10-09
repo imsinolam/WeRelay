@@ -228,6 +228,16 @@ export class ApprovalNotificationDeliveryQueue {
     return { status: "queued", delivery: clonePending(delivery) };
   }
 
+  reserveSummary(keys: string[]): boolean {
+    if (keys.some((key) => !this.pending.has(key) || this.inFlight.has(key))) return false;
+    for (const key of keys) this.inFlight.add(key);
+    return true;
+  }
+
+  releaseSummary(keys: string[]): void {
+    for (const key of keys) this.inFlight.delete(key);
+  }
+
   async deliver(
     key: string,
     send: (delivery: PendingApprovalNotificationDelivery) => Promise<boolean>,
@@ -257,6 +267,16 @@ export class ApprovalNotificationDeliveryQueue {
     } finally {
       this.inFlight.delete(key);
     }
+  }
+
+  acknowledgeSummary(keys: string[]): void {
+    for (const key of keys) {
+      if (!this.pending.has(key) || this.inFlight.has(key)) continue;
+      this.pending.delete(key);
+      this.delivered.set(key, { key, deliveredAt: new Date(this.now()).toISOString() });
+    }
+    this.trimDelivered();
+    this.persistState();
   }
 
   cancel(key: string): boolean {

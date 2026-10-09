@@ -773,17 +773,16 @@ describe("mobile boot connection states", () => {
     expect(CODEX_MOBILE_JS).not.toContain("actions.hidden = optimistic");
   });
 
-  test("lands on the newest message when entering a task", () => {
-    // 进入任务时先读历史页、再续读实时页。续读那次也必须强制停在底部：
-    // 若传 forceBottom=false，renderMessages 会读取此刻尚未滚动到位的
-    // previousScrollTop（新任务时为 0）并写回，用户就被留在最顶部。
+  test("lands on the newest user message when entering a task", () => {
+    // 历史页与实时页都保持同一个入口锚点，而不是按旧 scrollTop 或强制到底部。
     const selectTask = CODEX_MOBILE_JS.slice(
       CODEX_MOBILE_JS.indexOf("  async function selectTask"),
     );
+    expect(selectTask).toContain("beginConversationEntryFocus(state.currentAdapter, threadId)");
     expect(selectTask).toContain("await loadMessages(true, true, false);");
-    expect(selectTask).toContain("void loadMessages(true, false, false);");
-    // 续读那次不能退化成不强制到底部的调用。
-    expect(selectTask).not.toContain("void loadMessages(false, false, false);");
+    expect(selectTask).toContain("void loadMessages(false, false, false)");
+    expect(selectTask).toContain("refreshMessagesIfChanged(false, true)");
+    expect(selectTask).not.toContain("void loadMessages(true, false, false);");
   });
 });
 
@@ -1192,6 +1191,106 @@ function createAuthStore(password?: string): CodexMobileAuthStore {
   return store;
 }
 
+test("mobile composer accepts a message while the desktop is switching models", () => {
+  const start = CODEX_MOBILE_JS.indexOf('  composerForm.addEventListener("submit"');
+  const end = CODEX_MOBILE_JS.indexOf('  authForm.addEventListener("submit"', start);
+  const submit = CODEX_MOBILE_JS.slice(start, end);
+  expect(submit).not.toContain("if (state.modelChanging || state.reasoningChanging)");
+  expect(submit).toContain("pending.requiredTaskSettings =");
+  expect(submit.indexOf("pending.requiredTaskSettings ="))
+    .toBeLessThan(submit.indexOf("composerInput.value = \"\""));
+  const sendStart = CODEX_MOBILE_JS.indexOf("  async function submitPendingMessage(pending)");
+  const sendEnd = CODEX_MOBILE_JS.indexOf("  function beginOptimisticRunIfNeeded", sendStart);
+  const send = CODEX_MOBILE_JS.slice(sendStart, sendEnd);
+  expect(send.indexOf("await confirmPendingTaskSettings("))
+    .toBeLessThan(send.indexOf('"/messages"'));
+});
+
+test("pending message waits for its original model choice and never sends after a rejected switch", async () => {
+  const start = CODEX_MOBILE_JS.indexOf("  async function confirmPendingTaskSettings(");
+  const end = CODEX_MOBILE_JS.indexOf("  async function submitPendingMessage(pending)", start);
+  expect(start).toBeGreaterThan(-1);
+  expect(end).toBeGreaterThan(start);
+  let resolveSwitch!: (value: unknown) => void;
+  const switchPromise = new Promise((resolve) => {
+    resolveSwitch = resolve;
+  });
+  const calls: string[] = [];
+  let ownerModel = "gpt-6-luna";
+  const state = {
+    taskSettingSync: {
+      adapter: "codex", threadId: "task-a",
+      model: "gpt-6-sol", promise: switchPromise,
+    },
+  };
+  const confirm = new Function("state", "api", "adapterApiPath", "persistMobileCacheNow",
+    `${CODEX_MOBILE_JS.slice(start, end)}\nreturn confirmPendingTaskSettings;`)(
+      state,
+      async (path: string) => { calls.push(path); return { currentModel: ownerModel }; },
+      (path: string) => path,
+      () => {},
+    ) as (pending: Record<string, unknown>, adapter: string, threadId: string) => Promise<void>;
+  const pending: Record<string, unknown> = { requiredTaskSettings: { model: "gpt-6-sol" } };
+  let settled = false;
+  const wait = confirm(pending, "codex", "task-a").then(() => { settled = true; });
+  await Promise.resolve();
+  expect(settled).toBe(false);
+  expect(calls).toEqual([]);
+  resolveSwitch({ currentModel: "gpt-6-sol" });
+  await wait;
+  expect(pending.requiredTaskSettings).toBeUndefined();
+  const failed: Record<string, unknown> = { requiredTaskSettings: { model: "gpt-6-sol" } };
+  state.taskSettingSync.promise = Promise.reject(new Error("桌面端拒绝切换"));
+  await expect(confirm(failed, "codex", "task-a")).rejects.toThrow("消息未发送");
+  expect(failed.requiredTaskSettings).toEqual({ model: "gpt-6-sol" });
+  ownerModel = "gpt-6-sol";
+  const lostReply: Record<string, unknown> = { requiredTaskSettings: { model: "gpt-6-sol" } };
+  await confirm(lostReply, "codex", "task-a");
+  expect(lostReply.requiredTaskSettings).toBeUndefined();
+});
+
+test("restored pending messages recheck the chosen model before delivery", async () => {
+  const start = CODEX_MOBILE_JS.indexOf("  async function confirmPendingTaskSettings(");
+  const end = CODEX_MOBILE_JS.indexOf("  async function submitPendingMessage(pending)", start);
+  const calls: Array<{ path: string; method: string }> = [];
+  let currentModel = "gpt-6-luna";
+  const confirm = new Function("state", "api", "adapterApiPath", "persistMobileCacheNow",
+    `${CODEX_MOBILE_JS.slice(start, end)}\nreturn confirmPendingTaskSettings;`)(
+      { taskSettingSync: null },
+      async (path: string, options?: { method?: string }) => {
+        calls.push({ path, method: options?.method || "GET" });
+        if (options?.method === "PUT") currentModel = "gpt-6-sol";
+        return { currentModel };
+      },
+      (path: string, adapter: string) => `${adapter}${path}`,
+      () => {},
+    ) as (pending: Record<string, unknown>, adapter: string, threadId: string) => Promise<void>;
+  const pending: Record<string, unknown> = { requiredTaskSettings: { model: "gpt-6-sol" } };
+  await confirm(pending, "codex", "task-a");
+  expect(calls).toEqual([
+    { path: "codex/api/tasks/task-a/model", method: "GET" },
+    { path: "codex/api/tasks/task-a/model", method: "PUT" },
+  ]);
+  expect(pending.requiredTaskSettings).toBeUndefined();
+  calls.length = 0;
+  await confirm({ requiredTaskSettings: { model: "gpt-6-sol" } }, "codex", "task-a");
+  expect(calls).toEqual([{ path: "codex/api/tasks/task-a/model", method: "GET" }]);
+});
+
+test("mobile model and reasoning requests cannot overtake each other", () => {
+  const modelStart = CODEX_MOBILE_JS.indexOf("  async function selectCurrentTaskModel(model)");
+  const reasoningStart = CODEX_MOBILE_JS.indexOf("  async function selectCurrentTaskReasoningEffort(reasoningEffort)");
+  const modelSelection = CODEX_MOBILE_JS.slice(modelStart, reasoningStart);
+  const reasoningSelection = CODEX_MOBILE_JS.slice(
+    reasoningStart,
+    CODEX_MOBILE_JS.indexOf("  function resetTaskStateForAdapterSwitch()", reasoningStart),
+  );
+  expect(modelSelection.indexOf("if (state.reasoningChanging)"))
+    .toBeLessThan(modelSelection.indexOf("method: \"PUT\""));
+  expect(reasoningSelection.indexOf("if (state.modelChanging)"))
+    .toBeLessThan(reasoningSelection.indexOf("method: \"PUT\""));
+});
+
 function loadMobileFetchJson(
   fetchImpl: (...args: unknown[]) => Promise<unknown>,
 ): (path: string, options?: Record<string, unknown>) => Promise<unknown> {
@@ -1481,8 +1580,8 @@ function loadMobileOptimisticProgressFilter(): (
 }
 
 function loadMobileEffectiveRunSummary(
-  localRunSummary: { turnId?: string; status: string } | null,
-  runSummary: { turnId?: string; status: string } | null,
+  localRunSummary: { turnId?: string; status: string; startedAtMs?: number } | null,
+  runSummary: { turnId?: string; status: string; completedAtMs?: number } | null,
 ): { turnId?: string; status: string } | null {
   const start = CODEX_MOBILE_JS.indexOf("  function effectiveRunSummary");
   const end = CODEX_MOBILE_JS.indexOf("\n  function isTaskActivelyRunning", start);
@@ -1733,6 +1832,7 @@ function loadMobileConversationSnapshotRuntime(params: {
     "renderMessages",
     "requestAnimationFrame",
     "scrollToLatest",
+    "scrollToLatestUserMessage",
     "updateUserMessageNavigation",
     "isNearBottom",
     "MAX_COMPOSER_DRAFTS",
@@ -1750,6 +1850,7 @@ return { restoreConversationSnapshot, setBoundedConversationValue, conversationS
     () => renderEvents.push("messages"),
     (callback: () => void) => callback(),
     () => renderEvents.push("latest"),
+    () => renderEvents.push("latestUser"),
     () => renderEvents.push("navigation"),
     () => true,
     40,
@@ -2221,6 +2322,103 @@ function loadMobileUserMessageNavigator(): (
   >;
 }
 
+function loadMobileEntryScrollHelper(
+  offsets: number[],
+  inset = 72,
+): { focus: () => void; messagesEl: { scrollTop: number } & Record<string, unknown>; fallback: string[] } {
+  const start = CODEX_MOBILE_JS.indexOf("  function scrollToLatestUserMessage(");
+  const end = CODEX_MOBILE_JS.indexOf("\n  function resolveUserMessageNavigation", start);
+  if (start < 0 || end < 0) throw new Error("Mobile latest-user entry scroll helper not found");
+  const source = CODEX_MOBILE_JS.slice(start, end);
+  const fallback: string[] = [];
+  const messagesEl = {
+    scrollTop: 0,
+    querySelectorAll: () => offsets.map((offsetTop) => ({ offsetTop })),
+  };
+  const focus = new Function(
+    "messagesEl", "scrollToLatest", "userMessageNavigationTargetInset",
+    `${source}\nreturn scrollToLatestUserMessage;`,
+  )(messagesEl, () => fallback.push("bottom"), () => inset) as () => void;
+  return { focus, messagesEl, fallback };
+}
+
+function loadMobileEntryFocusLifecycle() {
+  const start = CODEX_MOBILE_JS.indexOf("  function beginConversationEntryFocus(");
+  const end = CODEX_MOBILE_JS.indexOf("\n  function resolveUserMessageNavigation", start);
+  if (start < 0 || end < 0) throw new Error("Mobile entry focus lifecycle not found");
+  const callbacks: Array<() => void> = [];
+  const movements: string[] = [];
+  const state = { currentAdapter: "codex", currentThreadId: "a", entryFocusKey: "", entryFocusGeneration: 0 };
+  const runtime = new Function(
+    "state", "conversationStateKey", "requestAnimationFrame", "scrollToLatestUserMessage", "updateUserMessageNavigation",
+    `${CODEX_MOBILE_JS.slice(start, end)}
+return { beginConversationEntryFocus, cancelConversationEntryFocus, finishConversationEntryFocus };`,
+  )(
+    state,
+    (adapter: string, threadId: string) => `${adapter}\u0000${threadId}`,
+    (callback: () => void) => callbacks.push(callback),
+    () => movements.push(state.currentThreadId),
+    () => {},
+  ) as {
+    beginConversationEntryFocus: (adapter: string, threadId: string) => number;
+    cancelConversationEntryFocus: () => void;
+    finishConversationEntryFocus: (generation: number) => void;
+  };
+  return { state, callbacks, movements, ...runtime };
+}
+
+describe("mobile conversation entry scroll", () => {
+  test("positions at the last user message, not the saved top or the end of the answer", () => {
+    const runtime = loadMobileEntryScrollHelper([40, 600, 1800], 72);
+    runtime.focus();
+    expect(runtime.messagesEl.scrollTop).toBe(1728);
+    expect(runtime.fallback).toEqual([]);
+  });
+
+  test("falls back to the newest answer if the loaded page has no user message", () => {
+    const runtime = loadMobileEntryScrollHelper([]);
+    runtime.focus();
+    expect(runtime.fallback).toEqual(["bottom"]);
+  });
+
+  test("entering a cached task ignores its saved scroll position and background refresh cannot reset it", () => {
+    const snapshotStart = CODEX_MOBILE_JS.indexOf("  function restoreConversationSnapshot(");
+    const snapshotEnd = CODEX_MOBILE_JS.indexOf("\n  function readSetupToken", snapshotStart);
+    const snapshotSource = CODEX_MOBILE_JS.slice(snapshotStart, snapshotEnd);
+    const renderStart = CODEX_MOBILE_JS.indexOf("  function renderMessages(forceBottom)");
+    const renderEnd = CODEX_MOBILE_JS.indexOf("\n  function ", renderStart + 1);
+    const renderSource = CODEX_MOBILE_JS.slice(renderStart, renderEnd);
+    expect(snapshotSource).toContain("renderMessages(false)");
+    expect(snapshotSource).not.toContain("snapshot.nearBottom");
+    expect(snapshotSource).not.toContain("snapshot.scrollTop");
+    expect(renderSource.indexOf("scrollToLatestUserMessage()"))
+      .toBeLessThan(renderSource.indexOf("requestAnimationFrame(function ()"));
+    expect(CODEX_MOBILE_JS).not.toContain("restoredCacheScrollPosition()");
+    expect(CODEX_MOBILE_JS).toContain("state.entryFocusKey");
+  });
+
+  test("late refresh of task A cannot reposition the newly selected task B", () => {
+    const runtime = loadMobileEntryFocusLifecycle();
+    const a = runtime.beginConversationEntryFocus("codex", "a");
+    runtime.finishConversationEntryFocus(a);
+    runtime.state.currentThreadId = "b";
+    const b = runtime.beginConversationEntryFocus("codex", "b");
+    runtime.finishConversationEntryFocus(b);
+    runtime.callbacks.forEach((callback) => callback());
+    expect(runtime.movements).toEqual(["b"]);
+    expect(runtime.state.entryFocusKey).toBe("");
+  });
+
+  test("manual scrolling cancels any delayed initial reposition", () => {
+    const runtime = loadMobileEntryFocusLifecycle();
+    const generation = runtime.beginConversationEntryFocus("codex", "a");
+    runtime.finishConversationEntryFocus(generation);
+    runtime.cancelConversationEntryFocus();
+    runtime.callbacks.forEach((callback) => callback());
+    expect(runtime.movements).toEqual([]);
+  });
+});
+
 describe("Codex mobile conversation cache", () => {
   test("isolates snapshots by adapter and task id", () => {
     const { conversationStateKey } = loadMobileConversationCacheHelpers();
@@ -2358,7 +2556,9 @@ describe("Codex mobile conversation cache", () => {
 
   test("restores cached messages and the task draft synchronously before live refresh", () => {
     const state: Record<string, any> = {
+      currentAdapter: "codex",
       currentThreadId: "task-a",
+      entryFocusKey: "codex\u0000task-a",
       conversationSnapshots: Object.create(null),
       conversationSnapshotOrder: [],
       composerDrafts: Object.create(null),
@@ -2416,9 +2616,7 @@ describe("Codex mobile conversation cache", () => {
       { fileName: "草稿图片.png", previewUrl: "data:image/png;base64,AA==" },
     ]);
     expect(runtime.renderEvents).toContain("messages");
-    expect(runtime.renderEvents.indexOf("messages")).toBeLessThan(
-      runtime.renderEvents.indexOf("navigation"),
-    );
+    expect(runtime.renderEvents).not.toContain("latestUser");
   });
 });
 
@@ -3601,6 +3799,47 @@ describe("Codex mobile web rendering", () => {
       { turnId: "turn-current", status: "running" },
       { turnId: "turn-current", status: "unknown" },
     )).toEqual({ turnId: "turn-current", status: "running" });
+  });
+
+  test("settles a Pi optimistic run with a later owner completion lacking a turn id", () => {
+    expect(loadMobileEffectiveRunSummary(
+      { status: "running", startedAtMs: 1_000 },
+      { status: "completed", completedAtMs: 2_000 },
+    )).toEqual({ status: "completed", completedAtMs: 2_000 });
+    expect(loadMobileEffectiveRunSummary(
+      { status: "running", startedAtMs: 3_000 },
+      { status: "completed", completedAtMs: 2_000 },
+    )).toMatchObject({ status: "running" });
+  });
+
+  test("settles an older Pi owner after the matching native user and final reply appear", () => {
+    const state = {
+      currentAdapter: "pi",
+      localRunSummary: { clientId: "client-1", requestText: "检查模型", status: "syncing", startedAtMs: 1_000 },
+      runSummary: null,
+      optimisticProgressTurnId: "",
+      stopRequestedThreadId: "",
+    };
+    const update = loadMobileRunSummaryUpdater({ state });
+    update(null, { status: "idle" }, [
+      { role: "user", text: "检查模型", createdAtMs: 1_100 },
+      { role: "assistant", phase: "final_answer", createdAtMs: 2_000 },
+    ] as Array<{ role: string; turnId?: string }>);
+    expect(state.localRunSummary).toBeNull();
+    expect(state.runSummary).toMatchObject({ status: "completed", completedAtMs: 2_000 });
+  });
+
+  test("ends stale progress animation after the same run is completed", () => {
+    const start = CODEX_MOBILE_JS.indexOf("  function settleVisibleProgressItem");
+    const end = CODEX_MOBILE_JS.indexOf("\n  function renderProgressList", start);
+    const settle = new Function(`${CODEX_MOBILE_JS.slice(start, end)}\nreturn settleVisibleProgressItem;`)();
+    const progress = { status: "running", turnId: "turn-1", createdAtMs: 1_000, text: "正在规划" };
+    expect(settle(progress, { status: "completed", completedAtMs: 2_000 }, [])).toMatchObject({ status: "completed" });
+    expect(settle(progress, { status: "running", startedAtMs: 900 }, [])).toMatchObject({ status: "running" });
+    expect(settle(progress, { status: "completed", turnId: "turn-old", completedAtMs: 900 }, [])).toMatchObject({ status: "running" });
+    expect(settle(progress, { status: "completed", turnId: "turn-old", completedAtMs: 2_000 }, [])).toMatchObject({ status: "running" });
+    expect(settle(progress, null, [{ role: "assistant", phase: "final_answer", turnId: "turn-1", createdAtMs: 2_000 }]))
+      .toMatchObject({ status: "completed" });
   });
 
   test("never labels an unknown runtime state as completed", () => {
@@ -5112,7 +5351,11 @@ describe("Codex mobile server", () => {
       expect(html).not.toContain('class="brand-title"');
       expect(html).toContain('id="workspace-switcher"');
       expect(html).toContain('class="workspace-product brand-logo"');
-      expect(html).toContain('class="workspace-divider">·</span>');
+      expect(html.indexOf('id="active-adapter-label"')).toBeLessThan(html.indexOf('class="workspace-product brand-logo"'));
+      expect(html).toContain('--brand-logo-width: 64px');
+      expect(CODEX_MOBILE_CSS).toContain('.workspace-adapter {');
+      expect(CODEX_MOBILE_CSS).toContain('font-size: 19px; font-weight: 700;');
+      expect(html).toContain('class="workspace-divider" aria-hidden="true">·</span>');
       expect(html).toContain('id="adapter-menu"');
       expect(html).not.toContain('id="composer-status"');
       expect(html).toContain('id="composer-queue"');
@@ -5146,7 +5389,8 @@ describe("Codex mobile server", () => {
       expect(html).toContain('id="composer-image-input"');
       expect(html).toContain('id="composer-model-button"');
       expect(html).toContain('id="composer-model-menu"');
-      expect(html).toContain('<div class="composer-beam" data-beam="composer" data-active aria-hidden="true"><span data-beam-bloom></span></div>');
+      expect(html).toContain('<div class="composer-beam" data-beam="composer" aria-hidden="true"><span data-beam-bloom></span></div>');
+      expect(CODEX_MOBILE_JS).toContain('composerBeam.toggleAttribute(');
       expect(CODEX_MOBILE_CSS).toContain('[data-beam="composer"] {\n  position: relative;\n  border-radius: 28px;\n  overflow: hidden;');
       expect(CODEX_MOBILE_CSS).toContain("mask-composite: intersect, add;");
       expect(CODEX_MOBILE_CSS).toContain("transparent 28px, transparent calc(100% - 28px)");
@@ -5355,8 +5599,8 @@ describe("Codex mobile server", () => {
       expect(js).toContain("saveCurrentConversationSnapshot");
       expect(js).toContain("restoreConversationSnapshot");
       expect(js).toContain("if (restored) {");
-      // 进入任务时续读也要强制停在底部，否则用户被留在最顶部。
-      expect(js).toContain("void loadMessages(true, false, false);");
+      // 进入任务时用最新用户消息作锚点，续读不能强制停到答案末尾。
+      expect(js).toContain("void loadMessages(false, false, false)");
       expect(js).toContain("requestedThreadId !== state.currentThreadId");
       expect(js).toContain("pending.threadId");
       expect(js).toContain("composerRevision");
@@ -5388,7 +5632,7 @@ describe("Codex mobile server", () => {
       expect(js).toContain('state.nextTaskRefreshAtMs');
       expect(js).not.toContain('state.historySource === "openagentlog"');
       expect(js).toContain('forceFullPage ? MESSAGE_PAGE_SIZE : LIVE_MESSAGE_PAGE_SIZE');
-      expect(js).toContain('void loadMessages(true, false, false);');
+      expect(js).toContain('void loadMessages(false, false, false)');
       expect(js).toContain('task.status === "running" || task.status === "approval" || task.status === "input"');
       expect(js).toContain("\\u6B63\\u5728\\u5904\\u7406");
       expect(js).not.toContain("codexMobileKey");
@@ -6595,6 +6839,8 @@ function loadMobilePersistentCacheRuntime(params: {
     "updateHeader",
     "requestAnimationFrame",
     "scrollToLatest",
+    "scrollToLatestUserMessage",
+    "beginConversationEntryFocus",
     "updateUserMessageNavigation",
     "isNearBottom",
     "setTimeout",
@@ -6628,6 +6874,10 @@ return {
     () => renderEvents.push("header"),
     (callback: () => void) => callback(),
     () => renderEvents.push("latest"),
+    () => renderEvents.push("latestUser"),
+    (adapter: string, threadId: string) => {
+      params.state.entryFocusKey = `${adapter}\u0000${threadId}`;
+    },
     () => renderEvents.push("navigation"),
     () => true,
     (callback: () => void) => {
@@ -6809,4 +7059,44 @@ describe("mobile question answers", () => {
       expect(sends).toBe(0);
     } finally { await server.close(); }
   });
+});
+
+test("unchanged task polling preserves the open reasoning menu's clickable nodes", () => {
+  const start = CODEX_MOBILE_JS.indexOf("  function renderSessionControl()");
+  const end = CODEX_MOBILE_JS.indexOf("  function reasoningEffortLabel(value)", start);
+  const model = { currentReasoningEffort: "medium", reasoningEffortOptions: [{ id: "medium", label: "中" }, { id: "high", label: "高" }], canChangeReasoningEffort: true, loadedAtMs: 1 };
+  const nodes: unknown[] = [];
+  const menu: Record<string, unknown> = {};
+  Object.defineProperty(menu, "innerHTML", { set: () => { nodes.length = 0; } });
+  const button = { classList: { toggle: () => {} }, setAttribute: () => {} };
+  const dependencies: Record<string, unknown> = {
+    state: { currentThreadId: "original", sessionMenuOpen: true },
+    currentTaskModelState: () => model, currentTaskPermissionState: () => ({ options: [], canChange: false }),
+    currentTaskModelKey: () => "pi:original", composerSessionControl: {}, composerSessionButton: button,
+    composerSessionLabelEl: {}, composerSessionMenu: menu, closeSessionMenu: () => {}, syncComposerSettingsVisibility: () => {},
+    currentTask: () => ({}), taskNeedsCreation: () => false, draftSettingsSubmitted: () => false,
+    composerSessionLabel: (reasoning: string, permission: string) => `${reasoning} · ${permission}`,
+    reasoningEffortLabel: (id: string) => id, permissionLabel: (id: string) => id,
+    appendSessionMenuHeading: (label: string) => { nodes.push({ label }); },
+    appendSessionMenuOption: (option: unknown) => { nodes.push({ option }); },
+  };
+  const render = new Function(...Object.keys(dependencies), `${CODEX_MOBILE_JS.slice(start, end)}\nreturn renderSessionControl;`)(...Object.values(dependencies)) as () => void;
+  render(); const highNode = nodes[2];
+  model.loadedAtMs = 2; render(); expect(nodes[2]).toBe(highNode);
+  model.currentReasoningEffort = "high"; render(); expect(nodes[2]).not.toBe(highNode);
+  expect(menu.hidden).toBe(false);
+});
+
+test("background model refresh cannot steal an in-flight model or reasoning selection", async () => {
+  const start = CODEX_MOBILE_JS.indexOf("  async function loadCurrentTaskModel(force)");
+  const end = CODEX_MOBILE_JS.indexOf("  async function loadCurrentTaskPermission(force)", start);
+  for (const flag of ["modelChanging", "reasoningChanging"]) {
+    const cached = { currentModel: "one", loadedAtMs: 0 };
+    const state = { currentThreadId: "original", modelRequestId: 7, taskModels: { original: cached }, [flag]: true };
+    let calls = 0;
+    const load = new Function("state", "renderModelControl", "currentTaskModelKey", "api",
+      `${CODEX_MOBILE_JS.slice(start, end)}\nreturn loadCurrentTaskModel;`)(state, () => {}, () => "original", () => { calls++; }) as (force: boolean) => Promise<unknown>;
+    expect(await load(true)).toBe(cached); expect(await load(false)).toBe(cached);
+    expect(state.modelRequestId).toBe(7); expect(calls).toBe(0);
+  }
 });

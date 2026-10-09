@@ -148,6 +148,7 @@ export class ContextSendGuard {
     getToken: () => string;
     send: (token: string) => Promise<void>;
     isExplicitRejection: (error: unknown) => boolean;
+    isDefinitelyNotSent?: (error: unknown) => boolean;
   }): Promise<void> {
     const scope = fingerprint(params.recipient);
     const request = fingerprint(`${scope}\0${params.requestKey ?? "default"}`);
@@ -169,6 +170,14 @@ export class ContextSendGuard {
         this.persist();
         return;
       } catch (error) {
+        if (params.isDefinitelyNotSent?.(error)) {
+          // Lookup failed before an HTTP request could be sent. Retire only
+          // this request's marker; never release an unrelated uncertain send.
+          this.uncertain.delete(request);
+          this.requestRecipients.delete(request);
+          this.persist();
+          throw error;
+        }
         if (!params.isExplicitRejection(error)) {
           this.uncertain.set(request, { at: now(), scope });
           this.persist();

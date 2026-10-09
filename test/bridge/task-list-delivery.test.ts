@@ -20,12 +20,25 @@ test("all and filtered pages send the instructions separately without changing i
     expect(parts[0]).not.toContain("[3] 进入任务");
     expect(parts[1]).toBe(formatTaskListInstructions());
     expect(parts.join("\n\n")).toBe(text);
-    if (adapter === "grok") expect(parts[0]).toContain("2. ");
+    if (adapter === "grok") expect(parts[0]).toContain("2、[");
     if (!adapter) expect(parts[0]!.indexOf("较新任务")).toBeLessThan(parts[0]!.indexOf("旧任务"));
   }
   const nextPage = splitTaskListMessages(formatGlobalTaskList({ snapshot, startIndex: 1, pageSize: 1 }));
-  expect(nextPage[0]).toContain("2. ");
+  expect(nextPage[0]).toContain("2、[");
   expect(nextPage[1]).toBe(formatTaskListInstructions());
+});
+
+test("Pi task lists use the short terminal label and put 使用说明 at the start of the separate guide", () => {
+  const piSnapshot = buildGlobalTaskSnapshot([
+    { adapter: "pi", sessionId: "pi-1", title: "最近的用户问题", projectName: "WXGWork", lastUpdatedAt: "2026-09-25T00:00:00Z" },
+  ]);
+  const [body, guide] = splitTaskListMessages(formatGlobalTaskList({ snapshot: piSnapshot, adapter: "pi", startIndex: 0, pageSize: 10 }));
+  expect(body).toContain("1、[Pi · WXGWork]\n最近的用户问题");
+  expect(body).not.toContain("Pi Agent");
+  expect(splitTaskListMessages(formatGlobalTaskList({ snapshot: piSnapshot, startIndex: 0, pageSize: 10 }))[0])
+    .toContain("1、[Pi · WXGWork]\n最近的用户问题");
+  expect(guide).toStartWith("使用说明：\n[3] 进入任务 3");
+  expect(guide).toContain("[下一页] 再看 10 条");
 });
 
 test("legacy terminal pages split the footer, but empty/end pages do not send instructions", () => {
@@ -116,6 +129,30 @@ test("long list chunks finish before the single guidance message; partial retry 
   const denied = new Error("prepare failed");
   expect(await sendWechatTextBatch(parts, sendNow)).toBe(parts.length);
   expect(calls).toEqual([...parts, formatTaskListInstructions()]);
+});
+
+test("outbound chunks never detach a two-line task title from its label", () => {
+  const snapshot = buildGlobalTaskSnapshot(
+    Array.from({ length: 20 }, (_, index) => ({
+      adapter: "deepseek" as const,
+      sessionId: `task-${index}`,
+      title: `标题${index + 1}${"长".repeat(32)}`,
+      projectName: "wechat_canvas",
+      lastUpdatedAt: new Date(Date.parse("2026-09-24T12:00:00Z") - index * 1000).toISOString(),
+    })),
+  );
+  const text = formatGlobalTaskList({ snapshot, startIndex: 0, pageSize: 20 });
+  const chunks = splitTaskListMessages(text).flatMap((part) => splitWechatTextIntoChunks(part));
+  expect(chunks.length).toBeGreaterThan(2);
+  expect(chunks.at(-1)).toBe(formatTaskListInstructions());
+  for (const chunk of chunks.slice(0, -1)) {
+    const lines = chunk.split("\n");
+    for (let index = 0; index < lines.length; index++) {
+      if (/^\d+、\[/.test(lines[index]!)) {
+        expect(lines[index + 1]).toStartWith("标题");
+      }
+    }
+  }
 });
 
 test("stale context before body stops the batch without sending a misleading footer", async () => {

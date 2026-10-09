@@ -12,6 +12,20 @@ class FakeWorker extends EventEmitter {
   async terminate() { this.terminated = true; return 0; }
 }
 
+test("completion reads share isolated bounded workers without changing catalog response types", async () => {
+  const w = new FakeWorker();
+  const catalog = new GlobalTaskCatalogWorker({ workerFactory: () => w as unknown as Worker });
+  try {
+    const task = catalog.loadCompletions("workbuddy", "/tmp");
+    expect(w.requests[0]).toMatchObject({ adapter: "workbuddy", operation: "completions", limit: 100 });
+    w.emit("message", { id: w.requests[0]!.id, ok: true, completions: [{ adapter: "workbuddy" }] });
+    expect(await task).toEqual([{ adapter: "workbuddy" }] as any);
+    const listing = catalog.load("workbuddy", "/tmp");
+    w.emit("message", { id: w.requests[1]!.id, ok: true, candidates: [{ sessionId: "s" }] });
+    expect(await listing).toEqual([{ sessionId: "s" }] as any);
+  } finally { await catalog.close(); }
+});
+
 test("catalog requests have a deadline and a timed-out worker is replaced", async () => {
   const workers: FakeWorker[] = [];
   const catalog = new GlobalTaskCatalogWorker({

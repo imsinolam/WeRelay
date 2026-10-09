@@ -6,6 +6,7 @@ const TASK_SHORT_ADAPTER_CODES: Record<string, string> = {
   grok: "g",
   codebuddy: "b",
   reasonix: "r",
+  pi: "p",
   opencode: "o",
   deepseek: "d",
 };

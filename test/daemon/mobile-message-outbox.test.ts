@@ -429,7 +429,51 @@ describe("MobileMessageOutbox", () => {
   });
 });
 
+test("只读恢复候选包含failed和unconfirmed，按尝试时间限制七天且不进入发送队列", () => {
+  const now = 10 * 24 * 60 * 60_000;
+  const windowMs = 7 * 24 * 60 * 60_000;
+  const outbox = new MobileMessageOutbox({stateFile: createStateFile(), now: () => now});
+  for (const clientId of ["recent-failed", "recent-unconfirmed", "old-failed", "old-unconfirmed", "old-created-recent-attempt"]) {
+    outbox.accept({adapter: "codex", threadId: "test-task", clientId, text: "合成消息", images: [], createdAtMs: clientId.startsWith("recent") ? now : now - windowMs - 1});
+    if (clientId === "old-created-recent-attempt") outbox.markSending("codex", "test-task", clientId, now);
+    if (clientId.includes("failed")) outbox.markFailed("codex", "test-task", clientId, "ECONNREFUSED");
+    else outbox.markUnconfirmed("codex", "test-task", clientId, "接收超时");
+    outbox.markFailureNotified("codex", "test-task", clientId, now);
+  }
+  expect(outbox.recoveryEntries("codex").map(entry => entry.clientId)).toEqual(["recent-failed", "recent-unconfirmed", "old-created-recent-attempt"]);
+  expect(outbox.recoveryEntries("claude")).toEqual([]);
+  expect(outbox.recoveryEntries("codex", now + windowMs + 1)).toEqual([]);
+  expect(outbox.list("codex", "test-task")).toHaveLength(5);
+  expect(outbox.readyEntries(Number.MAX_SAFE_INTEGER)).toEqual([]);
+  expect(outbox.pendingFailureNotifications()).toEqual([]);
+});
+
+test("未确认状态和通知去重兼容版本1持久化，原任务晚到回执仍可恢复", () => {
+  const stateFile = createStateFile();
+  let outbox = new MobileMessageOutbox({stateFile, now: () => 200_000});
+  outbox.accept({adapter: "codex", threadId: "test-task", clientId: "test-unconfirmed", text: "合成消息", images: [], createdAtMs: 10_000});
+  outbox.markSending("codex", "test-task", "test-unconfirmed", 11_000);
+  outbox.markUnconfirmed("codex", "test-task", "test-unconfirmed", "接收超时");
+  outbox = new MobileMessageOutbox({stateFile, now: () => 200_000});
+  expect(outbox.get("codex", "test-task", "test-unconfirmed")).toMatchObject({status: "unconfirmed", deliveryUncertain: true, firstAttemptAtMs: 11_000, attempts: 1, text: "合成消息"});
+  expect(JSON.parse(fs.readFileSync(stateFile, "utf8")).version).toBe(1);
+  expect(outbox.readyEntries(Number.MAX_SAFE_INTEGER)).toEqual([]);
+  expect(outbox.pendingFailureNotifications()).toHaveLength(1);
+  outbox.markFailureNotified("codex", "test-task", "test-unconfirmed", 200_000);
+  outbox = new MobileMessageOutbox({stateFile, now: () => 201_000});
+  expect(outbox.pendingFailureNotifications()).toEqual([]);
+  expect(outbox.reconcileFailedExecution("codex", {threadId: "test-task"}, [], [
+    {id: "test-receipt", role: "user", text: "合成消息", createdAtMs: 11_001},
+  ])).toBe(1);
+  expect(outbox.get("codex", "test-task", "test-unconfirmed")?.status).toBe("delivered");
+});
+
 describe("mobile outbox helpers", () => {
+  test("未确认通知不暗示确定失败或诱导复制重发", () => {
+    const notice = formatMobileMessageFailureNotice({title: "合成任务", text: "合成消息", error: "接收超时", unconfirmed: true});
+    expect(notice).toBe("[合成任务] 接收状态未确认\n消息已保留，请先查看原任务，避免重复发送。\n内容：合成消息\n原因：接收超时");
+    expect(notice).not.toMatch(/多次提交仍失败|复制后重试/);
+  });
   test("uses bounded exponential retry delays", () => {
     expect(computeMobileMessageRetryDelayMs(1)).toBe(1_000);
     expect(computeMobileMessageRetryDelayMs(2)).toBe(2_000);
@@ -457,6 +501,7 @@ describe("mobile outbox helpers", () => {
 test("classifies permanent image failures separately from safe reconnects and uncertain delivery", async () => {
   const {classifyMobileSendFailure} = await import("../../src/daemon/mobile-message-outbox.ts");
   expect(classifyMobileSendFailure("ECONNREFUSED 127.0.0.1")).toBe("transient");
+  expect(classifyMobileSendFailure("Codex 桌面任务状态尚未就绪，消息尚未发送，请稍后再试。")).toBe("transient");
   expect(classifyMobileSendFailure("Timed out waiting for app-server")).toBe("transient");
   expect(classifyMobileSendFailure('attachment-error: Model does not support image input')).toBe("permanent");
   expect(classifyMobileSendFailure("Codex 暂未确认收到这条消息")).toBe("unconfirmed");

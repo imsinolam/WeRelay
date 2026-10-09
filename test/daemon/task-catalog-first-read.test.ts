@@ -2,6 +2,11 @@ import { expect, test } from "bun:test";
 import fs from "node:fs";
 import { readProcessSnapshot } from "../../src/daemon/process-snapshot.ts";
 import { detectOpenMobileAdaptersFromProcessList } from "../../src/daemon/werelay-daemon.ts";
+import {
+  buildGlobalTaskSnapshot,
+  formatGlobalTaskList,
+  selectRunningGlobalTaskAdapters,
+} from "../../src/daemon/global-task-index.ts";
 
 test("a transient failed probe retries instead of inventing an empty running-terminal set", async () => {
   let calls = 0;
@@ -21,6 +26,20 @@ test("a real empty process snapshot is accepted without unnecessary retries", as
   let calls = 0;
   expect(await readProcessSnapshot(async () => { calls++; return ""; })).toBe("");
   expect(calls).toBe(1);
+});
+
+test("a plain running Pi CLI participates in the first global numbering and filtered view", () => {
+  const open = detectOpenMobileAdaptersFromProcessList("pi\n/Applications/ChatGPT.app/Contents/MacOS/ChatGPT", {
+    codexDesktopOpen: true,
+  });
+  expect(selectRunningGlobalTaskAdapters({ connectedAdapters: [], openAdapters: open }))
+    .toContain("pi");
+  const snapshot = buildGlobalTaskSnapshot([
+    { adapter: "codex", sessionId: "codex-1", title: "旧任务", lastUpdatedAt: "2026-09-23T10:00:00Z" },
+    { adapter: "pi", sessionId: "pi-1", title: "新任务", lastUpdatedAt: "2026-09-24T10:00:00Z" },
+  ]);
+  expect(formatGlobalTaskList({ snapshot, adapter: "pi", startIndex: 0, pageSize: 10 }))
+    .toContain("1、[Pi]\n新任务");
 });
 test("terminal switching refreshes status before rendering and never reuses an indefinitely old task snapshot", () => {
   const source = fs.readFileSync("src/daemon/werelay-daemon.ts", "utf8");
@@ -48,4 +67,18 @@ test("cold discovery includes DSH before numbering, and filtering refreshes busy
   expect(page.candidates[0]?.runtimeStatus?.type).toBe("active");
   expect(refreshed.numberByIdentity.get("deepseek\0same")).toBe(1);
   expect(refreshed.numberByIdentity.get("codex\0same")).toBe(2);
+});
+
+test("a failed process probe uses a recent real snapshot plus connected slots, never an invented empty set", async () => {
+  const { recoverOpenAdaptersAfterProbeFailure } = await import("../../src/daemon/process-snapshot.ts");
+  const previous = new Set(["deepseek" as const]);
+  expect([...recoverOpenAdaptersAfterProbeFailure({
+    previous, lastSuccessAtMs: 100, nowMs: 40_000, connected: ["codex"],
+  })].sort()).toEqual(["codex", "deepseek"]);
+  expect([...recoverOpenAdaptersAfterProbeFailure({
+    previous, lastSuccessAtMs: 100, nowMs: 200_000, connected: ["codex"],
+  })]).toEqual(["codex"]);
+  expect(() => recoverOpenAdaptersAfterProbeFailure({
+    previous, lastSuccessAtMs: 100, nowMs: 200_000, connected: [],
+  })).toThrow("运行中的终端");
 });

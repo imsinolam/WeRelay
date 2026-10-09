@@ -5,10 +5,20 @@ import type { CompletionAttachment } from "./codex-completion-delivery.ts";
 
 // Materialize the existing formatter's output without touching the network.
 // The daemon persists this payload before attempting any of its sends.
+export function finalReplyDeliveryKey(params: {
+  adapter: BridgeAdapterKind; threadId: string; turnId?: string;
+  messageId?: string; timestamp: string; rawText: string;
+}): string {
+  const identity = [params.adapter, params.threadId,
+    params.turnId ?? (params.messageId ? ["message", params.messageId] : [params.timestamp, params.rawText])];
+  return `final:${createHash("sha256").update(JSON.stringify(identity)).digest("hex")}`;
+}
+
 export async function prepareFinalReplyDelivery(params: {
   adapter: BridgeAdapterKind;
   threadId: string;
   turnId?: string;
+  messageId?: string;
   timestamp: string;
   rawText: string;
   images?: BridgeMessageImage[];
@@ -28,9 +38,8 @@ export async function prepareFinalReplyDelivery(params: {
       sendVideo: async (path) => { attachments.push({ kind: "video", path }); },
     },
   });
-  const identity = [params.adapter, params.threadId, params.turnId ?? [params.timestamp, params.rawText]];
   return {
-    key: `final:${createHash("sha256").update(JSON.stringify(identity)).digest("hex")}`,
+    key: finalReplyDeliveryKey(params),
     adapter: params.adapter,
     threadId: params.threadId,
     turnId: params.turnId,

@@ -5,6 +5,7 @@ export const BRIDGE_PROVIDER_IDS = [
   "grok",
   "codebuddy",
   "reasonix",
+  "pi",
   "workbuddy",
   "deepseek",
   "opencode",
@@ -20,6 +21,7 @@ export const IMPLEMENTED_BRIDGE_ADAPTER_IDS = [
   "grok",
   "codebuddy",
   "reasonix",
+  "pi",
   "workbuddy",
   "deepseek",
   "opencode",
@@ -304,6 +306,26 @@ export const BRIDGE_PROVIDERS: Record<BridgeProviderId, BridgeProviderDefinition
         hint: "未找到 reasonix 命令。请按供应方方式安装并登录。",
       },
     ],
+  },
+  pi: {
+    id: "pi",
+    label: "Pi Agent",
+    command: "pi",
+    transport: "shared_service",
+    daemon: true,
+    capabilities: {
+      sessions: true, messages: true, images: false,
+      queue: true, approvals: false, stop: true, nativeCommands: false,
+    },
+    sessionIntegration: {
+      owner: "visible_cli_owner",
+      continuity: "same_owner",
+      localVisibility: "live",
+    },
+    dependencies: [{
+      id: "pi-cli", kind: "command", name: "pi", label: "Pi Agent 命令",
+      hint: "未找到 pi 命令。请安装 Pi Agent 并配置模型。",
+    }],
   },
   workbuddy: {
     id: "workbuddy",

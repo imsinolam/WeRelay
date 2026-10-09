@@ -1,3 +1,4 @@
+import { NativeSessionModelSettings } from "./native-session-model-settings.ts";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import path from "node:path";
 import readline from "node:readline";
@@ -9,6 +10,7 @@ import type {
   BridgeEvent,
   BridgeResumeSessionCandidate,
   BridgeSessionMessage,
+  BridgeSessionModelState,
   BridgeSessionSendResult,
 } from "./bridge-types.ts";
 import type { BridgeAdapterKind } from "./bridge-providers.ts";
@@ -301,6 +303,8 @@ export class AcpBridgeAdapter implements BridgeAdapter {
   private requestCounter = 0;
   private pendingRequests = new Map<AcpRequestId, PendingRpcRequest>();
   private pendingPermission: PendingAcpPermission | null = null;
+  private changingSettings = false;
+  private readonly modelSettings = new Map<string, NativeSessionModelSettings>();
   private loadingSession = false;
   private shuttingDown = false;
   private activePromptRequestId: AcpRequestId | null = null;
@@ -400,6 +404,7 @@ export class AcpBridgeAdapter implements BridgeAdapter {
   }
 
   async sendInput(text: string): Promise<void> {
+    if (this.changingSettings) throw new Error("正在调整模型设置，请稍候再发送消息。");
     const sessionId = this.requireSessionId();
     if (this.state.status === "busy") {
       throw new Error(`${this.config.kind} 仍在处理，请等待当前回复或发送 /stop。`);
@@ -512,11 +517,62 @@ export class AcpBridgeAdapter implements BridgeAdapter {
     })];
   }
 
+  private settingsFor(sessionId: string): NativeSessionModelSettings {
+    let settings = this.modelSettings.get(sessionId);
+    if (!settings) { settings = new NativeSessionModelSettings(); this.modelSettings.set(sessionId, settings); }
+    return settings;
+  }
+
+  async getNewSessionModelState(): Promise<BridgeSessionModelState> {
+    return this.state.sharedSessionId ? this.getSessionModelState(this.state.sharedSessionId)
+      : { options: [], canChange: false, unavailableReason: "请先连接终端，再选择模型。" };
+  }
+
+  async getSessionModelState(sessionId: string): Promise<BridgeSessionModelState> {
+    return this.settingsFor(sessionId).state(sessionId === this.state.sharedSessionId && this.state.status === "idle" && !this.changingSettings,
+      sessionId !== this.state.sharedSessionId ? "请先打开这条任务再调整设置。" : undefined);
+  }
+
+  async setSessionModel(sessionId: string, model: string): Promise<BridgeSessionModelState> {
+    const state = await this.getSessionModelState(sessionId);
+    if (!state.canChange) throw new Error(state.unavailableReason);
+    const settings = this.settingsFor(sessionId);
+    const operation = settings.modelRequest(model);
+    if (this.changingSettings || this.state.status !== "idle" || sessionId !== this.state.sharedSessionId) throw new Error("任务状态已变化，请刷新设置后再调整。");
+    this.changingSettings = true;
+    try {
+      const result = await this.request(operation.method, { sessionId, ...operation.params });
+      settings.confirmModel(model);
+      settings.ingest(result);
+    } finally { this.changingSettings = false; }
+    const confirmed = await this.getSessionModelState(sessionId);
+    if (confirmed.currentModel !== model) throw new Error("终端未确认模型切换，请刷新设置。");
+    return confirmed;
+  }
+
+  async setSessionReasoningEffort(sessionId: string, effort: string): Promise<BridgeSessionModelState> {
+    const state = await this.getSessionModelState(sessionId);
+    if (!state.canChangeReasoningEffort) throw new Error(state.reasoningEffortUnavailableReason);
+    const settings = this.settingsFor(sessionId);
+    const operation = settings.reasoningRequest(effort);
+    if (this.changingSettings || this.state.status !== "idle" || sessionId !== this.state.sharedSessionId) throw new Error("任务状态已变化，请刷新设置后再调整。");
+    this.changingSettings = true;
+    try {
+      const result = await this.request(operation.method, { sessionId, ...operation.params });
+      settings.confirmReasoning(effort);
+      settings.ingest(result);
+    } finally { this.changingSettings = false; }
+    const confirmed = await this.getSessionModelState(sessionId);
+    if (confirmed.currentReasoningEffort !== effort) throw new Error("终端未确认推理强度，请刷新设置。");
+    return confirmed;
+  }
+
   async resumeSession(sessionId: string): Promise<void> {
     await this.loadSession(sessionId, "wechat", "wechat_resume");
   }
 
   async createSession(): Promise<void> {
+    if (this.changingSettings) throw new Error("正在调整模型设置，请稍候再切换任务。");
     this.loadingSession = true;
     try {
       const result = await this.request("session/new", {
@@ -530,6 +586,7 @@ export class AcpBridgeAdapter implements BridgeAdapter {
       if (!sessionId) {
         throw new Error(`${this.config.kind} 未返回会话 ID。`);
       }
+      this.settingsFor(sessionId).ingest(result);
       this.setSessionId(sessionId);
       this.emit({
         type: "session_switched",
@@ -650,6 +707,7 @@ export class AcpBridgeAdapter implements BridgeAdapter {
     source: "wechat" | "restore",
     reason: "wechat_resume" | "startup_restore",
   ): Promise<void> {
+    if (this.changingSettings) throw new Error("正在调整模型设置，请稍候再切换任务。");
     this.loadingSession = true;
     try {
       const sessionCwd = this.resolveSessionCwd(sessionId);
@@ -663,11 +721,12 @@ export class AcpBridgeAdapter implements BridgeAdapter {
       ) {
         await this.restartProcessForSession(sessionCwd, sessionEnvironment);
       }
-      await this.request("session/load", {
+      const loaded = await this.request("session/load", {
         sessionId,
         cwd: sessionCwd,
         mcpServers: [],
       });
+      this.settingsFor(sessionId).ingest(loaded);
       this.sessionCwdById.set(sessionId, sessionCwd);
       this.setSessionId(sessionId);
       this.emit({
@@ -882,10 +941,10 @@ export class AcpBridgeAdapter implements BridgeAdapter {
     if (method !== "session/update" && method !== "_x.ai/session/update") {
       return;
     }
-    if (this.loadingSession || !isRecord(params) || !isRecord(params.update)) {
-      return;
-    }
+    if (!isRecord(params) || !isRecord(params.update)) return;
     const sessionId = readString(params.sessionId);
+    if (sessionId) this.settingsFor(sessionId).ingest(params.update);
+    if (this.loadingSession) return;
     if (sessionId && this.state.sharedSessionId && sessionId !== this.state.sharedSessionId) {
       return;
     }

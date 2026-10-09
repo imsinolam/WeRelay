@@ -100,6 +100,24 @@ async function waitUntilOnline(baseUrl: string): Promise<void> {
 }
 
 describe("WeRelay application relay", () => {
+  test("serves versioned organizer assets without exposing private session data", async () => {
+    const relay = await startWeRelayRelayServer({
+      host: "127.0.0.1", port: 0, deviceId: "organizer-device", deviceToken: "organizer-test-token",
+    });
+    closers.push(() => relay.close());
+    const shell = await fetch(`${relay.baseUrl}/organizer`);
+    expect(shell.status).toBe(200);
+    const html = await shell.text();
+    expect(html).toContain("先把会话整理清楚");
+    expect(html).not.toContain("__WE_RELAY_ASSET_VERSION__");
+    expect(html).toMatch(/organizer\.js\?appv=[a-f0-9]+/);
+    const script = await fetch(`${relay.baseUrl}/organizer.js`);
+    expect(script.status).toBe(200);
+    expect(script.headers.get("content-security-policy")).toContain("script-src 'self'");
+    expect(await script.text()).toContain('button.closest(".session").querySelector("[data-input]")');
+    expect(await (await fetch(`${relay.baseUrl}/organizer.css`)).text()).toContain(".project-list");
+  });
+
   test("authenticated heartbeat keeps a busy device online without consuming queued commands", async () => {
     const relay = await startWeRelayRelayServer({ host: "127.0.0.1", port: 0,
       deviceId: "heartbeat-device", deviceToken: "heartbeat-token", pollTimeoutMs: 10, deviceOfflineMs: 500 });

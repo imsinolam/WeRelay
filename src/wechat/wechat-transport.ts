@@ -1,4 +1,5 @@
 import { ContextSendGuard, type ContextSendGuardState } from "./context-send-guard.ts";
+import { isDefinitelyNotSentWechatError } from "./send-failure.ts";
 import crypto from "node:crypto";
 import { createCipheriv, createDecipheriv } from "node:crypto";
 import fs from "node:fs";
@@ -611,6 +612,7 @@ export async function apiFetch(params: {
   token?: string;
   timeoutMs: number;
   fetchImpl?: typeof fetch;
+  redirect?: "error" | "follow" | "manual";
 }): Promise<string> {
   const base = params.baseUrl.endsWith("/") ? params.baseUrl : `${params.baseUrl}/`;
   const url = new URL(params.endpoint, base).toString();
@@ -632,6 +634,7 @@ export async function apiFetch(params: {
       headers: buildHeaders(params.token, params.body),
       body: params.body,
       signal: controller.signal,
+      ...(params.redirect ? { redirect: params.redirect } : {}),
     });
     const text = await res.text();
     if (!res.ok) {
@@ -1692,6 +1695,7 @@ export class WeChatTransport {
       // Other ret=-2 variants remain uncertain; no claim about token lifetime.
       isExplicitRejection: (error) => isWechatContextTokenStaleError(error) &&
         error.errmsg.trim().toLowerCase() === "prepare failed",
+      isDefinitelyNotSent: isDefinitelyNotSentWechatError,
       send: async (sentToken) => {
         const raw = await apiFetch({
           baseUrl: account.baseUrl,
@@ -1710,6 +1714,10 @@ export class WeChatTransport {
           }),
           token: account.token,
           timeoutMs: SEND_TIMEOUT_MS,
+          // A redirect after the POST could mean the original request was
+          // accepted before a second host's DNS failure. Never follow it:
+          // only a failure before this one POST is safe to replay.
+          redirect: "error",
         });
         assertWechatApiResponseOk("sendmessage", raw);
       },

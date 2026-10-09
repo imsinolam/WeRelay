@@ -1,3 +1,4 @@
+import { reasoningSettingLabel } from "./native-session-model-settings.ts";
 import { spawn as spawnChildProcess, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -27,6 +28,7 @@ import type {
   BridgeSessionSwitchSource,
   BridgeResumeSessionCandidate,
   BridgeSessionMessage,
+  BridgeSessionModelState,
   BridgeSessionSendResult,
   BridgeTurnOrigin,
   BridgeEvent,
@@ -102,6 +104,8 @@ type OpenCodeSdkClient = {
       directory?: string;
       workspace?: string;
       parts: Array<{ type: string; text: string }>;
+      model?: { providerID: string; modelID: string };
+      variant?: string;
     }): Promise<SdkResult<void>>;
     messages?(parameters: {
       sessionID: string;
@@ -468,6 +472,10 @@ export class OpenCodeServerAdapter implements BridgeAdapter {
         directory: session.directory || this.activeSessionDirectory || this.options.cwd,
         workspace: session.workspaceID ?? this.activeWorkspaceId ?? undefined,
         parts: [{ type: "text", text: normalized }],
+        ...(this.modelSelectionBySession.has(session.id) ? {
+          model: { providerID: this.modelSelectionBySession.get(session.id)!.providerID, modelID: this.modelSelectionBySession.get(session.id)!.modelID },
+          variant: this.modelSelectionBySession.get(session.id)!.variant,
+        } : {}),
       });
       if (result.error !== undefined) {
         throw new Error(`SDK error: ${describeUnknownError(result.error)}`);
@@ -491,6 +499,100 @@ export class OpenCodeServerAdapter implements BridgeAdapter {
     }
     await this.sendInput(text);
     return {};
+  }
+
+  private modelSelectionBySession = new Map<string, { providerID: string; modelID: string; variant?: string }>();
+
+  private async modelApi(pathname: string, sessionId?: string, body?: Record<string, unknown>): Promise<unknown> {
+    const url = new URL(`${this.getServerUrl()}${pathname}`);
+    url.searchParams.set("directory", this.activeSessionDirectory ?? this.options.cwd);
+    if (this.activeWorkspaceId) url.searchParams.set("workspace", this.activeWorkspaceId);
+    const response = await fetch(url, {
+      method: body ? "PATCH" : "GET", headers: { "content-type": "application/json" },
+      ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) throw new Error(`OpenCode 未接受模型设置（${response.status}），请检查原任务和终端版本。`);
+    const value: unknown = await response.json();
+    if (sessionId && isRecord(value) && value.id !== sessionId) throw new Error("OpenCode 返回了其他任务，未更改模型设置。");
+    return value;
+  }
+
+  async getNewSessionModelState(): Promise<BridgeSessionModelState> {
+    return this.activeSessionId ? this.getSessionModelState(this.activeSessionId)
+      : { options: [], canChange: false, unavailableReason: "请先连接 OpenCode 并打开任务。" };
+  }
+
+  async getSessionModelState(sessionId: string): Promise<BridgeSessionModelState> {
+    if (sessionId !== this.activeSessionId) return { options: [], canChange: false, unavailableReason: "请先打开这条 OpenCode 任务再调整设置。" };
+    const [catalog, session] = await Promise.all([this.modelApi("/provider"), this.modelApi(`/session/${encodeURIComponent(sessionId)}`, sessionId)]);
+    if (!isRecord(catalog) || !isRecord(session)) throw new Error("OpenCode 未提供模型列表。");
+    const connected = Array.isArray(catalog.connected) ? new Set(catalog.connected) : null;
+    const providers = Array.isArray(catalog.all) ? catalog.all.filter(isRecord) : [];
+    const options = providers.filter((provider) => !connected || connected.has(provider.id)).flatMap((provider) => {
+      if (!isRecord(provider.models) || typeof provider.id !== "string") return [];
+      const providerId = provider.id;
+      return Object.entries(provider.models).flatMap(([modelId, entry]) => {
+        if (!isRecord(entry)) return [];
+        const variantCatalog = isRecord(entry.variants) ? entry.variants : {};
+        const variants = Object.keys(variantCatalog).filter((id) => !isRecord(variantCatalog[id]) || variantCatalog[id].disabled !== true);
+        return [{ id: `${providerId}/${modelId}`, label: typeof entry.name === "string" ? entry.name : modelId,
+          group: typeof provider.name === "string" ? provider.name : providerId,
+          reasoningEffortOptions: variants.map((id) => ({ id, label: reasoningSettingLabel(id) })) }];
+      });
+    });
+    const metadata = isRecord(session.metadata) ? session.metadata : {};
+    const selected = isRecord(metadata.werelayModelSelection) ? metadata.werelayModelSelection : null;
+    if (selected && typeof selected.providerID === "string" && typeof selected.modelID === "string") {
+      this.modelSelectionBySession.set(sessionId, { providerID: selected.providerID, modelID: selected.modelID, ...(typeof selected.variant === "string" ? { variant: selected.variant } : {}) });
+    } else {
+      this.modelSelectionBySession.delete(sessionId);
+      // Read only the latest native message; a TUI selection itself is not held by the server.
+      const messages = await this.modelApi(`/session/${encodeURIComponent(sessionId)}/message?limit=1`);
+      const latest = Array.isArray(messages) ? messages.at(-1) : null;
+      const info = isRecord(latest) && isRecord(latest.info) ? latest.info : null;
+      const nativeModel = info && isRecord(info.model) ? info.model : info;
+      if (nativeModel && typeof nativeModel.providerID === "string" && typeof nativeModel.modelID === "string") {
+        const variant = typeof nativeModel.variant === "string" ? nativeModel.variant : typeof info?.variant === "string" ? info.variant : undefined;
+        this.modelSelectionBySession.set(sessionId, { providerID: nativeModel.providerID, modelID: nativeModel.modelID, ...(variant ? { variant } : {}) });
+      }
+    }
+    const selection = this.modelSelectionBySession.get(sessionId);
+    const currentModel = selection ? `${selection.providerID}/${selection.modelID}` : undefined;
+    const efforts = options.find((entry) => entry.id === currentModel)?.reasoningEffortOptions ?? [];
+    const idle = this.state.status === "idle";
+    return { currentModel, options, canChange: idle && options.length > 0,
+      unavailableReason: !idle ? "任务正在处理，请完成后再调整。" : undefined,
+      currentReasoningEffort: selection?.variant, reasoningEffortOptions: efforts,
+      canChangeReasoningEffort: idle && efforts.length > 0,
+      reasoningEffortUnavailableReason: !currentModel ? "请先选择模型。" : !efforts.length ? "当前模型不支持推理强度设置。" : !idle ? "任务正在处理，请完成后再调整。" : undefined };
+  }
+
+  async setSessionModel(sessionId: string, model: string): Promise<BridgeSessionModelState> {
+    const state = await this.getSessionModelState(sessionId);
+    if (!state.canChange) throw new Error(state.unavailableReason);
+    if (!state.options.some((entry) => entry.id === model)) throw new Error("所选 OpenCode 模型不可用，请刷新列表。");
+    const separator = model.indexOf("/");
+    await this.saveModelSelection(sessionId, { providerID: model.slice(0, separator), modelID: model.slice(separator + 1) });
+    return this.getSessionModelState(sessionId);
+  }
+
+  async setSessionReasoningEffort(sessionId: string, effort: string): Promise<BridgeSessionModelState> {
+    const state = await this.getSessionModelState(sessionId);
+    if (!state.canChangeReasoningEffort || !state.reasoningEffortOptions?.some((entry) => entry.id === effort)) throw new Error(state.reasoningEffortUnavailableReason || "当前模型不支持该推理强度。");
+    const selection = this.modelSelectionBySession.get(sessionId)!;
+    await this.saveModelSelection(sessionId, { ...selection, variant: effort });
+    return this.getSessionModelState(sessionId);
+  }
+
+  private async saveModelSelection(sessionId: string, selection: { providerID: string; modelID: string; variant?: string }): Promise<void> {
+    const session = await this.modelApi(`/session/${encodeURIComponent(sessionId)}`, sessionId);
+    if (!isRecord(session)) throw new Error("无法确认 OpenCode 原任务。");
+    await this.modelApi(`/session/${encodeURIComponent(sessionId)}`, sessionId,
+      { metadata: { ...(isRecord(session.metadata) ? session.metadata : {}), werelayModelSelection: selection } });
+    const confirmed = await this.modelApi(`/session/${encodeURIComponent(sessionId)}`, sessionId);
+    const persisted = isRecord(confirmed) && isRecord(confirmed.metadata) ? confirmed.metadata.werelayModelSelection : null;
+    if (!isRecord(persisted) || persisted.providerID !== selection.providerID || persisted.modelID !== selection.modelID || persisted.variant !== selection.variant) throw new Error("OpenCode 未保存设置，请更新终端后重试。");
+    this.modelSelectionBySession.set(sessionId, selection);
   }
 
   async listResumeSessions(limit = 10): Promise<BridgeResumeSessionCandidate[]> {
@@ -742,6 +844,9 @@ export class OpenCodeServerAdapter implements BridgeAdapter {
 
   private async startServerProcess(): Promise<ChildProcess> {
     const env = buildCliEnvironment(this.options.kind);
+    const inline = env.OPENCODE_CONFIG_CONTENT ? JSON.parse(env.OPENCODE_CONFIG_CONTENT) : {};
+    const plugin = new URL("../../bin/opencode-session-settings-plugin.mjs", import.meta.url).href;
+    env.OPENCODE_CONFIG_CONTENT = JSON.stringify({ ...inline, plugin: [...(Array.isArray(inline.plugin) ? inline.plugin : []), plugin] });
     const serverArgs = [
       "serve",
       "--port",

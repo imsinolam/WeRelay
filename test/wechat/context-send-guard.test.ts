@@ -1,8 +1,37 @@
 import { expect, test } from "bun:test";
 import { ContextSendGuard } from "../../src/wechat/context-send-guard.ts";
+import { isDefinitelyNotSentWechatError } from "../../src/wechat/send-failure.ts";
 
 const denied = new Error("upstream prepare rejected");
 const isExplicitRejection = (error: unknown) => error === denied;
+
+test("DNS failure clears only its write-ahead marker and can retry after restart", async () => {
+  const dns = new TypeError("fetch failed", { cause: Object.assign(new Error("DNS"), { code: "ENOTFOUND" }) });
+  let state: ReturnType<ContextSendGuard["snapshot"]> | undefined;
+  const persist = (next: ReturnType<ContextSendGuard["snapshot"]>) => { state = next; };
+  const guard = new ContextSendGuard({ persist });
+  const args = { recipient: "a", getToken: () => "token", isExplicitRejection, isDefinitelyNotSent: isDefinitelyNotSentWechatError };
+  await expect(guard.send({ ...args, requestKey: "uncertain", send: async () => { throw new Error("timeout"); } })).rejects.toThrow("未确认");
+  await expect(guard.send({ ...args, requestKey: "dns", send: async () => { throw dns; } })).rejects.toBe(dns);
+  expect(state?.uncertain).toHaveLength(1);
+  await new ContextSendGuard({ initial: state }).send({ ...args, requestKey: "dns", send: async () => {} });
+  await expect(new ContextSendGuard({ initial: state }).send({ ...args, requestKey: "uncertain", send: async () => {} })).rejects.toThrow("未确认");
+});
+
+test("only structured DNS connect-before-send failures qualify for safe retry", () => {
+  for (const code of ["ENOTFOUND", "EAI_AGAIN"]) {
+    expect(isDefinitelyNotSentWechatError(new TypeError("fetch failed", {
+      cause: Object.assign(new Error("lookup"), { code }),
+    }))).toBe(true);
+  }
+  for (const code of ["ECONNRESET", "ETIMEDOUT", "UND_ERR_HEADERS_TIMEOUT"]) {
+    expect(isDefinitelyNotSentWechatError(Object.assign(new Error("connection"), { code }))).toBe(false);
+  }
+  expect(isDefinitelyNotSentWechatError(new Error("ENOTFOUND"))).toBe(false);
+  expect(isDefinitelyNotSentWechatError(Object.assign(new Error("reset"), {
+    code: "ECONNRESET", cause: Object.assign(new Error("lookup"), { code: "ENOTFOUND" }),
+  }))).toBe(false);
+});
 
 test("old failed request retries the refreshed token without invalidating it", async () => {
   let token = "old";

@@ -39,10 +39,10 @@ export function isDirectRunModule(
   }
 }
 
-type LocalCompanionAdapterKind = "codex" | "claude" | "tclaude" | "grok" | "codebuddy" | "reasonix" | "opencode";
+type LocalCompanionAdapterKind = "codex" | "claude" | "tclaude" | "grok" | "codebuddy" | "reasonix" | "pi" | "opencode";
 
 function isLocalCompanionAdapterKind(value: unknown): value is LocalCompanionAdapterKind {
-  return value === "codex" || value === "claude" || value === "tclaude" || value === "grok" || value === "codebuddy" || value === "reasonix" || value === "opencode";
+  return value === "codex" || value === "claude" || value === "tclaude" || value === "grok" || value === "codebuddy" || value === "reasonix" || value === "pi" || value === "opencode";
 }
 
 function log(adapter: string, message: string): void {
@@ -72,7 +72,7 @@ function parseCliArgs(argv: string[]): LocalCompanionCliOptions {
     if (arg === "--help" || arg === "-h") {
       process.stdout.write(
         [
-          "Usage: local-companion --adapter <codex|claude|tclaude|grok|codebuddy|reasonix|opencode> [--cwd <path>] [...cli args]",
+          "Usage: local-companion --adapter <codex|claude|tclaude|grok|codebuddy|reasonix|pi|opencode> [--cwd <path>] [...cli args]",
           "",
           'Starts the visible local companion and connects it to the matching running bridge for the current directory.',
           "Unknown arguments are forwarded to the visible CLI client.",
@@ -113,7 +113,7 @@ function parseCliArgs(argv: string[]): LocalCompanionCliOptions {
   }
 
   if (!adapter) {
-    throw new Error("Missing required --adapter <codex|claude|tclaude|grok|codebuddy|reasonix|opencode>");
+    throw new Error("Missing required --adapter <codex|claude|tclaude|grok|codebuddy|reasonix|pi|opencode>");
   }
 
   return { adapter, cwd, sessionStartMode, cliArgs };
@@ -320,6 +320,27 @@ export async function runLocalCompanion(options: LocalCompanionCliOptions): Prom
             ),
           );
           publishState();
+          break;
+        case "get_new_session_model_state": {
+          const state = adapter.getNewSessionModelState ? await adapter.getNewSessionModelState()
+            : adapter.getSessionModelState && adapter.getState().sharedSessionId
+              ? await adapter.getSessionModelState(adapter.getState().sharedSessionId!)
+              : { options: [], canChange: false, unavailableReason: "当前终端尚未提供模型设置。" };
+          sendResponse(socket, message.id, true, state);
+          break;
+        }
+        case "get_session_model_state":
+          sendResponse(socket, message.id, true, adapter.getSessionModelState
+            ? await adapter.getSessionModelState(message.payload.sessionId)
+            : { options: [], canChange: false, unavailableReason: "当前终端尚未提供模型设置。" });
+          break;
+        case "set_session_model":
+          if (!adapter.setSessionModel) throw new Error("当前终端尚未提供模型设置。");
+          sendResponse(socket, message.id, true, await adapter.setSessionModel(message.payload.sessionId, message.payload.model));
+          break;
+        case "set_session_reasoning_effort":
+          if (!adapter.setSessionReasoningEffort) throw new Error("当前终端尚未提供推理强度设置。");
+          sendResponse(socket, message.id, true, await adapter.setSessionReasoningEffort(message.payload.sessionId, message.payload.reasoningEffort));
           break;
         case "get_session_messages":
           if (!adapter.getSessionMessages) {

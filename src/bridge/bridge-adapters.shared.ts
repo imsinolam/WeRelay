@@ -75,6 +75,8 @@ export type AdapterOptions = {
   /** Explicit opt-in for starting a desktop application from a background runtime. */
   allowDesktopApplicationLaunch?: boolean;
   codexDesktopGlobalStateFile?: string;
+  /** WorkBuddy: attach only to an existing notification interface; never restore a task. */
+  desktopNotificationsOnly?: boolean;
 };
 
 export type EventSink = (event: BridgeEvent) => void;

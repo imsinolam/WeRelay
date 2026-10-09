@@ -34,12 +34,12 @@ import {
   type DaemonResponse,
 } from "../daemon/daemon-link.ts";
 
-type LocalCompanionLaunchAdapter = "codex" | "claude" | "tclaude" | "grok" | "codebuddy" | "reasonix" | "opencode";
+type LocalCompanionLaunchAdapter = "codex" | "claude" | "tclaude" | "grok" | "codebuddy" | "reasonix" | "pi" | "opencode";
 
 function isLocalCompanionLaunchAdapter(
   value: unknown,
 ): value is LocalCompanionLaunchAdapter {
-  return value === "codex" || value === "claude" || value === "tclaude" || value === "grok" || value === "codebuddy" || value === "reasonix" || value === "opencode";
+  return value === "codex" || value === "claude" || value === "tclaude" || value === "grok" || value === "codebuddy" || value === "reasonix" || value === "pi" || value === "opencode";
 }
 
 type LocalCompanionStartCliOptions = {
@@ -223,8 +223,9 @@ export function parseCliArgs(argv: string[]): LocalCompanionStartCliOptions {
           "       werelay-grok-start [--cwd <path>] [--profile <name-or-path>] [--timeout-ms <ms>] [...grok args]",
           "       werelay-codebuddy-start [--cwd <path>] [--profile <name-or-path>] [--timeout-ms <ms>] [...codebuddy args]",
           "       werelay-reasonix-start [--cwd <path>] [--profile <model>] [--timeout-ms <ms>] [...reasonix serve args]",
+          "       werelay-pi-start [--cwd <path>] [--timeout-ms <ms>] [...pi args]",
           "       werelay-opencode-start [--cwd <path>] [--profile <name-or-path>] [--timeout-ms <ms>] [...opencode args]",
-          "       local-companion-start [--adapter <codex|claude|tclaude|grok|codebuddy|reasonix|opencode>] [--cwd <path>] [--profile <name-or-path>] [--timeout-ms <ms>] [...cli args]",
+          "       local-companion-start [--adapter <codex|claude|tclaude|grok|codebuddy|reasonix|pi|opencode>] [--cwd <path>] [--profile <name-or-path>] [--timeout-ms <ms>] [...cli args]",
           "",
           "Starts a bridge for the current directory, waits for the local endpoint, then opens the visible companion or panel.",
           "Claude, TClaude, and OpenCode launchers start a fresh CLI session by default.",

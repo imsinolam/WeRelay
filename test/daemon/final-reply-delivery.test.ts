@@ -33,6 +33,15 @@ test("delivery identity is isolated by adapter/session and stable across duplica
   expect((await prepareFinalReplyDelivery({ ...params, threadId: "other" })).key).not.toBe(one.key);
 });
 
+test("native WorkBuddy final identity deduplicates live and history events despite different arrival times", async () => {
+  const params = { adapter: "workbuddy" as const, threadId: "s", messageId: "native-final", timestamp: "2026-01-01", rawText: "完成", prefix: (text: string) => text };
+  const live = await prepareFinalReplyDelivery(params);
+  const recovered = await prepareFinalReplyDelivery({ ...params, timestamp: "2026-01-02" });
+  expect(recovered.key).toBe(live.key);
+  expect((await prepareFinalReplyDelivery({ ...params, messageId: "next-final" })).key).not.toBe(live.key);
+  expect((await prepareFinalReplyDelivery({ ...params, threadId: "other" })).key).not.toBe(live.key);
+});
+
 test("attachments remain pending independently of delivered text and survive restart", async () => {
   const input = await prepareFinalReplyDelivery({
     adapter: "deepseek", threadId: "s", turnId: "t", timestamp: new Date().toISOString(),

@@ -6,12 +6,14 @@ import { CodexCompletionDeliveryQueue } from "../../src/daemon/codex-completion-
 test("daemon persists a DeepSeek final event even when outbound send is rejected", async () => {
   const queue = new CodexCompletionDeliveryQueue();
   const tasks: Promise<void>[] = [];
+  const targets: unknown[] = [];
   const daemon = Object.assign(Object.create(WeRelayDaemon.prototype), {
     authorizedUserId: "test-recipient", codexCompletionDeliveries: queue,
     mobileConversationRevisions: { touch() {} }, recordAdapterMessageActivity() {},
     getSlotThreadId: () => "session", prefixSlotMessage: (_slot: unknown, text: string) => text,
     collectFinalReplyImages: async () => [], queueWechatMessage: async () => false,
     trackWechatForwardTask: (task: Promise<void>) => tasks.push(task),
+    stateStore: { setLatestWechatTaskTarget: (target: unknown) => { targets.push(target); } },
   });
   const slot = {
     adapter: "deepseek", controller: { syncLocalClientEndpoint() {} },
@@ -24,6 +26,7 @@ test("daemon persists a DeepSeek final event even when outbound send is rejected
   await Promise.all(tasks);
   expect(queue.getPending()).toHaveLength(1);
   expect(queue.getPending()[0]?.adapter).toBe("deepseek");
+  expect(targets).toEqual([]);
   const restored = new CodexCompletionDeliveryQueue({ initial: JSON.parse(JSON.stringify(queue.snapshot())) });
   daemon.codexCompletionDeliveries = restored;
   const sent: string[] = [];
@@ -32,6 +35,7 @@ test("daemon persists a DeepSeek final event even when outbound send is rejected
   expect(sent).toHaveLength(1);
   expect(sent[0]).toContain("任务完成");
   expect(restored.getPending()).toEqual([]);
+  expect(targets).toEqual([expect.objectContaining({ adapter: "deepseek", sessionId: "session" })]);
 });
 
  test("completion recovery yields after a bounded batch and retains remaining payloads", async () => {
@@ -39,6 +43,7 @@ test("daemon persists a DeepSeek final event even when outbound send is rejected
    const pending = Array.from({ length: 20 }, (_, i) => ({ key: String(i), adapter: "deepseek", threadId: String(i) }));
    const daemon = Object.assign(Object.create(WeRelayDaemon.prototype), {
      codexCompletionDeliveries: { getPending: () => pending },
+     stateStore: { setLatestWechatTaskTarget() {} },
      deliverCodexCompletionNotification: async (key: string) => {
        delivered.push(key);
        return { status: "delivered", totalCount: 1 };

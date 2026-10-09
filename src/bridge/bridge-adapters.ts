@@ -10,6 +10,7 @@ import {
 } from "./bridge-adapters.grok.ts";
 import { OpenCodeServerAdapter } from "./bridge-adapters.opencode.ts";
 import { ReasonixServerAdapter } from "./bridge-adapters.reasonix.ts";
+import { PiOwnerAdapter } from "./bridge-adapters.pi.ts";
 import { ShellAdapter } from "./bridge-adapters.shell.ts";
 import { WorkBuddyDesktopAdapter } from "./bridge-adapters.workbuddy.ts";
 import type { AdapterOptions } from "./bridge-adapters.shared.ts";
@@ -45,6 +46,10 @@ export function createBridgeAdapter(options: AdapterOptions): BridgeAdapter {
     case "reasonix":
       return options.renderMode === "companion"
         ? new ReasonixServerAdapter(options)
+        : new LocalCompanionProxyAdapter(options);
+    case "pi":
+      return options.renderMode === "companion"
+        ? new PiOwnerAdapter(options)
         : new LocalCompanionProxyAdapter(options);
     case "workbuddy":
       return new WorkBuddyDesktopAdapter(options);

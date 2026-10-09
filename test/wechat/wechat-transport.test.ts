@@ -26,6 +26,18 @@ import {
   type WeixinMessage,
 } from "../../src/wechat/wechat-transport.ts";
 
+test("send API can reject redirects instead of risking replay after a second-host DNS failure", async () => {
+  let redirect: string | undefined;
+  await apiFetch({ baseUrl: "https://example.invalid/", endpoint: "sendmessage",
+    body: "{}", timeoutMs: 1000, redirect: "error",
+    fetchImpl: (async (_url: unknown, init?: RequestInit) => {
+      redirect = init?.redirect;
+      return new Response('{"ret":0}', { status: 200 });
+    }) as typeof fetch,
+  });
+  expect(redirect).toBe("error");
+});
+
 describe("wechat upload limits", () => {
   test("uses the default per-media upload limits", () => {
     expect(resolveMediaUploadLimitBytes("image", {})).toBe(20 * 1024 * 1024);

@@ -417,13 +417,13 @@ export class CodexCompletionDeliveryQueue {
     return { status: "queued", delivery: clonePending(delivery) };
   }
 
-  acknowledge(keys: string[]): PendingCodexCompletionDelivery[] {
+  acknowledge(keys: string[], options: { summarizedMedia?: boolean } = {}): PendingCodexCompletionDelivery[] {
     const acknowledged: PendingCodexCompletionDelivery[] = [];
     for (const key of keys) {
       if (this.inFlight.has(key)) continue;
       const delivery = this.pending.get(key);
-      if (!delivery || (delivery.images?.length ?? 0) > (delivery.nextImageIndex ?? 0) ||
-          (delivery.attachments?.length ?? 0) > (delivery.nextAttachmentIndex ?? 0)) continue;
+      if (!delivery || (!options.summarizedMedia && ((delivery.images?.length ?? 0) > (delivery.nextImageIndex ?? 0) ||
+          (delivery.attachments?.length ?? 0) > (delivery.nextAttachmentIndex ?? 0)))) continue;
       this.pending.delete(key);
       this.delivered.delete(key);
       this.delivered.set(key, {
@@ -437,6 +437,16 @@ export class CodexCompletionDeliveryQueue {
       this.persistState();
     }
     return acknowledged;
+  }
+
+  reserveSummary(keys: string[]): boolean {
+    if (keys.some((key) => !this.pending.has(key) || this.inFlight.has(key))) return false;
+    for (const key of keys) this.inFlight.add(key);
+    return true;
+  }
+
+  releaseSummary(keys: string[]): void {
+    for (const key of keys) this.inFlight.delete(key);
   }
 
   async deliver(

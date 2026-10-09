@@ -1,5 +1,6 @@
 import { extractCodexCrossTaskMessage } from "./codex-cross-task-message.ts";
 import fs from "node:fs";
+import { isGeneratedTaskTitle, latestUserMessageText, titleFromLatestMessage } from "./task-title-fallback.ts";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
@@ -395,7 +396,13 @@ const DEFAULT_CODEX_PERMISSION_SETTINGS: CodexDesktopPermissionSettings = {
   approvalPolicy: "on-request",
   approvalsReviewer: "user",
   sandbox: "workspace-write",
-  sandboxPolicy: { type: "workspaceWrite" },
+  sandboxPolicy: {
+    type: "workspaceWrite",
+    writableRoots: [],
+    networkAccess: false,
+    excludeTmpdirEnvVar: false,
+    excludeSlashTmp: false,
+  },
 };
 
 const CODEX_PERMISSION_OPTIONS: BridgeSessionPermissionState["options"] = [
@@ -419,6 +426,7 @@ const CODEX_PERMISSION_OPTIONS: BridgeSessionPermissionState["options"] = [
 
 function codexPermissionSettingsForMode(
   permission: string,
+  writableRoots: string[] = [],
 ): CodexDesktopPermissionSettings | null {
   switch (permission) {
     case "read-only":
@@ -429,7 +437,18 @@ function codexPermissionSettingsForMode(
         sandboxPolicy: { type: "readOnly" },
       };
     case "workspace-write":
-      return cloneCodexPermissionSettings(DEFAULT_CODEX_PERMISSION_SETTINGS);
+      return {
+        ...cloneCodexPermissionSettings(DEFAULT_CODEX_PERMISSION_SETTINGS),
+        sandboxPolicy: {
+          type: "workspaceWrite",
+          writableRoots: Array.from(new Set(
+            writableRoots.map((root) => root.trim()).filter(Boolean),
+          )),
+          networkAccess: false,
+          excludeTmpdirEnvVar: false,
+          excludeSlashTmp: false,
+        },
+      };
     case "danger-full-access":
       return {
         approvalPolicy: "never",
@@ -1186,6 +1205,19 @@ export function readCodexSessionMessagePageFromRollout(
         )
       : null,
   };
+}
+
+export function readCodexCatalogLatestUserText(rolloutPath: string): string | undefined {
+  // Most turns have the user message in the first few visible entries. Keep
+  // task listing fast, but allow a bounded deeper look past assistant updates.
+  const recent = readCodexSessionMessagePageFromRollout(rolloutPath, {
+    limit: 8, lightweight: true,
+  });
+  const latest = latestUserMessageText(recent?.messages ?? []);
+  if (latest || !recent?.hasMore) return latest;
+  return latestUserMessageText(readCodexSessionMessagePageFromRollout(rolloutPath, {
+    limit: 40, lightweight: true,
+  })?.messages ?? []);
 }
 
 function normalizeCodexMediaTargetText(text: string): string {
@@ -2386,6 +2418,43 @@ export function readCodexSessionRunSummaryFromRolloutTail(
   return summary;
 }
 
+/** Native terminal evidence only; bounded scan, with no runtime/IPC activity. */
+export function readCodexDesktopCompletionFromRolloutTail(
+  filePath: string, nowMs = Date.now(),
+): { summary: BridgeSessionRunSummary; finalMessage: BridgeSessionMessage } | null {
+  let summary: BridgeSessionRunSummary | null = null;
+  let finalMessage: BridgeSessionMessage | null = null;
+  let newerUserMessage = false;
+  scanFileTailReverse(filePath, {
+    scanLimitBytes: CODEX_SESSION_RUN_SUMMARY_SCAN_LIMIT_BYTES,
+    chunkBytes: CODEX_DESKTOP_RUNTIME_STATUS_SCAN_CHUNK_BYTES,
+  }, (line) => {
+    const bytes = Buffer.from(line);
+    if (!summary) {
+      const message = extractCodexRolloutVisibleMessage(bytes);
+      if (message?.role === "user") newerUserMessage = true;
+      summary = parseCodexSessionRunSummary(line, nowMs);
+      if (!summary) return;
+      if (summary.status !== "completed" || !summary.turnId || newerUserMessage) return false;
+      const evidence = extractCodexCompletedTurnEvidence(bytes);
+      if (evidence?.finalText) {
+        finalMessage = { role: "assistant", phase: "final_answer", text: evidence.finalText,
+          turnId: evidence.turnId, createdAtMs: summary.completedAtMs };
+        return false;
+      }
+      return;
+    }
+    const message = extractCodexRolloutVisibleMessage(bytes);
+    if (message?.role === "assistant" && message.phase === "final_answer" &&
+        message.turnId === summary.turnId) {
+      finalMessage = message;
+      return false;
+    }
+    if (parseCodexSessionRunSummary(line, nowMs)) return false;
+  });
+  return summary && finalMessage ? { summary, finalMessage } : null;
+}
+
 function readCodexDesktopRuntimeStatusFromSessionTail(
   filePath: string,
 ): {
@@ -2735,10 +2804,14 @@ export async function readCodexStateDbSessionCatalogInProcess(
       const projectId = typeof value.project_id === "string" && value.project_id.trim()
         ? value.project_id.trim()
         : undefined;
+      const catalogTitle = localCatalogTitles.get(threadId) ?? codexCatalogTitle(value, threadId);
+      const recentText = isGeneratedTaskTitle(catalogTitle, threadId) && rolloutPath
+        ? readCodexCatalogLatestUserText(rolloutPath)
+        : undefined;
       candidates.push({
         sessionId: threadId,
         threadId,
-        title: localCatalogTitles.get(threadId) ?? codexCatalogTitle(value, threadId),
+        title: titleFromLatestMessage(catalogTitle, threadId, recentText),
         lastUpdatedAt: codexCatalogTimestampToIso(value),
         ...(sourceValue ? { source: sourceValue } : {}),
         ...(cwd ? { cwd } : {}),
@@ -3053,6 +3126,18 @@ export function resolveCodexDesktopProjectCreationTarget(
   };
 }
 
+export function readCodexDesktopProjectState(): unknown | null {
+  const filePath = path.join(
+    process.env.CODEX_HOME || path.join(os.homedir(), ".codex"),
+    ".codex-global-state.json",
+  );
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8").replace(/^\uFEFF/, "")) as unknown;
+  } catch {
+    return null;
+  }
+}
+
 export function applyCodexDesktopProjectMetadata(
   candidates: BridgeResumeSessionCandidate[],
   globalState: unknown,
@@ -3270,8 +3355,6 @@ export class CodexPtyAdapter extends AbstractPtyAdapter {
   private pendingTurnThreadId: string | null = null;
   private pendingDesktopTurnThreadIds = new Set<string>();
   private pendingDesktopTurnTextByThreadId = new Map<string, string>();
-  private selectedDesktopModelByThreadId = new Map<string, string>();
-  private selectedDesktopReasoningEffortByThreadId = new Map<string, string>();
   private selectedDesktopPermissionByThreadId = new Map<
     string,
     CodexDesktopPermissionSettings
@@ -3599,12 +3682,8 @@ export class CodexPtyAdapter extends AbstractPtyAdapter {
         const startInput = input.length === 1 && input[0]?.type === "text"
           ? input[0].text
           : input;
-        const selectedModel = this.selectedDesktopModelByThreadId.get(threadId);
-        const selectedReasoningEffort = this.selectedDesktopReasoningEffortByThreadId.get(threadId);
         const permissionSettings = this.resolveDesktopPermissionSettings(threadId);
         const turn = await client.startTurn(threadId, startInput, {
-          ...(selectedModel ? { model: selectedModel } : {}),
-          ...(selectedReasoningEffort ? { effort: selectedReasoningEffort } : {}),
           approvalPolicy: permissionSettings.approvalPolicy,
           approvalsReviewer: permissionSettings.approvalsReviewer,
           sandbox: permissionSettings.sandbox,
@@ -4904,12 +4983,11 @@ export class CodexPtyAdapter extends AbstractPtyAdapter {
       (!reconciliation.liveStateActive ||
         reconciliation.liveSummary?.turnId === reconciliation.terminalTurnId),
     );
-    const selectedModel = this.selectedDesktopModelByThreadId.get(normalizedThreadId);
     const liveModel = extractCodexDesktopSessionModel(liveState);
-    const latestMessageModel = selectedModel || liveModel
+    const latestMessageModel = liveModel
       ? undefined
       : (await this.getLatestSessionMessage(normalizedThreadId))?.model;
-    const currentModel = selectedModel ?? liveModel ?? latestMessageModel;
+    const currentModel = liveModel ?? latestMessageModel;
     let options: BridgeSessionModelOption[] = [];
     let modelListError = false;
     try {
@@ -4925,13 +5003,10 @@ export class CodexPtyAdapter extends AbstractPtyAdapter {
     if (currentModel && !options.some((option) => option.id === currentModel)) {
       options.unshift({ id: currentModel });
     }
-    const selectedReasoningEffort = this.selectedDesktopReasoningEffortByThreadId.get(
-      normalizedThreadId,
-    );
     const liveReasoningEffort = extractCodexDesktopSessionReasoningEffort(liveState);
     const currentModelOption = options.find((option) => option.id === currentModel);
     const reasoningEffortOptions = currentModelOption?.reasoningEffortOptions ?? [];
-    const reportedReasoningEffort = selectedReasoningEffort ?? liveReasoningEffort;
+    const reportedReasoningEffort = liveReasoningEffort;
     const currentReasoningEffort = reportedReasoningEffort && (
         reasoningEffortOptions.length === 0 ||
         reasoningEffortOptions.some((option) => option.id === reportedReasoningEffort)
@@ -4989,18 +5064,23 @@ export class CodexPtyAdapter extends AbstractPtyAdapter {
     if (!state.options.some((option) => option.id === normalizedModel)) {
       throw new Error("这个模型当前不可用，请重新选择。");
     }
-    this.selectedDesktopModelByThreadId.set(normalizedThreadId, normalizedModel);
+    if (!this.desktopIpcClient) {
+      throw new Error("无法连接 Codex 桌面端，模型尚未切换。");
+    }
     const selectedOption = state.options.find((option) => option.id === normalizedModel);
     const reasoningOptions = selectedOption?.reasoningEffortOptions ?? [];
     const currentEffort = state.currentReasoningEffort;
     const nextEffort = currentEffort && reasoningOptions.some((option) => option.id === currentEffort)
       ? currentEffort
-      : undefined;
-    if (nextEffort) {
-      this.selectedDesktopReasoningEffortByThreadId.set(normalizedThreadId, nextEffort);
-    } else {
-      this.selectedDesktopReasoningEffortByThreadId.delete(normalizedThreadId);
-    }
+      : reasoningOptions.find((option) => option.id === selectedOption?.defaultReasoningEffort)?.id ??
+        reasoningOptions[0]?.id;
+    // A turn/start override alone can disagree with the desktop owner's saved
+    // thread settings. Apply model and a compatible effort in one owner request
+    // so an incompatible effort from the previous model cannot carry over.
+    await this.desktopIpcClient.updateThreadSettingsForNextTurn(
+      normalizedThreadId,
+      { model: normalizedModel, ...(nextEffort ? { effort: nextEffort } : {}) },
+    );
     const nextState: BridgeSessionModelState = {
       ...state,
       currentModel: normalizedModel,
@@ -5035,7 +5115,13 @@ export class CodexPtyAdapter extends AbstractPtyAdapter {
     if (!state.reasoningEffortOptions?.some((option) => option.id === normalizedEffort)) {
       throw new Error("这个推理强度当前不可用，请重新选择。");
     }
-    this.selectedDesktopReasoningEffortByThreadId.set(normalizedThreadId, normalizedEffort);
+    if (!this.desktopIpcClient) {
+      throw new Error("无法连接 Codex 桌面端，推理强度尚未切换。");
+    }
+    await this.desktopIpcClient.updateThreadSettingsForNextTurn(
+      normalizedThreadId,
+      { effort: normalizedEffort },
+    );
     return { ...state, currentReasoningEffort: normalizedEffort };
   }
 
@@ -5321,6 +5407,32 @@ export class CodexPtyAdapter extends AbstractPtyAdapter {
     };
   }
 
+  private resolveDesktopWritableRoots(threadId: string): string[] {
+    const state = this.getDesktopThreadStateView(threadId);
+    const roots: string[] = [];
+    const addRoots = (value: unknown) => {
+      if (!Array.isArray(value)) return;
+      for (const root of value) {
+        if (typeof root === "string" && root.trim()) roots.push(root.trim());
+      }
+    };
+    if (state && isRecord(state.currentPermissions)) {
+      addRoots(state.currentPermissions.runtimeWorkspaceRoots);
+    }
+    if (state && Array.isArray(state.environments)) {
+      for (const environment of state.environments) {
+        if (isRecord(environment)) addRoots(environment.runtimeWorkspaceRoots);
+      }
+    }
+    if (roots.length === 0) {
+      const cwd = state && typeof state.cwd === "string" && state.cwd.trim()
+        ? state.cwd.trim()
+        : this.getKnownThreadCwd(threadId);
+      if (cwd) roots.push(cwd);
+    }
+    return Array.from(new Set(roots));
+  }
+
   async setSessionPermission(
     threadId: string,
     permission: string,
@@ -5328,7 +5440,10 @@ export class CodexPtyAdapter extends AbstractPtyAdapter {
     const normalizedThreadId = threadId.trim();
     const normalizedPermission = permission.trim();
     if (!normalizedThreadId) throw new Error("请选择一个 Codex 任务。");
-    const next = codexPermissionSettingsForMode(normalizedPermission);
+    const next = codexPermissionSettingsForMode(
+      normalizedPermission,
+      this.resolveDesktopWritableRoots(normalizedThreadId),
+    );
     if (!next) throw new Error("这个 Codex 权限范围当前不可用。");
     const state = await this.getSessionPermissionState(normalizedThreadId);
     if (!state.canChange) {
@@ -6842,15 +6957,11 @@ export class CodexPtyAdapter extends AbstractPtyAdapter {
       const startInput = imageCount === 0 && items.length === 1 && items[0]?.type === "text"
         ? items[0].text
         : items;
-      const selectedModel = this.selectedDesktopModelByThreadId.get(threadId);
-      const selectedReasoningEffort = this.selectedDesktopReasoningEffortByThreadId.get(threadId);
       const permissionSettings = this.resolveDesktopPermissionSettings(threadId);
       const turn = await client.startTurn(
         threadId,
         startInput,
         {
-          ...(selectedModel ? { model: selectedModel } : {}),
-          ...(selectedReasoningEffort ? { effort: selectedReasoningEffort } : {}),
           approvalPolicy: permissionSettings.approvalPolicy,
           approvalsReviewer: permissionSettings.approvalsReviewer,
           sandbox: permissionSettings.sandbox,

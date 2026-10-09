@@ -317,6 +317,8 @@ describe("daemon workspace state", () => {
         title: "第一次完成",
         completedAt: "2026-08-07T01:00:00.000Z",
         turnId: "turn-1",
+        projectName: "WeRelay",
+        cwd: "/workspace/WeRelay",
       });
       store.recordRecentTaskCompletion({
         adapter: "grok",
@@ -339,6 +341,8 @@ describe("daemon workspace state", () => {
           title: "第二次完成",
           completedAt: "2026-08-07T03:00:00.000Z",
           turnId: "turn-2",
+          projectName: "WeRelay",
+          cwd: "/workspace/WeRelay",
         },
         {
           adapter: "grok",
@@ -352,6 +356,17 @@ describe("daemon workspace state", () => {
       expect(restored.getRecentTaskCompletions()).toEqual(
         store.getRecentTaskCompletions(),
       );
+      restored.recordRecentTaskCompletion({
+        adapter: "codex",
+        threadId: "codex-task",
+        title: "迁移后的任务",
+        completedAt: "2026-08-07T04:00:00.000Z",
+        cwd: "/workspace/new-location",
+      });
+      expect(restored.getRecentTaskCompletions()[0]).toMatchObject({
+        cwd: "/workspace/new-location",
+      });
+      expect(restored.getRecentTaskCompletions()[0]?.projectName).toBeUndefined();
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });
     }

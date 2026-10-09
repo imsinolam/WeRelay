@@ -94,6 +94,7 @@ test("entering a local draft starts settings loads before the early return", () 
       void loadCurrentTaskModel(false);
       void loadCurrentTaskPermission(false);
       renderMessages(false);
+      finishConversationEntryFocus(entryGeneration);
       return;`);
 });
 

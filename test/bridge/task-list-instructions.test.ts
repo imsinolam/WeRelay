@@ -2,7 +2,8 @@ import { expect, test } from "bun:test";
 import { formatResumeSessionList } from "../../src/bridge/bridge-utils.ts";
 import { formatGlobalTaskList, buildGlobalTaskSnapshot } from "../../src/daemon/global-task-index.ts";
 
-const footer = `[3] 进入任务 3
+const footer = `使用说明：
+[3] 进入任务 3
 [3：内容] 给任务3发消息
 
 [任务：关键词] 搜索任务

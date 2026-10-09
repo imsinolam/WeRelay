@@ -122,6 +122,30 @@ test("a matching completed turn ends only its own provisional state", () => {
   expect(h.state.runSummary?.status).toBe("completed");
 });
 
+test("Pi terminal reply ends the provisional status without a run summary", () => {
+  const h = harness();
+  h.state.currentAdapter = "pi";
+  h.state.localRunSummary = {status:"syncing",clientId:"client",startedAtMs:baseMs};
+  h.state.serverMessages = [
+    {id:"native-user",role:"user",text:"新的请求",clientId:"client",createdAtMs:baseMs+10},
+    {id:"native-reply",role:"assistant",text:"完成",phase:"final_answer",createdAtMs:baseMs+100},
+  ];
+  h.updateRunSummary(null,null,h.state.serverMessages);
+  expect(h.state.localRunSummary).toBeNull();
+  expect(h.state.runSummary?.status).toBe("completed");
+});
+
+test("Pi intermediate or old replies cannot settle a new submission", () => {
+  const h = harness();
+  h.state.currentAdapter = "pi";
+  h.state.localRunSummary = {status:"syncing",clientId:"client",startedAtMs:baseMs};
+  const user = {id:"native-user",role:"user",text:"新的请求",clientId:"client",createdAtMs:baseMs+10};
+  h.updateRunSummary(null,null,[{id:"old",role:"assistant",text:"旧回复",phase:"final_answer",createdAtMs:baseMs-10},user]);
+  expect(h.state.localRunSummary).not.toBeNull();
+  h.updateRunSummary(null,null,[user,{id:"tool",role:"assistant",text:"继续",createdAtMs:baseMs+50}]);
+  expect(h.state.localRunSummary).not.toBeNull();
+});
+
 test("missing live summary cannot erase an already confirmed running turn", () => {
   const h = harness();h.state.runSummary = {status:"running",turnId:"new"};
   h.updateRunSummary(null,null,[{text:"检查中",role:"assistant",phase:"commentary",turnId:"new"}]);

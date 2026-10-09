@@ -1,6 +1,7 @@
 /** Shared WeChat task-list footer; keep terminal and aggregate lists consistent. */
 export function formatTaskListInstructions(): string {
   return [
+    "使用说明：",
     "[3] 进入任务 3",
     "[3：内容] 给任务3发消息",
     "",

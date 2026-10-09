@@ -51,6 +51,7 @@ export type MobileMessageOutboxEntry = {
   status: MobileMessageOutboxStatus;
   attempts: number;
   nextAttemptAtMs: number;
+  firstAttemptAtMs?: number;
   lastAttemptAtMs?: number;
   lastError?: string;
   turnId?: string;
@@ -174,6 +175,9 @@ function normalizeEntry(value: unknown): MobileMessageOutboxEntry | null {
     nextAttemptAtMs: restoredStatus === "retrying"
       ? 0
       : Math.max(0, normalizeNumber(value.nextAttemptAtMs, 0)),
+    ...(typeof value.firstAttemptAtMs === "number" && Number.isFinite(value.firstAttemptAtMs) && value.firstAttemptAtMs >= 0
+      ? { firstAttemptAtMs: value.firstAttemptAtMs }
+      : {}),
     ...(normalizeNumber(value.lastAttemptAtMs) > 0
       ? { lastAttemptAtMs: normalizeNumber(value.lastAttemptAtMs) }
       : {}),
@@ -255,7 +259,9 @@ function truncate(value: string, maxLength: number): string {
 
 /** Only connection failures known to precede acceptance may retry indefinitely. */
 export function classifyMobileSendFailure(error: string): "transient" | "permanent" | "unconfirmed" | "unknown" {
+  if (/Codex 桌面任务状态尚未就绪，消息尚未发送/.test(error)) return "transient";
   if (/暂未确认|未确认收到|avoid.*duplicate|unconfirmed/i.test(error)) return "unconfirmed";
+  if (/Pi 窗口.*\/reload.*加载 WeRelay 扩展|当前项目已有未接入的 Pi 窗口/i.test(error)) return "permanent";
   if (/does not support image|attachment-error|不支持.*图片|图片.*不正确|没有找到这个|not found|invalid.*(image|input|model)|内容不能为空/i.test(error)) return "permanent";
   if (/ECONNREFUSED|ENETUNREACH|EHOSTUNREACH|ENOTFOUND|EAI_AGAIN|not connected|未连接|连接.*未就绪|waiting for app-server|电脑.*离线|at capacity|rate limit|too many requests|\b429\b/i.test(error)) return "transient";
   if (/timed out|timeout|超时|disconnected|连接中断/i.test(error)) return "unconfirmed";
@@ -271,13 +277,16 @@ export function formatMobileMessageFailureNotice(params: {
   text: string;
   error: string;
   url?: string;
+  unconfirmed?: boolean;
 }): string {
   const title = params.title.trim() || "网页任务";
   const text = params.text.trim() || "（图片消息）";
   const error = params.error.trim() || "电脑端暂时无法接收消息";
   return [
-    `[${truncate(title, 55)}] 网页消息多次提交仍失败`,
-    "消息已保留在网页任务台，可复制后重试。",
+    `[${truncate(title, 55)}] ${params.unconfirmed ? "接收状态未确认" : "网页消息多次提交仍失败"}`,
+    params.unconfirmed
+      ? "消息已保留，请先查看原任务，避免重复发送。"
+      : "消息已保留在网页任务台，可复制后重试。",
     `内容：${truncate(text.replace(/\s+/g, " "), 180)}`,
     `原因：${truncate(error.replace(/\s+/g, " "), 180)}`,
     params.url ? `打开任务：${params.url}` : undefined,
@@ -504,6 +513,7 @@ export class MobileMessageOutbox {
     return this.update(adapter, threadId, clientId, (entry) => {
       entry.status = "sending";
       entry.attempts += 1;
+      entry.firstAttemptAtMs ??= attemptedAtMs;
       entry.lastAttemptAtMs = attemptedAtMs;
       entry.nextAttemptAtMs = 0;
       delete entry.lastError;
@@ -584,6 +594,20 @@ export class MobileMessageOutbox {
     });
   }
 
+  markUnconfirmed(
+    adapter: string,
+    threadId: string,
+    clientId: string,
+    error: string,
+  ): boolean {
+    return this.update(adapter, threadId, clientId, (entry) => {
+      entry.status = "unconfirmed";
+      entry.lastError = truncate(error, MAX_ERROR_LENGTH);
+      entry.deliveryUncertain = true;
+      entry.nextAttemptAtMs = 0;
+    });
+  }
+
   markFailed(
     adapter: string,
     threadId: string,
@@ -612,6 +636,15 @@ export class MobileMessageOutbox {
 
   failedEntries(adapter?: string): MobileMessageOutboxEntry[] {
     return this.entries.filter(entry => entry.status === "failed" && (!adapter || entry.adapter === adapter)).map(cloneEntry);
+  }
+
+  /** 只读恢复候选沿用七天保留窗口；旧消息仅停止后台扫描，不删除或重新发送。 */
+  recoveryEntries(adapter?: string, nowMs = this.now()): MobileMessageOutboxEntry[] {
+    const cutoff = nowMs - DELIVERED_RETENTION_MS;
+    return this.entries
+      .filter(entry => (entry.status === "failed" || entry.status === "unconfirmed") && (!adapter || entry.adapter === adapter))
+      .filter(entry => (entry.lastAttemptAtMs ?? entry.firstAttemptAtMs ?? entry.submittedAtMs ?? entry.createdAtMs) >= cutoff)
+      .map(cloneEntry);
   }
 
   /** A persisted native user record is acceptance; an assistant reply is not required. */
@@ -647,7 +680,7 @@ export class MobileMessageOutbox {
     let matched = 0;
     for (const entry of this.entries) {
       if (entry.adapter !== adapter || !taskCanCoverFailedMessage(entry, task, tasks)) continue;
-      if (entry.status !== "failed") continue;
+      if (entry.status !== "failed" && entry.status !== "unconfirmed") continue;
       if (entryMatchesThread(entry, task.threadId)) {
         if (this.reconcileReceived(adapter, entry.threadId, entry.clientId, messages)) matched++;
         continue;
@@ -664,7 +697,7 @@ export class MobileMessageOutbox {
 
   pendingFailureNotifications(): MobileMessageOutboxEntry[] {
     return this.entries
-      .filter((entry) => entry.status === "failed" && !entry.failureNotifiedAt)
+      .filter((entry) => (entry.status === "failed" || entry.status === "unconfirmed") && !entry.failureNotifiedAt)
       .sort((left, right) => left.sequence - right.sequence)
       .map(cloneEntry);
   }
@@ -676,6 +709,7 @@ export class MobileMessageOutbox {
       entry.status = "accepted";
       entry.attempts = 0;
       entry.nextAttemptAtMs = nowMs;
+      if (!entry.deliveryUncertain) delete entry.firstAttemptAtMs;
       delete entry.lastAttemptAtMs;
       delete entry.lastError;
       delete entry.failureNotifiedAt;

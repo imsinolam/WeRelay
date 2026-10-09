@@ -26,7 +26,7 @@ import {
   isClaudeProviderKind,
 } from "./bridge-providers.ts";
 import { formatTaskProjectLabel } from "./task-list-format.ts";
-import { formatTaskListDisplayTitle } from "./task-list-display.ts";
+import { formatTaskListAdapterLabel, formatTaskListDisplayTitle } from "./task-list-display.ts";
 
 const ANSI_ESCAPE_RE =
   // eslint-disable-next-line no-control-regex
@@ -1610,7 +1610,7 @@ export function formatResumeSessionList(params: {
   } = params;
   const resolvedStartIndex = startIndex ?? (page - 1) * CODEX_TASK_LIST_PAGE_SIZE;
   const resolvedHasPrevious = hasPrevious ?? resolvedStartIndex > 0;
-  const providerLabel = getBridgeProvider(adapter).label;
+  const providerLabel = formatTaskListAdapterLabel(adapter);
   if (candidates.length === 0) {
     return resolvedHasPrevious
       ? "已经到底了。\n发送“上一页”返回。"
@@ -1681,7 +1681,7 @@ export function formatClawBotWechatHelp(
     "停止任务：发送“停止”",
     ...(!adapter || adapter === "codex" ? ["Codex 完整回答：发送“全文”"] : []),
     "翻页：发送“下一页”、“下一页20”或“上一页”",
-    "切换终端：/codex、/workbuddy、/claude、/tclaude、/grok、/codebuddy、/reasonix、/deepseek 或 /opencode",
+    "切换终端：/codex、/workbuddy、/claude、/tclaude、/grok、/codebuddy、/reasonix、/pi、/deepseek 或 /opencode",
     "帮助：/h 或 /help",
     "任务运行较久时，可打开消息中的网页版链接查看实时进展。",
   ].join("\n");
@@ -2639,7 +2639,15 @@ export function splitWechatTextIntoChunks(
     // stay intact; fall back to a hard split.
     const window = remaining.slice(0, maxChars + 1);
     const newlineIndex = window.lastIndexOf("\n");
-    const splitIndex = newlineIndex > maxChars / 2 ? newlineIndex : maxChars;
+    let splitIndex = newlineIndex > maxChars / 2 ? newlineIndex : maxChars;
+    // Keep a two-line WeChat task entry together: otherwise the next message
+    // can start with a title whose number and terminal label were sent earlier.
+    if (splitIndex === newlineIndex) {
+      const previousNewline = window.lastIndexOf("\n", newlineIndex - 1);
+      if (previousNewline > 0 && /^\d+、\[[^\n]+\]$/u.test(window.slice(previousNewline + 1, newlineIndex))) {
+        splitIndex = previousNewline;
+      }
+    }
     const chunk = remaining.slice(0, splitIndex).trim();
     if (chunk) {
       chunks.push(chunk);

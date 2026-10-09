@@ -27,6 +27,7 @@ export type StartWeRelayRelayClientOptions = {
   localPrewarmToken?: string;
   journalFile?: string;
   logger?: (message: string) => void;
+  onConnectionChange?: (status: "connected" | "disconnected") => void;
   fetchImpl?: typeof fetch;
   retryDelayMs?: number;
   localRequestTimeoutMs?: number;
@@ -416,6 +417,7 @@ export function startWeRelayRelayClient(
           },
         );
         if (pollResponse.status === 204) {
+          options.onConnectionChange?.("connected");
           consecutiveFailures = 0;
           continue;
         }
@@ -430,6 +432,7 @@ export function startWeRelayRelayClient(
           throw new Error("Relay 返回了无法识别的请求。");
         }
         scheduleCommand(commandValue);
+        options.onConnectionChange?.("connected");
         if (consecutiveFailures > 0) {
           logger("WeRelay 公网连接已恢复。");
         }
@@ -439,6 +442,7 @@ export function startWeRelayRelayClient(
           break;
         }
         consecutiveFailures += 1;
+        options.onConnectionChange?.("disconnected");
         const message = error instanceof Error ? error.message : String(error);
         logger(`WeRelay 公网连接异常：${message}`);
         const retryDelayMs = Math.min(

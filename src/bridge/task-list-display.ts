@@ -1,4 +1,10 @@
+import { getBridgeProvider, type BridgeAdapterKind } from "./bridge-providers.ts";
+
 const TASK_LIST_DISPLAY_TITLE_MAX_CHARS = 72;
+
+export function formatTaskListAdapterLabel(adapter: BridgeAdapterKind): string {
+  return adapter === "pi" ? "Pi" : getBridgeProvider(adapter).label;
+}
 
 function neutralizeLinkToken(value: string): string {
   return value

@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
+import { titleFromLatestMessage } from "./task-title-fallback.ts";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -395,6 +396,7 @@ type CodeBuddyTranscriptMetadata = {
   sessionId?: string;
   cwd?: string;
   title?: string;
+  latestMessageText?: string;
   userRenamed?: boolean;
   firstTimestampMs?: number;
   lastUpdatedAtMs?: number;
@@ -442,9 +444,12 @@ function parseCodeBuddyTranscriptMetadata(text: string): CodeBuddyTranscriptMeta
       customTitle = readString(value.customTitle) ?? customTitle;
     } else if (value.type === "ai-title") {
       generatedTitle = readString(value.aiTitle) ?? generatedTitle;
-    } else if (value.type === "message" && value.role === "user" && !metadata.title) {
+    } else if (value.type === "message" && (value.role === "user" || value.role === "assistant")) {
       const textContent = codeBuddyContentText(value.content).replace(/\s+/g, " ").trim();
-      if (textContent) metadata.title = truncatePreview(textContent, 80);
+      if (textContent) {
+        metadata.latestMessageText = Array.from(textContent).slice(0, 20).join("");
+        if (value.role === "user" && !metadata.title) metadata.title = truncatePreview(textContent, 80);
+      }
     }
   }
   metadata.title = customTitle ?? generatedTitle ?? metadata.title;
@@ -535,7 +540,11 @@ export async function listCodeBuddySessions(
     const candidate: BridgeResumeSessionCandidate = {
       sessionId,
       threadId: sessionId,
-      title: metadata.title ?? `CodeBuddy 会话 ${sessionId.slice(0, 8)}`,
+      title: titleFromLatestMessage(
+        metadata.title ?? `CodeBuddy 会话 ${sessionId.slice(0, 8)}`,
+        sessionId,
+        metadata.latestMessageText,
+      ),
       lastUpdatedAt: new Date(updatedAtMs).toISOString(),
       cwd: sessionCwd,
       ...(metadata.userRenamed

@@ -3,17 +3,20 @@ import { isMainThread, parentPort, Worker } from "node:worker_threads";
 import { listLightweightAdapterSessions } from "./global-task-catalog.ts";
 import type { BridgeResumeSessionCandidate } from "../bridge/bridge-types.ts";
 import type { DaemonAdapterKind } from "../bridge/bridge-providers.ts";
+import type { DesktopCompletion } from "./passive-completion-monitor.ts";
 
 type CatalogRequest = {
   id: number;
   adapter: DaemonAdapterKind;
   cwd: string;
   limit: number;
+  operation?: "completions";
 };
 type CatalogResponse = {
   id: number;
   ok: boolean;
   candidates?: BridgeResumeSessionCandidate[];
+  completions?: DesktopCompletion[];
   error?: string;
 };
 
@@ -24,6 +27,13 @@ type CatalogResponse = {
 if (!isMainThread && parentPort) {
   parentPort.on("message", async (request: CatalogRequest) => {
     try {
+      if (request.operation === "completions") {
+        if (request.adapter !== "codex" && request.adapter !== "workbuddy") throw new Error("不支持这个桌面完成记录来源。");
+        const completions = await (await import("./desktop-completion-catalog.ts"))
+          .readDesktopCompletions(request.adapter, request.limit);
+        parentPort!.postMessage({ id: request.id, ok: true, completions } satisfies CatalogResponse);
+        return;
+      }
       const candidates = await listLightweightAdapterSessions(
         request.adapter,
         request.cwd,
@@ -41,7 +51,7 @@ if (!isMainThread && parentPort) {
 }
 
 type Pending = {
-  resolve: (value: BridgeResumeSessionCandidate[]) => void;
+  resolve: (value: CatalogResponse) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
   adapter: DaemonAdapterKind;
@@ -106,7 +116,7 @@ export class GlobalTaskCatalogWorker {
       this.pending.delete(response.id);
       clearTimeout(pending.timer);
       this.idle(adapter, worker);
-      if (response.ok) pending.resolve(response.candidates ?? []);
+      if (response.ok) pending.resolve(response);
       else pending.reject(new Error(response.error || "任务目录读取失败。"));
     });
     worker.on("error", (error) => this.fail(adapter, worker, error));
@@ -119,18 +129,26 @@ export class GlobalTaskCatalogWorker {
   }
 
   async load(adapter: DaemonAdapterKind, cwd: string, limit = 100): Promise<BridgeResumeSessionCandidate[]> {
+    return (await this.request(adapter, cwd, limit)).candidates ?? [];
+  }
+
+  async loadCompletions(adapter: DesktopCompletion["adapter"], cwd: string, limit = 100): Promise<DesktopCompletion[]> {
+    return (await this.request(adapter, cwd, limit, "completions")).completions ?? [];
+  }
+
+  private async request(adapter: DaemonAdapterKind, cwd: string, limit: number, operation?: "completions"): Promise<CatalogResponse> {
     if (this.closed) throw new Error("任务目录后台读取已停止。");
     if (this.pending.size >= 32) throw new Error("任务目录读取繁忙，请稍后重试。");
     const worker = this.getWorker(adapter);
     const id = ++this.nextId;
-    return await new Promise<BridgeResumeSessionCandidate[]>((resolve, reject) => {
+    return await new Promise<CatalogResponse>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.fail(adapter, worker, new Error("任务目录后台读取超时，稍后将重新连接。"));
       }, this.options.timeoutMs ?? 6_000);
       worker.ref();
       this.pending.set(id, { resolve, reject, timer, adapter });
       try {
-        worker.postMessage({ id, adapter, cwd, limit } satisfies CatalogRequest);
+        worker.postMessage({ id, adapter, cwd, limit, ...(operation ? { operation } : {}) } satisfies CatalogRequest);
       } catch (error) {
         this.pending.delete(id);
         clearTimeout(timer);

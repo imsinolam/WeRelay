@@ -97,6 +97,7 @@ export type WorkspaceEndpointAdapter =
   | "grok"
   | "codebuddy"
   | "reasonix"
+  | "pi"
   | "workbuddy"
   | "deepseek"
   | "opencode"

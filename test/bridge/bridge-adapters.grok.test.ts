@@ -239,6 +239,36 @@ describe("Grok shared owner adapter", () => {
     }
   });
 
+  test("uses the latest user input, not the later AI reply, when the Grok summary is only a session ID", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "werelay-grok-history-"));
+    const previous = process.env.GROK_HOME;
+    process.env.GROK_HOME = home;
+    try {
+      const sessionId = "01a0d152-0000-0000-0000-000000000000";
+      const sessionDir = path.join(home, "sessions", encodeURIComponent("/repo/grok"), sessionId);
+      fs.mkdirSync(sessionDir, { recursive: true });
+      fs.writeFileSync(path.join(sessionDir, "summary.json"), JSON.stringify({
+        info: { id: sessionId, cwd: "/repo/grok" },
+        generated_title: `Grok 会话 ${sessionId.slice(0, 8)}`,
+        updated_at: "2026-09-24T01:00:00.000Z",
+      }));
+      fs.writeFileSync(path.join(sessionDir, "chat_history.jsonl"), [
+        JSON.stringify({ type: "user", content: "旧消息" }),
+        JSON.stringify({ type: "user", content: "最近的用户消息" }),
+        JSON.stringify({ type: "assistant", content: "最近的 Grok 回复" }),
+        "",
+      ].join("\n"));
+      expect(listGrokStoredSessions(10, { liveEventPaths: [] })[0]?.title)
+        .toBe("最近的用户消息");
+      expect((await listGrokStoredSessionsAsync(10, { liveEventPaths: [] }))[0]?.title)
+        .toBe("最近的用户消息");
+    } finally {
+      if (previous === undefined) delete process.env.GROK_HOME;
+      else process.env.GROK_HOME = previous;
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   test("async stored task catalog yields to the event loop", async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "werelay-grok-async-"));
     const previous = process.env.GROK_HOME;

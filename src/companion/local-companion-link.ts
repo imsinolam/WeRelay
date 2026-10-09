@@ -22,6 +22,10 @@ import { writePrivateFileAtomic } from "../utils/private-files.ts";
 export type LocalCompanionCommand =
   | { command: "send_input"; text: string }
   | { command: "send_input_to_session"; sessionId: string; text: string }
+  | { command: "get_session_model_state"; sessionId: string }
+  | { command: "get_new_session_model_state" }
+  | { command: "set_session_model"; sessionId: string; model: string }
+  | { command: "set_session_reasoning_effort"; sessionId: string; reasoningEffort: string }
   | { command: "get_session_messages"; sessionId: string }
   | { command: "get_latest_session_message"; sessionId: string }
   | { command: "list_resume_sessions"; limit?: number }
@@ -95,7 +99,7 @@ function normalizeEndpoint(value: unknown): LocalCompanionEndpoint | null {
 
   const record = value as Record<string, unknown>;
   const kind =
-    record.kind === "codex" || record.kind === "claude" || record.kind === "tclaude" || record.kind === "grok" || record.kind === "codebuddy" || record.kind === "reasonix" || record.kind === "workbuddy" || record.kind === "deepseek" || record.kind === "opencode" || record.kind === "shell"
+    record.kind === "codex" || record.kind === "claude" || record.kind === "tclaude" || record.kind === "grok" || record.kind === "codebuddy" || record.kind === "reasonix" || record.kind === "pi" || record.kind === "workbuddy" || record.kind === "deepseek" || record.kind === "opencode" || record.kind === "shell"
       ? record.kind
       : "codex";
   const sharedSessionId =
@@ -251,6 +255,7 @@ export function clearLocalCompanionEndpoint(
           getWorkspaceAdapterEndpointFile(cwd, "grok"),
           getWorkspaceAdapterEndpointFile(cwd, "codebuddy"),
           getWorkspaceAdapterEndpointFile(cwd, "reasonix"),
+          getWorkspaceAdapterEndpointFile(cwd, "pi"),
           getWorkspaceAdapterEndpointFile(cwd, "workbuddy"),
           getWorkspaceAdapterEndpointFile(cwd, "deepseek"),
           getWorkspaceAdapterEndpointFile(cwd, "opencode"),

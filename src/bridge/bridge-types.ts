@@ -303,6 +303,8 @@ export type BridgeEvent =
       type: "final_reply";
       text: string;
       timestamp: string;
+      /** Native final-message identity, used to deduplicate history recovery. */
+      messageId?: string;
       threadId?: string;
       turnId?: string;
       origin?: BridgeTurnOrigin;

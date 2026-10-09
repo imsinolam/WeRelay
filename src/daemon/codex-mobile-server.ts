@@ -32,6 +32,9 @@ import type {
   BridgeSessionRunSummary,
 } from "../bridge/bridge-types.ts";
 import { CodexMobileAuthStore } from "./codex-mobile-auth.ts";
+import { SESSION_ORGANIZER_CSS, SESSION_ORGANIZER_HTML, SESSION_ORGANIZER_JS } from "./session-organizer-web.ts";
+import type { SessionOrganizerSnapshot } from "./session-organizer.ts";
+import { RemoteAccessError, type MobileRemoteAccessView } from "./mobile-remote-access.ts";
 import type { MobileProviderSettingsEntry } from "./mobile-provider-settings.ts";
 import type { MobileMessageOutboxStatus } from "./mobile-message-outbox.ts";
 import {
@@ -46,6 +49,10 @@ export const CODEX_MOBILE_ASSET_VERSION = crypto.createHash("sha256")
   .update(CODEX_MOBILE_CSS)
   .update("\0")
   .update(CODEX_MOBILE_JS)
+  .update("\0")
+  .update(SESSION_ORGANIZER_HTML)
+  .update(SESSION_ORGANIZER_CSS)
+  .update(SESSION_ORGANIZER_JS)
   .digest("hex")
   .slice(0, 12);
 
@@ -115,6 +122,8 @@ const CODEX_MOBILE_JS_RESPONSE = CODEX_MOBILE_JS.replaceAll(
 );
 const CODEX_MOBILE_CSS_ASSET = createImmutableTextAsset(CODEX_MOBILE_CSS);
 const CODEX_MOBILE_JS_ASSET = createImmutableTextAsset(CODEX_MOBILE_JS_RESPONSE);
+const ORGANIZER_CSS_ASSET = createImmutableTextAsset(SESSION_ORGANIZER_CSS);
+const ORGANIZER_JS_ASSET = createImmutableTextAsset(SESSION_ORGANIZER_JS);
 const MOBILE_ASSET_SECURITY_HEADERS = {
   "content-security-policy":
     "default-src 'self'; connect-src 'self'; img-src 'self' data: http: https:; style-src 'self'; script-src 'self'; base-uri 'none'; frame-ancestors 'none'",
@@ -151,6 +160,7 @@ export type CodexMobileTask = {
 export type CodexMobileTaskBoardTask = CodexMobileTask & {
   adapter: string;
   adapterLabel: string;
+  cwd?: string;
   completedAt?: string;
 };
 
@@ -425,10 +435,12 @@ export type StartCodexMobileServerOptions = {
     threadId: string,
     adapter: string,
     searchParams: URLSearchParams,
-  ) => string;
+  ) => string | undefined;
   accessToken: string;
   relayPrewarmToken?: string;
   authStore?: CodexMobileAuthStore;
+  readRemoteAccess?: () => MobileRemoteAccessView;
+  changeRemoteAccess?: (input: Record<string, unknown>, checkOnly: boolean) => Promise<MobileRemoteAccessView>;
   resolveDesktopPublicAddress?: () => Promise<string | null>;
   listAdapters?: () => Promise<CodexMobileAdapterList>;
   switchAdapter?: (adapter: string) => Promise<CodexMobileAdapterSwitchResult>;
@@ -441,6 +453,7 @@ export type StartCodexMobileServerOptions = {
     dependencyId: string,
   ) => Promise<CodexMobileProviderInstallResult>;
   listTaskBoard?: () => Promise<CodexMobileTaskBoard>;
+  listSessionOrganizer?: () => Promise<SessionOrganizerSnapshot>;
   listTasks: (adapter?: string) => Promise<CodexMobileTask[]>;
   createTask?: (
     adapter?: string,
@@ -547,6 +560,7 @@ export type CodexMobileServerHandle = {
   port: number;
   lanAddress: string;
   buildTaskUrl: (threadId: string, adapter?: string) => string;
+  updateRemoteAccess: (publicBaseUrl: string | undefined, prewarmToken?: string) => void;
   close: () => Promise<void>;
 };
 
@@ -788,6 +802,21 @@ function isTrustedReverseProxyRequest(request: IncomingMessage): boolean {
     typeof request.headers["x-real-ip"] === "string";
 }
 
+function canConfigureRemoteAccess(request: IncomingMessage, requireOrigin = false): boolean {
+  if (!isLoopbackAddress(request.socket.remoteAddress) ||
+      request.headers["x-werelay-relay"] ||
+      request.headers["x-forwarded-proto"] || request.headers["x-real-ip"] ||
+      request.headers["x-forwarded-for"]) return false;
+  try {
+    const host = new URL(`http://${request.headers.host ?? ""}`);
+    if (!["localhost", "127.0.0.1", "[::1]"].includes(host.hostname)) return false;
+    if (request.headers["sec-fetch-site"] === "cross-site") return false;
+    return !requireOrigin || request.headers.origin === host.origin;
+  } catch {
+    return false;
+  }
+}
+
 function requestUsesHttps(request: IncomingMessage): boolean {
   if ((request.socket as IncomingMessage["socket"] & { encrypted?: boolean }).encrypted) {
     return true;
@@ -910,9 +939,13 @@ async function readJsonBody(
   request: IncomingMessage,
   maxBytes = 1_048_576,
 ): Promise<Record<string, unknown>> {
+  const declaredBytes = Number(request.headers["content-length"]);
+  if (Number.isFinite(declaredBytes) && declaredBytes > maxBytes) {
+    throw new HttpError(413, "消息或图片过大。");
+  }
   const chunks: Buffer[] = [];
   let totalBytes = 0;
-  for await (const chunk of request) {
+  for await (const chunk of request.iterator({ destroyOnReturn: false })) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     totalBytes += buffer.length;
     if (totalBytes > maxBytes) {
@@ -1221,6 +1254,18 @@ function createRequestHandler(
       }
       if (method === "GET" && url.pathname === "/about") {
         sendText(response, 200, "text/html; charset=utf-8", WE_RELAY_ABOUT_HTML_RESPONSE);
+        return;
+      }
+      if (method === "GET" && url.pathname === "/organizer") {
+        sendText(response, 200, "text/html; charset=utf-8", SESSION_ORGANIZER_HTML.replaceAll(WE_RELAY_ASSET_VERSION_PLACEHOLDER, CODEX_MOBILE_ASSET_VERSION));
+        return;
+      }
+      if (method === "GET" && url.pathname === "/organizer.css") {
+        sendImmutableTextAsset(request, response, "text/css; charset=utf-8", ORGANIZER_CSS_ASSET, MOBILE_ASSET_SECURITY_HEADERS);
+        return;
+      }
+      if (method === "GET" && url.pathname === "/organizer.js") {
+        sendImmutableTextAsset(request, response, "text/javascript; charset=utf-8", ORGANIZER_JS_ASSET, MOBILE_ASSET_SECURITY_HEADERS);
         return;
       }
       if (method === "GET" && url.pathname === "/app.css") {
@@ -1587,6 +1632,43 @@ function createRequestHandler(
         return;
       }
 
+      if (url.pathname === "/api/settings/remote" || url.pathname === "/api/settings/remote/check") {
+        if (!options.readRemoteAccess || !options.changeRemoteAccess) {
+          throw new HttpError(409, "当前电脑尚不支持远程访问设置，请更新电脑端 WeRelay。");
+        }
+        if (method === "GET" && url.pathname === "/api/settings/remote") {
+          sendJson(response, 200, {
+            ...options.readRemoteAccess(),
+            localUrl: `http://localhost:${network.port}`,
+            canEdit: canConfigureRemoteAccess(request),
+          });
+          return;
+        }
+        if (method === "POST") {
+          if (!canConfigureRemoteAccess(request, true)) {
+            throw new HttpError(403, "请在电脑本机通过 localhost 打开任务台后修改服务器配置。");
+          }
+          const input = await readJsonBody(request, 8192);
+          try {
+            const checkOnly = url.pathname.endsWith("/check");
+            const view = await options.changeRemoteAccess(input, checkOnly);
+            sendJson(response, 200, {
+              ...view,
+              localUrl: `http://localhost:${network.port}`,
+              canEdit: true,
+              ...(checkOnly ? { checked: true } : {}),
+            });
+          } catch (error) {
+            throw new HttpError(
+              error instanceof RemoteAccessError ? error.statusCode : 500,
+              error instanceof RemoteAccessError ? error.message : "配置未能保存，请在电脑上检查后重试。",
+            );
+          }
+          return;
+        }
+        throw new HttpError(405, "不支持这种设置操作。");
+      }
+
       if (method === "GET" && url.pathname === "/api/settings") {
         if (!options.readSettings) {
           throw new HttpError(409, "当前连接暂不支持读取设置。");
@@ -1643,6 +1725,11 @@ function createRequestHandler(
           throw new HttpError(409, "当前连接暂不支持任务看板。");
         }
         sendJson(response, 200, await options.listTaskBoard());
+        return;
+      }
+      if (method === "GET" && url.pathname === "/api/session-organizer") {
+        if (!options.listSessionOrganizer) throw new HttpError(409, "当前连接暂不支持会话整理。");
+        sendJson(response, 200, await options.listSessionOrganizer());
         return;
       }
 
@@ -2179,10 +2266,11 @@ async function listen(
 export async function startCodexMobileServer(
   options: StartCodexMobileServerOptions,
 ): Promise<CodexMobileServerHandle> {
+  options = { ...options };
   const host = resolveCodexMobileListenHost(options);
   const requestedPort = options.port ?? 4396;
   const maxPortAttempts = requestedPort === 0 ? 1 : options.maxPortAttempts ?? 10;
-  const publicBaseUrl = normalizePublicBaseUrl(options.publicBaseUrl);
+  let publicBaseUrl = normalizePublicBaseUrl(options.publicBaseUrl);
   const lanAddress = options.lanAddress ?? resolvePreferredLanAddress() ??
     (publicBaseUrl ? "127.0.0.1" : null);
   if (!lanAddress) {
@@ -2225,6 +2313,11 @@ export async function startCodexMobileServer(
   return {
     port,
     lanAddress,
+    updateRemoteAccess: (nextUrl, prewarmToken) => {
+      publicBaseUrl = normalizePublicBaseUrl(nextUrl);
+      networkContext.publicBaseUrl = publicBaseUrl;
+      options.relayPrewarmToken = prewarmToken;
+    },
     buildTaskUrl: (threadId, adapter) => {
       const selector = threadId.trim();
       const baseUrl = publicBaseUrl ?? `http://${lanAddress}:${port}`;
@@ -2236,11 +2329,12 @@ export async function startCodexMobileServer(
         searchParams.set("setup", options.accessToken);
       }
       if (publicBaseUrl && options.buildPublicTaskUrl) {
-        return options.buildPublicTaskUrl(
+        const registered = options.buildPublicTaskUrl(
           selector,
           adapter ?? "codex",
           searchParams,
         );
+        if (registered) return registered;
       }
       const query = searchParams.toString();
       return `${baseUrl}/t/${shortCode}${query ? `?${query}` : ""}`;

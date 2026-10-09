@@ -279,6 +279,13 @@ describe("mobile task creation", () => {
       listed: true,
     })).toBe(true);
     expect(isMobileTaskAvailableForDirectAction({
+      threadId: "cached-thread",
+      currentThreadId: "other-thread",
+      recentlyCreated: false,
+      listed: false,
+      cached: true,
+    })).toBe(true);
+    expect(isMobileTaskAvailableForDirectAction({
       threadId: "unknown-thread",
       currentThreadId: "other-thread",
       recentlyCreated: false,
@@ -679,6 +686,7 @@ describe("werelay-daemon helpers", () => {
 
   test("reports an open terminal separately from a daemon-connected adapter", () => {
     expect(formatMobileAdapterLabel("deepseek")).toBe("DeepSeek Harness");
+    expect(formatMobileAdapterLabel("pi")).toBe("Pi");
     expect(resolveMobileAdapterDisplayStatus({
       visibleClientOpen: true,
     })).toBe("open");
@@ -720,6 +728,16 @@ describe("werelay-daemon helpers", () => {
       "workbuddy",
     ]);
     expect(open.has("claude")).toBe(false);
+  });
+
+  test("includes an already-running plain Pi CLI before the global task snapshot is numbered", () => {
+    const open = detectOpenMobileAdaptersFromProcessList([
+      "pi",
+      "/Users/test/.nvm/versions/node/v24/bin/node /Users/test/.nvm/versions/node/v24/bin/pi --session test",
+      "/usr/local/bin/piano --version",
+    ].join("\n"));
+    expect(open.has("pi")).toBe(true);
+    expect(detectOpenMobileAdaptersFromProcessList("/usr/local/bin/piano --version").has("pi")).toBe(false);
   });
 
   test("explains terminal capability limits instead of exposing a generic mobile error", () => {
@@ -1441,6 +1459,7 @@ describe("werelay-daemon helpers", () => {
     expect(formatTaskListLoadingMessage()).toBe("全部任务正在获取中");
     expect(formatTaskListLoadingMessage("deepseek")).toBe("DSH最近任务列表获取中");
     expect(formatTaskListLoadingMessage("workbuddy")).toBe("WorkBuddy最近任务列表获取中");
+    expect(formatTaskListLoadingMessage("pi")).toBe("Pi最近任务列表获取中");
     expect(isExplicitGlobalTaskListRequest("任务")).toBe(true);
     expect(isExplicitGlobalTaskListRequest("任务列表")).toBe(true);
     expect(isExplicitGlobalTaskListRequest("任务：canvas")).toBe(true);
@@ -2867,7 +2886,7 @@ describe("werelay-daemon helpers", () => {
     });
 
     expect(output).toBe(
-      "当前：Codex\nCodex：空闲\nClaude Code：待审批\nTClaude：未启动\nGrok CLI：未启动\nCodeBuddy：未启动\nreasonix：未启动\nWorkBuddy：未启动\nDSH：未启动\nOpenCode：未启动",
+      "当前：Codex\nCodex：空闲\nClaude Code：待审批\nTClaude：未启动\nGrok CLI：未启动\nCodeBuddy：未启动\nreasonix：未启动\nPi Agent：未启动\nWorkBuddy：未启动\nDSH：未启动\nOpenCode：未启动",
     );
     expect(output).not.toMatch(/cwd|started_at|pid|D:\/work/);
   });

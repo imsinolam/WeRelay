@@ -1,6 +1,6 @@
 {
   "name": "werelay",
-  "version": "0.3.13",
+  "version": "0.3.15",
   "private": true,
   "description": "Extend real desktop coding-agent sessions to WeChat, LAN web, and an optional public relay without forking context",
   "type": "module",
@@ -72,6 +72,10 @@
     "werelay-bridge-opencode": "bin/werelay-bridge-opencode.mjs",
     "werelay-opencode": "bin/werelay-opencode.mjs",
     "werelay-opencode-start": "bin/werelay-opencode-start.mjs",
+    "werelay-bridge-pi": "bin/werelay-bridge-pi.mjs",
+    "werelay-pi": "bin/werelay-pi.mjs",
+    "werelay-pi-start": "bin/werelay-pi-start.mjs",
+    "werelay-pi-enable": "bin/werelay-pi-enable.mjs",
     "werelay-bridge-shell": "bin/werelay-bridge-shell.mjs",
     "werelay-relay-server": "bin/werelay-relay-server.mjs",
     "werelay-grok": "bin/werelay-grok.mjs",
@@ -97,6 +101,7 @@
     "bridge": "node --no-warnings --experimental-strip-types src/bridge/werelay-bridge.ts",
     "daemon": "node --no-warnings --experimental-strip-types src/daemon/werelay-daemon.ts",
     "bridge:codex": "node --no-warnings --experimental-strip-types src/bridge/werelay-bridge.ts --adapter codex",
+    "bridge:pi": "node --no-warnings --experimental-strip-types src/bridge/werelay-bridge.ts --adapter pi",
     "codex:panel": "node --no-warnings --experimental-strip-types src/companion/codex-remote-client.ts",
     "codex:start": "node --no-warnings --experimental-strip-types src/companion/local-companion-start.ts",
     "claude:start": "node --no-warnings --experimental-strip-types src/companion/local-companion-start.ts --adapter claude",
@@ -124,6 +129,8 @@
     "bridge:deepseek": "node --no-warnings --experimental-strip-types src/bridge/werelay-bridge.ts --adapter deepseek",
     "privacy:check": "node scripts/check-public-safety.mjs",
     "privacy:check:history": "node scripts/check-public-safety.mjs --history",
+    "baseline:check": "node scripts/check-worktree-baseline.mjs",
+    "baseline:install-hook": "node scripts/install-baseline-hook.mjs",
     "public:snapshot": "node scripts/create-public-snapshot.mjs",
     "relay:server": "node --no-warnings --experimental-strip-types src/relay/relay-server-cli.ts",
     "codebuddy:companion": "node --no-warnings --experimental-strip-types src/companion/local-companion.ts --adapter codebuddy",
@@ -133,7 +140,7 @@
     "github:publish:server": "node scripts/publish-github-via-server.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "@opencode-ai/sdk": "^1.3.2",
     "node-pty": "^1.1.0",
     "qrcode-terminal": "^0.12.0"

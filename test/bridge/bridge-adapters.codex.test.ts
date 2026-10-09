@@ -18,6 +18,7 @@ import {
   extractLatestCodexThreadMessage,
   mapCodexDesktopThreadListResponse,
   parseCodexSessionTaskBoundary,
+  readCodexCatalogLatestUserText,
   readCodexSessionMessagePageFromRollout,
   readCodexStateDbSessionCatalog,
   shouldReadCodexStateCatalogInProcess,
@@ -78,6 +79,15 @@ describe("Codex desktop permission alignment", () => {
           sandboxPolicy: {
             type: "workspaceWrite",
             writableRoots: ["/repo"],
+            networkAccess: false,
+          },
+        },
+        thread_readonly: {
+          activePermissionProfile: { id: ":read-only", extends: null },
+          approvalPolicy: "never",
+          approvalsReviewer: "user",
+          sandboxPolicy: {
+            type: "readOnly",
             networkAccess: false,
           },
         },
@@ -147,6 +157,44 @@ describe("Codex desktop permission alignment", () => {
       approvalPolicy: "never",
       sandbox: "danger-full-access",
       sandboxPolicy: { type: "dangerFullAccess" },
+    });
+  });
+
+  test("builds a complete workspace-write policy when mobile upgrades a read-only task", async () => {
+    const adapter = new CodexPtyAdapter({
+      kind: "codex",
+      command: "codex",
+      cwd: "/fallback",
+      renderMode: "headless",
+      codexTransport: "desktop",
+      inheritCodexDesktopPermissions: true,
+    }) as any;
+    adapter.readDesktopGlobalState = () => globalState;
+    adapter.getSessionRunSummary = async () => ({ status: "completed" });
+    adapter.desktopIpcClient = {
+      getThreadStateView: () => ({
+        cwd: "/repo",
+        currentPermissions: { runtimeWorkspaceRoots: ["/repo", "/repo"] },
+      }),
+    };
+
+    const next = await adapter.setSessionPermission(
+      "thread_readonly",
+      "workspace-write",
+    );
+
+    expect(next.currentPermission).toBe("workspace-write");
+    expect(adapter.resolveDesktopPermissionSettings("thread_readonly")).toEqual({
+      approvalPolicy: "on-request",
+      approvalsReviewer: "user",
+      sandbox: "workspace-write",
+      sandboxPolicy: {
+        type: "workspaceWrite",
+        writableRoots: ["/repo"],
+        networkAccess: false,
+        excludeTmpdirEnvVar: false,
+        excludeSlashTmp: false,
+      },
     });
   });
 
@@ -1189,6 +1237,32 @@ describe("Codex desktop live conversation messages", () => {
       expect(older?.messages.map((item) => item.text)).toEqual(["较早消息"]);
     } finally {
       concat.mockRestore();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("Codex unnamed task finds the latest user input past a run of assistant updates", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-user-title-"));
+    const filePath = path.join(directory, "rollout.jsonl");
+    const message = (role: "user" | "assistant", text: string) => JSON.stringify({
+      type: "response_item",
+      payload: {
+        type: "message", role,
+        content: [{ type: role === "user" ? "input_text" : "output_text", text }],
+      },
+    });
+    try {
+      fs.writeFileSync(filePath, [
+        message("user", "原始请求"),
+        message("assistant", "旧回复"),
+        message("user", "最后一条用户请求"),
+        ...Array.from({ length: 12 }, (_, index) => message("assistant", `进度 ${index + 1}`)),
+        "",
+      ].join("\n"));
+      expect(readCodexCatalogLatestUserText(filePath)).toBe("最后一条用户请求");
+      fs.writeFileSync(filePath, message("assistant", "只有回复") + "\n");
+      expect(readCodexCatalogLatestUserText(filePath)).toBeUndefined();
+    } finally {
       fs.rmSync(directory, { recursive: true, force: true });
     }
   });
@@ -3559,6 +3633,8 @@ describe("Codex desktop IPC transport", () => {
       model?: string;
       effort?: string;
     }> = [];
+    const settingsUpdates: Array<{ threadId: string; model?: string; effort?: string }> = [];
+    const desktopSettings = { model: "gpt-5.6-sol", effort: "medium" };
     adapter.sendRpcRequest = async (method: string) => {
       if (method !== "model/list") throw new Error(`Unexpected RPC method: ${method}`);
       return {
@@ -3594,10 +3670,17 @@ describe("Codex desktop IPC transport", () => {
     };
     adapter.desktopIpcClient = {
       getThreadStateView: () => ({
-        latestModel: "gpt-5.6-sol",
-        latestThreadSettings: { model: "gpt-5.6-sol", effort: "medium" },
+        latestModel: desktopSettings.model,
+        latestThreadSettings: desktopSettings,
         threadRuntimeStatus: { type: "idle" },
       }),
+      updateThreadSettingsForNextTurn: async (
+        threadId: string,
+        settings: { model?: string; effort?: string },
+      ) => {
+        settingsUpdates.push({ threadId, ...settings });
+        Object.assign(desktopSettings, settings);
+      },
       startTurn: async (
         threadId: string,
         text: string,
@@ -3659,22 +3742,56 @@ describe("Codex desktop IPC transport", () => {
     expect(await adapter.setSessionModel("thread-model", "gpt-5.6-terra"))
       .toMatchObject({
         currentModel: "gpt-5.6-terra",
+        currentReasoningEffort: "high",
         canChange: true,
       });
     expect((await adapter.getSessionModelState("thread-model")).currentReasoningEffort)
-      .toBeUndefined();
+      .toBe("high");
     await expect(adapter.setSessionReasoningEffort("thread-model", "low"))
       .rejects.toThrow("当前不可用");
     expect(await adapter.setSessionReasoningEffort("thread-model", "xhigh"))
       .toMatchObject({ currentReasoningEffort: "xhigh" });
+    expect(settingsUpdates).toEqual([
+      { threadId: "thread-model", model: "gpt-5.6-terra", effort: "high" },
+      { threadId: "thread-model", effort: "xhigh" },
+    ]);
 
     await adapter.sendInputToSession("thread-model", "使用新模型继续");
     expect(starts).toEqual([{
       threadId: "thread-model",
       text: "使用新模型继续",
-      model: "gpt-5.6-terra",
-      effort: "xhigh",
+      model: undefined,
+      effort: undefined,
     }]);
+    // The desktop owner is authoritative even if its user later changes the model.
+    desktopSettings.model = "gpt-5.6-sol";
+    expect((await adapter.getSessionModelState("thread-model")).currentModel)
+      .toBe("gpt-5.6-sol");
+  });
+
+  test("does not claim a Codex model switch succeeded when the desktop owner rejects it", async () => {
+    const adapter = new CodexPtyAdapter({
+      kind: "codex", command: "codex", cwd: process.cwd(),
+      renderMode: "headless", codexTransport: "desktop",
+    }) as any;
+    adapter.sendRpcRequest = async () => ({
+      data: [
+        { id: "sol", model: "gpt-6-sol", hidden: false },
+        { id: "luna", model: "gpt-6-luna", hidden: false },
+      ],
+      nextCursor: null,
+    });
+    adapter.desktopIpcClient = {
+      getThreadStateView: () => ({
+        latestThreadSettings: { model: "gpt-6-luna" },
+        threadRuntimeStatus: { type: "idle" },
+      }),
+      updateThreadSettingsForNextTurn: async () => { throw new Error("桌面端未应用设置"); },
+    };
+    await expect(adapter.setSessionModel("thread-model", "gpt-6-sol"))
+      .rejects.toThrow("未应用");
+    expect((await adapter.getSessionModelState("thread-model")).currentModel)
+      .toBe("gpt-6-luna");
   });
 
   test("does not invent a model default when the desktop session has no reasoning effort", async () => {

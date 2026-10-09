@@ -22,6 +22,22 @@ type TestRpcRequestFrame = {
   args: unknown[];
 };
 
+test("notification observer never launches, restarts, cleans processes or probes application lifecycle", async () => {
+  const calls: string[] = [];
+  const socketPath = process.platform === "win32"
+    ? `\\\\.\\pipe\\werelay-missing-${process.pid}-${Date.now()}`
+    : path.join(os.tmpdir(), `werelay-missing-${process.pid}.sock`);
+  const client = new WorkBuddyDesktopRpcClient({ socketPath,
+    callbacks: { onEvent() {} }, connectExistingOnly: true, allowDesktopApplicationLaunch: true,
+    lifecycle: { isRunning: async () => { calls.push("probe"); return true; }, launch: async () => { calls.push("launch"); },
+      restart: async () => { calls.push("restart"); }, cleanup: async () => { calls.push("cleanup"); } },
+  });
+  try {
+    await expect(client.connect()).rejects.toThrow("审批通知接口尚未接入");
+    expect(calls).toEqual([]);
+  } finally { await client.close(); }
+});
+
 function createCompatibleServer(
   handler: (socket: net.Socket, frame: TestRpcRequestFrame) => void,
   options: { onPing?: () => void; pingFailures?: number } = {},

@@ -501,7 +501,7 @@ export function parseCliArgs(argv: string[]): BridgeCliOptions {
   }
 
   if (!adapter) {
-    throw new Error("Missing required --adapter <codex|claude|tclaude|grok|codebuddy|reasonix|workbuddy|deepseek|opencode|shell>");
+    throw new Error("Missing required --adapter <codex|claude|tclaude|grok|codebuddy|reasonix|pi|workbuddy|deepseek|opencode|shell>");
   }
 
   const defaultCommand = resolveDefaultAdapterCommand(adapter);
@@ -518,7 +518,7 @@ export function parseCliArgs(argv: string[]): BridgeCliOptions {
 function printUsageAndExit(): never {
   process.stdout.write(
     [
-      "Usage: werelay-bridge --adapter <codex|claude|tclaude|grok|codebuddy|reasonix|workbuddy|deepseek|opencode|shell> [--cmd <executable>] [--cwd <path>] [--profile <name-or-path>] [--lifecycle <persistent|companion_bound>] [--session-start-mode <restore|new>]",
+      "Usage: werelay-bridge --adapter <codex|claude|tclaude|grok|codebuddy|reasonix|pi|workbuddy|deepseek|opencode|shell> [--cmd <executable>] [--cwd <path>] [--profile <name-or-path>] [--lifecycle <persistent|companion_bound>] [--session-start-mode <restore|new>]",
       "",
       "Examples:",
       "  werelay-bridge-codex",
@@ -1020,6 +1020,7 @@ async function main(): Promise<void> {
       options.adapter === "grok" ||
       options.adapter === "codebuddy" ||
       options.adapter === "reasonix" ||
+      options.adapter === "pi" ||
       isClaudeProviderKind(options.adapter)
     ) {
       log(

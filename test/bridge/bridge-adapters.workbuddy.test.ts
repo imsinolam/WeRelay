@@ -10,6 +10,7 @@ import {
   parseWorkBuddyTranscript,
   parseWorkBuddyTranscriptRunSummary,
   parseWorkBuddyTranscriptTitle,
+  parseWorkBuddyDesktopCompletion,
   resolveWorkBuddySidecarSocketPath,
   type WorkBuddyAdapterDependencies,
 } from "../../src/bridge/bridge-adapters.workbuddy.ts";
@@ -29,6 +30,24 @@ function deferred<T>() {
 }
 
 describe("WorkBuddy Desktop adapter", () => {
+  test("passive completion needs a terminal native reply from the latest user turn", () => {
+    const user = { type: "message", id: "u", role: "user", content: [{ type: "text", text: "检查" }], timestamp: 100 };
+    const reply = { type: "message", id: "a", role: "assistant", content: [{ type: "text", text: "完成" }], timestamp: 200, status: "completed" };
+    const jsonl = (...items: unknown[]) => items.map((item) => JSON.stringify(item)).join("\n");
+    const evidence = parseWorkBuddyDesktopCompletion(jsonl(user, reply));
+    expect(evidence).toMatchObject({ summary: { status: "completed", completedAtMs: 200 }, finalMessage: { id: "a", text: "完成" } });
+    expect(parseWorkBuddyDesktopCompletion(jsonl(user, reply, { ...user, id: "next", timestamp: 300 }))).toBeNull();
+    expect(parseWorkBuddyDesktopCompletion(jsonl(user, { ...reply, status: "streaming" }))).toBeNull();
+    expect(parseWorkBuddyDesktopCompletion(jsonl(user, { ...reply, status: "failed" }))).toBeNull();
+    expect(parseWorkBuddyDesktopCompletion(jsonl(user, { ...reply, id: undefined }))).toBeNull();
+    expect(parseWorkBuddyDesktopCompletion(jsonl(user, reply, { type: "title", text: "重命名" }))).toEqual(evidence);
+    expect(parseWorkBuddyDesktopCompletion(jsonl(reply))).toBeNull();
+    expect(parseWorkBuddyDesktopCompletion(jsonl(reply), 200)).toMatchObject({
+      summary: { status: "completed", completedAtMs: 200 }, finalMessage: { id: "a" },
+    });
+    expect(parseWorkBuddyDesktopCompletion(jsonl(reply), 201)).toBeNull();
+    expect(parseWorkBuddyDesktopCompletion(jsonl(reply, { ...user, timestamp: 300 }), 200)).toBeNull();
+  });
   test("reads and changes the real WorkBuddy task permission mode", async () => {
     const calls: Array<{ channel: string; args: unknown[] }> = [];
     const row = {
@@ -757,6 +776,10 @@ describe("WorkBuddy Desktop adapter", () => {
       readSession: async () => row,
       readMessages: async () => [],
       readRunSummary: async () => null,
+      readCompletion: async () => ({
+        summary: { status: "completed", startedAtMs: Date.now(), completedAtMs: Date.now() },
+        finalMessage: { role: "assistant", id: "native-final", phase: "final_answer", text: "处理完成" },
+      }),
       readLocalImage: async () => ({ data: "aW1hZ2U=", mimeType: "image/png" }),
     };
     const adapter = new WorkBuddyDesktopAdapter({
@@ -802,7 +825,7 @@ describe("WorkBuddy Desktop adapter", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(events.some((event) =>
-      event.type === "final_reply" && event.text === "处理完成"
+      event.type === "final_reply" && event.text === "处理完成" && event.messageId === "native-final"
     )).toBe(true);
     expect(events.some((event) =>
       event.type === "task_complete" && event.threadId === "wb-session"

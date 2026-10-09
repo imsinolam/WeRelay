@@ -2,7 +2,21 @@ import { classifyMobileSendFailure, type MobileMessageOutbox, type MobileMessage
 import type { BridgeSessionMessage } from "../bridge/bridge-types.ts";
 
 export function shouldRetryMobileMessage(error: string, attempts: number, limit: number): boolean {
-  return classifyMobileSendFailure(error) !== "permanent" && attempts < limit;
+  const failure = classifyMobileSendFailure(error);
+  return failure !== "permanent" && failure !== "unconfirmed" && attempts < limit;
+}
+
+// 覆盖桌面端 120 秒 hydration，并为回执同步留出余量；观察不消耗发送次数。
+export const MOBILE_MESSAGE_RECEIPT_OBSERVATION_WINDOW_MS = 180_000;
+export const MOBILE_MESSAGE_RECEIPT_OBSERVATION_INTERVAL_MS = 10_000;
+
+export function isMobileMessageDeliveryUncertain(entry: MobileMessageOutboxEntry): boolean {
+  return entry.deliveryUncertain === true || classifyMobileSendFailure(entry.lastError ?? "") === "unconfirmed";
+}
+
+export function mobileMessageReceiptObservationDeadlineMs(entry: MobileMessageOutboxEntry): number {
+  // 旧持久化条目没有首次尝试时间时，使用其已有尝试时间，不因每次检查而延长。
+  return (entry.firstAttemptAtMs ?? entry.lastAttemptAtMs ?? entry.createdAtMs) + MOBILE_MESSAGE_RECEIPT_OBSERVATION_WINDOW_MS;
 }
 
 /** An uncertain RPC response retries observation, never a possibly accepted turn. */
@@ -28,5 +42,5 @@ export async function prepareMobileMessageRetry(params: {
   } finally {
     if (timer) clearTimeout(timer);
   }
-  return entry.deliveryUncertain || classifyMobileSendFailure(entry.lastError ?? "") === "unconfirmed" ? "check" : "send";
+  return isMobileMessageDeliveryUncertain(entry) ? "check" : "send";
 }

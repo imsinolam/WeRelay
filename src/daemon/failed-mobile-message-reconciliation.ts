@@ -36,7 +36,7 @@ export function findFailedMessageExecution(
   threadId: string,
   messages: BridgeSessionMessage[],
 ): BridgeSessionMessage | undefined {
-  if (entry.status !== "failed") return undefined;
+  if (entry.status !== "failed" && entry.status !== "unconfirmed") return undefined;
   const sameTask = entry.threadId === threadId || entry.originalThreadId === threadId;
   return messages.find((message, index) => {
     if (message.role !== "user" || (message as BridgeSessionMessage & { pending?: boolean }).pending) return false;
@@ -84,17 +84,17 @@ export class FailedMobileMessageSweep {
     if (existing) return existing;
     const now = params.nowMs ?? Date.now();
     if (now - (this.lastChecks.get(params.adapter) ?? -Infinity) < 60_000) return Promise.resolve();
-    if (!params.outbox.failedEntries(params.adapter).length) return Promise.resolve();
+    if (!params.outbox.recoveryEntries(params.adapter, now).length) return Promise.resolve();
     this.lastChecks.set(params.adapter, now);
     const scan = (async () => {
       try {
         // Original-task receipts remain checkable even when task listing is offline.
         let tasks: ReconciliationTask[] = [];
         try { tasks = await boundedRead(params.listTasks); } catch { /* Try original IDs below. */ }
-        const failed = params.outbox.failedEntries(params.adapter);
-        const candidates = tasks.filter(task => failed.some(entry => taskCanCoverFailedMessage(entry, task, tasks)));
+        const recovering = params.outbox.recoveryEntries(params.adapter, now);
+        const candidates = tasks.filter(task => recovering.some(entry => taskCanCoverFailedMessage(entry, task, tasks)));
         // Include the original task even when it fell off the recent-task list.
-        for (const entry of failed) {
+        for (const entry of recovering) {
           if (!entry.threadId.startsWith("local-new-") && !candidates.some(task => task.threadId === entry.threadId)) {
             candidates.push({threadId: entry.threadId});
           }

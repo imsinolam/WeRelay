@@ -57,6 +57,22 @@ function writeTranscript(
 }
 
 describe("Claude stored sessions", () => {
+  test("uses a recent visible reply instead of an ID when no task name exists", () => {
+    const home = makeHome();
+    const id = "01a0d152-0000-0000-0000-000000000000";
+    const transcript = path.join(home, ".claude", "projects", "project", `${id}.jsonl`);
+    fs.mkdirSync(path.dirname(transcript), { recursive: true });
+    fs.writeFileSync(transcript, [
+      JSON.stringify({ type: "user", sessionId: id, cwd: "/project", timestamp: "2026-09-24T01:00:00Z",
+        message: { role: "user", content: "<local-command-stdout>系统提示</local-command-stdout>" } }),
+      JSON.stringify({ type: "assistant", sessionId: id, cwd: "/project", timestamp: "2026-09-24T01:01:00Z",
+        message: { role: "assistant", content: [{ type: "text", text: "最近的 Claude Code 回复内容" }] } }),
+      "",
+    ].join("\n"));
+    const [item] = listClaudeStoredSessions("claude", 10, home);
+    expect(item?.title).toBe("最近的 Claude Code 回复内容");
+  });
+
   test("treats a clean TClaude exit as a normal close with a Chinese recovery hint", () => {
     const adapter = new ClaudeCompanionAdapter({
       kind: "tclaude",

@@ -29,6 +29,7 @@ export type WorkBuddyDesktopRpcCallbacks = {
 };
 
 export type WorkBuddyDesktopRpcClientOptions = WorkBuddyDesktopRpcCallbacks & {
+  observeOnly?: boolean;
   allowDesktopApplicationLaunch?: boolean;
 };
 
@@ -149,7 +150,7 @@ if (socketPath && process.type === "browser" && !globalThis.__deskRelayWorkBuddy
             if (frame?.type !== "rpc-request" || typeof frame.id !== "string" || typeof frame.channel !== "string") {
               throw new Error("请求格式无效");
             }
-            if (!frame.channel.startsWith("session:") && frame.channel !== "daemon:ping") {
+            if (!frame.channel.startsWith("session:") && frame.channel !== "daemon:ping" && frame.channel !== "config:getProductConfiguration") {
               throw new Error("请求通道不允许");
             }
             if (!daemonChild?.stdin || daemonChild.stdin.destroyed) {
@@ -450,6 +451,7 @@ export class WorkBuddyDesktopRpcClient implements WorkBuddyDesktopRpcClientLike 
   private readonly longRunningRequestTimeoutMs: number;
   private readonly lifecycle: WorkBuddyDesktopLifecycle;
   private readonly allowDesktopApplicationLaunch: boolean;
+  private readonly connectExistingOnly: boolean;
   private socket: net.Socket | null = null;
   private buffer = "";
   private readonly pending = new Map<string, PendingRequest>();
@@ -458,6 +460,7 @@ export class WorkBuddyDesktopRpcClient implements WorkBuddyDesktopRpcClientLike 
   constructor(options: {
     socketPath?: string;
     hookPath?: string;
+    connectExistingOnly?: boolean;
     callbacks: WorkBuddyDesktopRpcCallbacks;
     allowDesktopApplicationLaunch?: boolean;
     connectTimeoutMs?: number;
@@ -467,6 +470,7 @@ export class WorkBuddyDesktopRpcClient implements WorkBuddyDesktopRpcClientLike 
     longRunningRequestTimeoutMs?: number;
     lifecycle?: WorkBuddyDesktopLifecycle;
   }) {
+    this.connectExistingOnly = options.connectExistingOnly === true;
     this.socketPath = options.socketPath ?? resolveWorkBuddyDesktopSocketPath();
     this.hookPath = options.hookPath;
     this.callbacks = options.callbacks;
@@ -484,13 +488,17 @@ export class WorkBuddyDesktopRpcClient implements WorkBuddyDesktopRpcClientLike 
   async connect(): Promise<void> {
     if (this.socket && !this.socket.destroyed) return;
     this.closed = false;
+    if (this.connectExistingOnly && process.platform !== "win32" && !fs.existsSync(this.socketPath)) {
+      throw new Error("WorkBuddy 审批通知接口尚未接入；未启动、重启或切换桌面任务。");
+    }
     const deadline = Date.now() + this.connectTimeoutMs;
     const direct = await this.tryConnect();
     if (direct) {
       await this.waitForDaemonReady(deadline);
-      await this.lifecycle.cleanup?.();
+      if (!this.connectExistingOnly) await this.lifecycle.cleanup?.();
       return;
     }
+    if (this.connectExistingOnly) throw new Error("WorkBuddy 审批通知接口尚未接入；未启动、重启或切换桌面任务。");
 
     const wasRunning = await this.lifecycle.isRunning();
     if (wasRunning && this.existingProcessGraceMs > 0) {

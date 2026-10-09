@@ -14,6 +14,7 @@ import {
   CODEX_MOBILE_ASSET_VERSION,
   resolveCodexMobileTaskShortRedirect,
 } from "../daemon/codex-mobile-server.ts";
+import { SESSION_ORGANIZER_CSS, SESSION_ORGANIZER_HTML, SESSION_ORGANIZER_JS } from "../daemon/session-organizer-web.ts";
 import {
   CODEX_MOBILE_CSS,
   CODEX_MOBILE_HTML,
@@ -23,6 +24,7 @@ import {
 import {
   createWeRelayRelayCommandId,
   WERELAY_RELAY_CLIENT_IP_PATH,
+  WERELAY_RELAY_CHECK_PATH,
   WERELAY_RELAY_HEARTBEAT_PATH,
   WERELAY_RELAY_POLL_PATH,
   WERELAY_RELAY_PROTOCOL_VERSION,
@@ -66,6 +68,8 @@ const MOBILE_JS = CODEX_MOBILE_JS.replaceAll(
 );
 const MOBILE_CSS_ASSET = createImmutableTextAsset(CODEX_MOBILE_CSS);
 const MOBILE_JS_ASSET = createImmutableTextAsset(MOBILE_JS);
+const ORGANIZER_CSS_ASSET = createImmutableTextAsset(SESSION_ORGANIZER_CSS);
+const ORGANIZER_JS_ASSET = createImmutableTextAsset(SESSION_ORGANIZER_JS);
 const MOBILE_ASSET_SECURITY_HEADERS = {
   "content-security-policy":
     "default-src 'self'; connect-src 'self'; img-src 'self' data: http: https:; style-src 'self'; script-src 'self'; base-uri 'none'; frame-ancestors 'none'",
@@ -916,6 +920,18 @@ export async function startWeRelayRelayServer(
         sendText(response, 200, "text/html; charset=utf-8", ABOUT_HTML);
         return;
       }
+      if (method === "GET" && url.pathname === "/organizer") {
+        sendText(response, 200, "text/html; charset=utf-8", SESSION_ORGANIZER_HTML.replaceAll("__WE_RELAY_ASSET_VERSION__", CODEX_MOBILE_ASSET_VERSION));
+        return;
+      }
+      if (method === "GET" && url.pathname === "/organizer.css") {
+        sendImmutableTextAsset(request, response, "text/css; charset=utf-8", ORGANIZER_CSS_ASSET, MOBILE_ASSET_SECURITY_HEADERS);
+        return;
+      }
+      if (method === "GET" && url.pathname === "/organizer.js") {
+        sendImmutableTextAsset(request, response, "text/javascript; charset=utf-8", ORGANIZER_JS_ASSET, MOBILE_ASSET_SECURITY_HEADERS);
+        return;
+      }
       if (method === "GET" && url.pathname === "/app.css") {
         sendImmutableTextAsset(
           request,
@@ -1082,6 +1098,13 @@ export async function startWeRelayRelayServer(
           "referrer-policy": "no-referrer",
         });
         response.end();
+        return;
+      }
+
+      if (method === "GET" && url.pathname === WERELAY_RELAY_CHECK_PATH) {
+        validateDeviceRequest(request, deviceId, deviceToken);
+        // Configuration probes must not claim the device is online or consume commands.
+        sendJson(response, 200, { ok: true, protocolVersion: WERELAY_RELAY_PROTOCOL_VERSION });
         return;
       }
 

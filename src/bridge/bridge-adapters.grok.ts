@@ -4,6 +4,7 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { isGeneratedTaskTitle, latestUserMessageText, titleFromLatestMessage } from "./task-title-fallback.ts";
 import { promisify } from "node:util";
 
 import {
@@ -723,7 +724,11 @@ export function listGrokStoredSessions(
       candidates.push({
         sessionId,
         threadId: sessionId,
-        title,
+        title: isGeneratedTaskTitle(title, sessionId)
+          ? titleFromLatestMessage(title, sessionId, latestUserMessageText(parseGrokChatHistory(
+              readGrokEventTail(path.join(directory, "chat_history.jsonl")),
+            )))
+          : title,
         lastUpdatedAt,
         ...(cwd ? { cwd } : {}),
         runtimeStatus: liveEventPaths.has(path.resolve(eventsPath))
@@ -792,7 +797,11 @@ export async function listGrokStoredSessionsAsync(
       candidates.push({
         sessionId,
         threadId: sessionId,
-        title,
+        title: isGeneratedTaskTitle(title, sessionId)
+          ? titleFromLatestMessage(title, sessionId, latestUserMessageText(parseGrokChatHistory(
+              await readGrokEventTailAsync(path.join(directory, "chat_history.jsonl")),
+            )))
+          : title,
         lastUpdatedAt,
         ...(cwd ? { cwd } : {}),
         runtimeStatus: liveEventPaths.has(path.resolve(eventsPath))

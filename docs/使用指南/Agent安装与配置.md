@@ -42,6 +42,7 @@ macOS / Linux：
 command -v codex
 command -v claude
 command -v opencode
+command -v pi
 ```
 
 Windows PowerShell：
@@ -50,6 +51,7 @@ Windows PowerShell：
 Get-Command codex
 Get-Command claude
 Get-Command opencode
+Get-Command pi
 ```
 
 如果终端提示 `command not found`、`not recognized` 或 WeRelay 报告 `spawn <命令> ENOENT`，说明命令没有安装，或启动 WeRelay 的进程没有继承正确的 `PATH`。先在同一终端中直接运行 Agent，确认可用后再启动 WeRelay。
@@ -80,6 +82,7 @@ curl -fsS http://127.0.0.1:4396/health
 | Grok CLI | `grok` | 按供应方方式安装并完成登录 | `werelay --adapter grok` |
 | CodeBuddy | `codebuddy` | 按供应方方式安装并完成登录 | `werelay --adapter codebuddy` |
 | reasonix | `reasonix` | 按供应方方式安装并完成登录 | `werelay --adapter reasonix` |
+| Pi Agent | `pi` | 安装并在本机配置模型 | `werelay --adapter pi` |
 | WorkBuddy Desktop | `/Applications/WorkBuddy.app` | macOS 安装应用并至少创建一个任务 | `werelay --adapter workbuddy` |
 | DeepSeek Harness | `dsh web` | 配置模型后保持 Harness 网页进程运行 | `werelay --adapter deepseek` |
 | OpenCode | `opencode` | 安装后运行 `opencode` 完成模型配置 | `werelay --adapter opencode` |
@@ -279,6 +282,22 @@ werelay-bridge-workbuddy
 ```
 
 WeRelay 连接的是 WorkBuddy Desktop 的本机任务和 transcript。应用未安装、未启动或尚无任务时，会提示先在桌面端准备，而不是创建一条云端替代会话。
+
+### Pi Agent
+
+先在电脑终端确认 `pi --version` 可用，并按照 Pi 自己的说明配置模型。建议在目标项目目录运行：
+
+```bash
+werelay-pi-start --cwd /你的项目目录
+```
+
+它会打开可见的 Pi TUI，并加载 WeRelay 的本地 owner 扩展。微信发送 `/pi` 或 `/pi agent`（不区分大小写），再发送“任务”查看原生 Pi 任务；微信和移动网页发送的文字由扩展交给**同一个可见 Pi 进程**。还可使用 `werelay --adapter pi`，由用户主动切换时打开 Pi 终端。历史任务按 Pi 自己的 JSONL 文件索引，不复制会话。
+
+如果 Pi 原窗口已经打开，不要再用 `pi --session` 启动第二个进程。先在电脑上运行一次 `werelay-pi-enable`，然后在**原 Pi 窗口**输入 `/reload`。WeRelay 会通过该窗口进程内的扩展连接原任务；其他项目中打开的 Pi 不会阻止当前项目接入。
+
+**安全边界**：历史任务仍按原生会话文件读取；文件相同不等于已连接原窗口。原窗口没有加载扩展时，WeRelay 会拒绝另起第二个写者。要从已接入的普通 Pi 窗口新建或切换任务，请先在那个窗口操作，再刷新手机页面。扩展仅创建限当前用户访问的本机连接；原窗口不在线、任务身份不一致或 owner 不唯一时均拒绝发送，不会偷偷创建替代任务。Windows 暂不支持接管已打开的普通 Pi 窗口。
+
+当前只承诺文字任务和停止运行；图片、审批回传以及从微信执行 Pi 自有斜杠命令暂不开放。Windows 暂不自动恢复历史任务，因为无法安全确认是否已有另一个进程持有会话。若 Pi 版本改变了扩展 API，应先做本机兼容验收。
 
 ### DeepSeek Harness
 

@@ -45,9 +45,10 @@ test("retries more than six times silently with the same client id and original 
   const bodies: any[] = [];
   const toasts: string[] = [];
   const noop = () => {};
-  const run = new Function("state", "api", "navigator", "setTimeout", "showToast", "renderMessages", "updateHeader", "saveCurrentConversationSnapshot", "persistMobileCacheNow", "restorePendingMessageImages", "persistPendingMessageImages", "adapterApiPath", "renderQueuedMessages", "migrateTemporaryConversation", "loadMessages", CODEX_MOBILE_JS.slice(start, end) + ";return submitPendingMessage;")(
+  const run = new Function("state", "api", "navigator", "setTimeout", "showToast", "renderMessages", "updateHeader", "saveCurrentConversationSnapshot", "persistMobileCacheNow", "restorePendingMessageImages", "persistPendingMessageImages", "adapterApiPath", "renderQueuedMessages", "migrateTemporaryConversation", "loadMessages", "cancelConversationEntryFocus", CODEX_MOBILE_JS.slice(start, end) + ";return submitPendingMessage;")(
     state, async (_path: string, options: any) => { bodies.push(JSON.parse(options.body)); if (bodies.length <= 8) throw new Error("offline"); return {status: "accepted"}; },
     {onLine: true}, noop, (text: string) => toasts.push(text), noop, noop, noop, noop, async () => {}, async () => {}, (path: string) => path, noop, noop, noop,
+    noop,
   );
   for (let attempt = 0; attempt < 8; attempt++) {
     await run(pending);

@@ -1,7 +1,10 @@
+import { CliSettingsScreen } from "./cli-settings-screen.ts";
+import { parseCliSettingsMenu } from "./cli-settings-menu.ts";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { titleFromLatestMessage } from "./task-title-fallback.ts";
 import { buildLocalCompanionToken } from "../companion/local-companion-link.ts";
 import { t } from "../i18n/index.ts";
 import { ensureWorkspaceChannelDir } from "../wechat/channel-config.ts";
@@ -27,6 +30,7 @@ import type {
   BridgeNoticeLevel,
   BridgeResumeSessionCandidate,
   BridgeSessionMessage,
+  BridgeSessionModelState,
   BridgeSessionSendResult,
   BridgeThreadSwitchReason,
   BridgeThreadSwitchSource,
@@ -240,6 +244,7 @@ function inspectClaudeTranscript(filePath: string): ClaudeStoredSession | null {
   let sessionId = sessionIdFromFile;
   let cwd: string | undefined;
   let title = "";
+  let latestText: string | undefined;
   let lastUpdatedAt = "";
   const prefix = readClaudeTranscriptEdge(filePath, 256 * 1024);
   for (const line of prefix.split(/\r?\n/)) {
@@ -259,6 +264,10 @@ function inspectClaudeTranscript(filePath: string): ClaudeStoredSession | null {
     sessionId = parsed.sessionId ?? sessionId;
     cwd = parsed.cwd ?? cwd;
     lastUpdatedAt = parsed.timestamp ?? lastUpdatedAt;
+    if (
+      (parsed.message?.role === "user" || parsed.message?.role === "assistant") &&
+      parsed.message.text.trim()
+    ) latestText = parsed.message.text;
   }
   let stat: fs.Stats;
   try {
@@ -270,7 +279,7 @@ function inspectClaudeTranscript(filePath: string): ClaudeStoredSession | null {
   return {
     sessionId,
     threadId: sessionId,
-    title: title || `会话 ${sessionId.slice(0, 8)}`,
+    title: titleFromLatestMessage(title || `会话 ${sessionId.slice(0, 8)}`, sessionId, latestText),
     lastUpdatedAt,
     ...(cwd ? { cwd } : {}),
     transcriptPath: filePath,
@@ -361,6 +370,147 @@ export function ensureClaudeWorkspaceTrustAccepted(
 }
 
 export class ClaudeCompanionAdapter extends AbstractPtyAdapter {
+  private settingsCapture: ((text: string) => void) | null = null;
+  private settingsOperation = false;
+  private settingsCancel: (() => void) | null = null;
+  private settingsScreen = new CliSettingsScreen();
+  private cachedModelSettingsSessionId: string | null = null;
+  private localEditorDirty = false;
+  private cachedModelSettings: BridgeSessionModelState | null = null;
+
+  async getNewSessionModelState(): Promise<BridgeSessionModelState> {
+    return this.state.sharedSessionId ? this.getSessionModelState(this.state.sharedSessionId)
+      : { options: [], canChange: false, unavailableReason: "请先连接终端并打开任务。" };
+  }
+
+  async getSessionModelState(sessionId: string): Promise<BridgeSessionModelState> {
+    if (this.cachedModelSettingsSessionId !== sessionId) this.cachedModelSettings = null;
+    const reason = this.settingsUnavailableReason(sessionId);
+    if (reason) return { ...(this.cachedModelSettings ?? { options: [] }), canChange: false, canChangeReasoningEffort: false, unavailableReason: reason, reasoningEffortUnavailableReason: reason };
+    if (this.cachedModelSettings) return this.cachedModelSettings;
+    const models = parseCliSettingsMenu(await this.readNativeSettingsMenu("model"), "model");
+    const efforts = parseCliSettingsMenu(await this.readNativeSettingsMenu("effort"), "effort");
+    this.cachedModelSettingsSessionId = sessionId;
+    this.cachedModelSettings = {
+      currentModel: models.current, options: models.options, canChange: models.options.length > 0,
+      unavailableReason: !models.options.length ? "当前终端未提供模型列表，请在电脑端检查登录和版本。" : undefined,
+      currentReasoningEffort: efforts.current, reasoningEffortOptions: efforts.options,
+      canChangeReasoningEffort: efforts.options.length > 0,
+      reasoningEffortUnavailableReason: !efforts.options.length ? "当前模型或终端版本不支持推理强度设置。" : undefined,
+    };
+    return this.cachedModelSettings;
+  }
+
+  async setSessionModel(sessionId: string, model: string): Promise<BridgeSessionModelState> {
+    const state = await this.getSessionModelState(sessionId);
+    if (!state.canChange || !state.options.some((entry) => entry.id === model)) throw new Error(state.unavailableReason || "当前模型不可用，请刷新列表。");
+    const reason = this.settingsUnavailableReason(sessionId);
+    if (reason) throw new Error(reason);
+    await this.selectNativeSetting("model", model);
+    this.cachedModelSettings = null;
+    const confirmed = await this.getSessionModelState(sessionId);
+    if (confirmed.currentModel !== model) throw new Error("电脑端尚未确认模型切换，请在原窗口确认并刷新设置。");
+    return confirmed;
+  }
+
+  async setSessionReasoningEffort(sessionId: string, effort: string): Promise<BridgeSessionModelState> {
+    const state = await this.getSessionModelState(sessionId);
+    if (!state.canChangeReasoningEffort || !state.reasoningEffortOptions?.some((entry) => entry.id === effort)) throw new Error(state.reasoningEffortUnavailableReason || "当前模型不支持所选推理强度。");
+    const reason = this.settingsUnavailableReason(sessionId);
+    if (reason) throw new Error(reason);
+    await this.selectNativeSetting("effort", effort);
+    this.cachedModelSettings = null;
+    const confirmed = await this.getSessionModelState(sessionId);
+    if (confirmed.currentReasoningEffort !== effort) throw new Error("电脑端尚未确认推理强度，请在原窗口确认并刷新设置。");
+    return confirmed;
+  }
+
+  private settingsUnavailableReason(sessionId: string): string | undefined {
+    if (sessionId !== this.state.sharedSessionId) return "请先打开这条任务再调整设置。";
+    if (!this.pty || !this.cliSessionReady || this.loginRequired) return "请先在电脑端连接并登录终端。";
+    if (this.state.status !== "idle" || this.settingsOperation) return "任务正在处理，请完成后再调整设置。";
+    if (this.localEditorDirty) return "电脑输入框有尚未发送的内容，请先发送或清空后调整设置。";
+    return undefined;
+  }
+
+  private async selectNativeSetting(kind: "model" | "effort", selected: string): Promise<void> {
+    await this.runNativeSettingsCommand(`/${kind}`, true, (text) => {
+      if (!/s\s*(?:to\s*use|for)\s*this\s*session\s*only/i.test(normalizeOutput(text))) throw new Error("当前终端版本未提供仅本任务的设置入口，请更新电脑端后重试。");
+      const menu = parseCliSettingsMenu(text, kind);
+      const current = menu.options.find((entry) => entry.id === menu.current);
+      const target = menu.options.find((entry) => entry.id === selected);
+      if (!current || !target) throw new Error("无法确认电脑端当前选项，请刷新设置。");
+      const delta = target.position - current.position;
+      const previous = kind === "effort" ? "\u001b[D" : "\u001b[A";
+      const next = kind === "effort" ? "\u001b[C" : "\u001b[B";
+      return (delta < 0 ? previous : next).repeat(Math.abs(delta)) + "s";
+    });
+  }
+
+  private async readNativeSettingsMenu(kind: "model" | "effort"): Promise<string> {
+    return this.runNativeSettingsCommand(`/${kind}`, true);
+  }
+
+  private async runNativeSettingsCommand(command: string, menu = false, select?: (text: string) => string): Promise<string> {
+    if (this.settingsOperation) throw new Error("正在读取终端设置，请稍候。");
+    this.settingsOperation = true;
+    let output = "";
+    let entered = false;
+    let choosing = false;
+    let active = true;
+    let quietTimer: ReturnType<typeof setTimeout> | undefined;
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await new Promise<string>((resolve, reject) => {
+        const finish = () => {
+          if (!entered || !active || choosing) return;
+          if (select) {
+            try {
+              const input = select(this.settingsScreen.text());
+              select = undefined; menu = false; output = "";
+              choosing = true;
+              // Native TUI consumes one key event at a time; do not coalesce arrows and confirmation.
+              // eslint-disable-next-line no-control-regex -- Native navigation key sequences.
+              const keys = input.match(/\u001b\[[ABCD]|./g) ?? [];
+              void (async () => {
+                for (const key of keys) { if (!active) return; this.writeToPty(key); await delay(90); }
+                choosing = false; clearTimeout(quietTimer); quietTimer = setTimeout(finish, 350);
+              })().catch(reject);
+            } catch (error) { this.writeToPty("\u001b"); reject(error); }
+            return;
+          }
+          const snapshot = this.settingsScreen.text();
+          const hasMenu = parseCliSettingsMenu(snapshot, command.startsWith("/model") ? "model" : "effort").options.length > 0;
+          if (menu && hasMenu) this.writeToPty("\u001b");
+          resolve(snapshot);
+        };
+        this.settingsCancel = () => { this.writeToPty("\u001b"); reject(new Error("电脑端正在操作输入框，已取消远程设置，请稍后重试。")); };
+        this.settingsCapture = (text) => {
+          output = `${output}${text}`.slice(-24_000);
+          clearTimeout(quietTimer);
+          quietTimer = setTimeout(finish, 250);
+        };
+        deadline = setTimeout(() => {
+          if (menu && output) this.writeToPty("\u001b");
+          reject(new Error("读取终端设置超时，请检查电脑端原窗口。"));
+        }, 5_000);
+        this.writeToPty(this.buildRemoteInputPayload(command));
+        void delay(CLAUDE_REMOTE_ENTER_DELAY_MS).then(() => {
+          if (!active) return;
+          entered = true;
+          this.writeToPty("\r");
+          clearTimeout(quietTimer); quietTimer = setTimeout(finish, 350);
+        });
+      });
+    } finally {
+      active = false;
+      clearTimeout(quietTimer); clearTimeout(deadline);
+      this.settingsCapture = null; this.settingsCancel = null;
+      await delay(60);
+      this.settingsOperation = false;
+    }
+  }
+
   private hookServer: net.Server | null = null;
   private hookPort: number | null = null;
   private hookToken: string | null = null;
@@ -435,6 +585,8 @@ export class ClaudeCompanionAdapter extends AbstractPtyAdapter {
     this.tuiReadinessBuffer = "";
     this.hasAutoConfirmedWorkspaceTrustPrompt = false;
     this.cliSessionReady = false;
+    this.settingsScreen.reset(); this.localEditorDirty = false;
+    this.cachedModelSettings = null;
     this.loginRequired = false;
     this.rejectPendingStartupInput(new Error(`${claudeAdapterLabel(this.options.kind)} 正在重新启动，请稍后重试。`));
     this.clearTClaudeTranscriptDiscovery();
@@ -480,6 +632,7 @@ export class ClaudeCompanionAdapter extends AbstractPtyAdapter {
     if (!this.pty) {
       throw new Error(`${claudeAdapterLabel(this.options.kind)} 尚未启动，请先切换到该终端后再试。`);
     }
+    if (this.settingsOperation) throw new Error("正在调整终端设置，请稍候再发送消息。");
     if (this.state.status === "busy" || this.pendingStartupInput) {
       throw new Error(`${claudeAdapterLabel(this.options.kind)} 正在处理，请等待当前回复或发送 /stop。`);
     }
@@ -851,8 +1004,10 @@ export class ClaudeCompanionAdapter extends AbstractPtyAdapter {
 
   protected override handleData(rawText: string): void {
     this.renderLocalOutput(rawText);
+    this.settingsScreen.write(rawText);
 
     const text = normalizeOutput(rawText);
+    if (this.settingsCapture) { this.settingsCapture(rawText); return; }
     if (!text) {
       return;
     }
@@ -1151,6 +1306,10 @@ export class ClaudeCompanionAdapter extends AbstractPtyAdapter {
 
     this.localTerminalInputListener = (chunk) => {
       const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+      this.cachedModelSettings = null;
+      this.settingsCancel?.();
+      // eslint-disable-next-line no-control-regex -- Track Enter/clear and printable native terminal input.
+      this.localEditorDirty = /[\r\n\u0003\u0015]/.test(text) ? false : this.localEditorDirty || /[^\u0000-\u001f\u007f]/.test(text);
       this.writeToPty(text);
     };
     process.stdin.on("data", this.localTerminalInputListener);

@@ -1,7 +1,9 @@
+import { reasoningSettingLabel } from "./native-session-model-settings.ts";
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { isGeneratedTaskTitle, titleFromLatestMessage, latestUserMessageText } from "./task-title-fallback.ts";
 
 import type {
   ApprovalRequest,
@@ -10,6 +12,7 @@ import type {
   BridgeEvent,
   BridgeResumeSessionCandidate,
   BridgeSessionMessage,
+  BridgeSessionModelState,
   BridgeSessionSendResult,
   UserInputRequest,
 } from "./bridge-types.ts";
@@ -109,6 +112,29 @@ function readReasonixTranscriptHead(filePath: string, maxBytes: number): string 
     const buffer = Buffer.alloc(length);
     fs.readSync(file, buffer, 0, length, 0);
     return buffer.toString("utf8");
+  } catch {
+    return "";
+  } finally {
+    if (file !== undefined) {
+      try { fs.closeSync(file); } catch { /* Best effort. */ }
+    }
+  }
+}
+
+function readReasonixTranscriptTail(filePath: string, maxBytes: number): string {
+  let file: number | undefined;
+  try {
+    const stat = fs.statSync(filePath);
+    const length = Math.min(maxBytes, stat.size);
+    if (length <= 0) return "";
+    const offset = stat.size - length;
+    file = fs.openSync(filePath, "r");
+    const buffer = Buffer.alloc(length);
+    fs.readSync(file, buffer, 0, length, offset);
+    const text = buffer.toString("utf8");
+    if (offset === 0) return text;
+    const firstBreak = text.indexOf("\n");
+    return firstBreak < 0 ? "" : text.slice(firstBreak + 1);
   } catch {
     return "";
   } finally {
@@ -294,6 +320,16 @@ function readReasonixSessionMetadata(
       ensureMessages().find((item) => item.role === "user")?.text ??
       `reasonix 会话 ${sessionId.slice(0, 8)}`,
   );
+  const recentText = isGeneratedTaskTitle(title, sessionId)
+    ? titleFromLatestMessage(
+        title,
+        sessionId,
+        latestUserMessageText(parseReasonixTranscript(
+          readReasonixTranscriptTail(transcriptPath, REASONIX_METADATA_READ_MAX_BYTES),
+          { sessionId, model },
+        )) ?? latestUserMessageText(ensureMessages()),
+      )
+    : title;
   const lastUpdatedAt = normalizeTimestamp(
     acpMeta?.updatedAt ?? branchMeta?.updated_at,
     stat.mtimeMs,
@@ -302,7 +338,7 @@ function readReasonixSessionMetadata(
     sessionId,
     transcriptPath,
     stateRoot: path.dirname(path.dirname(transcriptPath)),
-    title,
+    title: recentText,
     lastUpdatedAt,
     cwd: path.resolve(cwd),
     model,
@@ -566,6 +602,63 @@ export class ReasonixServerAdapter implements BridgeAdapter {
     if (sessionId !== this.state.sharedSessionId) await this.resumeSession(sessionId);
     await this.sendInput(text);
     return {};
+  }
+
+  async getNewSessionModelState(): Promise<BridgeSessionModelState> {
+    return this.state.sharedSessionId ? this.getSessionModelState(this.state.sharedSessionId)
+      : { options: [], canChange: false, unavailableReason: "请先连接 reasonix。" };
+  }
+
+  async getSessionModelState(sessionId: string): Promise<BridgeSessionModelState> {
+    if (sessionId !== this.state.sharedSessionId) return { options: [], canChange: false, unavailableReason: "请先打开这条 reasonix 任务再调整设置。" };
+    const [catalog, status] = await Promise.all([this.fetchJson("/models"), this.fetchJson("/status?lite=1")]);
+    if (!isRecord(catalog) || !isRecord(status)) throw new Error("reasonix 未返回模型设置，请更新终端后重试。");
+    const effort = isRecord(status.effort) ? status.effort : {};
+    const idle = !status.running && !status.pendingPrompt && !status.takenOver && this.state.status === "idle";
+    const options = Array.isArray(catalog.models) ? catalog.models.flatMap((entry) => {
+      if (!isRecord(entry)) return [];
+      const id = readString(entry.ref);
+      return id ? [{ id, label: readString(entry.model) ?? id, group: readString(entry.provider) }] : [];
+    }) : [];
+    const levels = Array.isArray(effort.levels) ? effort.levels.filter((level): level is string => typeof level === "string") : [];
+    return {
+      currentModel: readString(catalog.current), options, canChange: idle && options.length > 0,
+      unavailableReason: !idle ? "任务正在处理或由其他窗口控制，请完成后再调整。" : undefined,
+      currentReasoningEffort: readString(effort.current),
+      reasoningEffortOptions: levels.map((id) => ({ id, label: reasoningSettingLabel(id) })),
+      canChangeReasoningEffort: idle && effort.supported === true && levels.length > 0,
+      reasoningEffortUnavailableReason: !idle ? "任务正在处理，请完成后再调整。" : !levels.length ? "当前模型不支持推理强度设置。" : undefined,
+    };
+  }
+
+  async setSessionModel(sessionId: string, model: string): Promise<BridgeSessionModelState> {
+    const settings = await this.getSessionModelState(sessionId);
+    if (!settings.canChange) throw new Error(settings.unavailableReason || "当前任务不能调整模型。");
+    if (!settings.options.some((entry) => entry.id === model)) throw new Error("所选模型当前不可用，请刷新列表。");
+    await this.postModelSetting(sessionId, "/model", { ref: model });
+    const confirmed = await this.getSessionModelState(sessionId);
+    if (confirmed.currentModel !== model) throw new Error("reasonix 未确认模型切换，请刷新设置。");
+    return confirmed;
+  }
+
+  async setSessionReasoningEffort(sessionId: string, effort: string): Promise<BridgeSessionModelState> {
+    const settings = await this.getSessionModelState(sessionId);
+    if (!settings.canChangeReasoningEffort) throw new Error(settings.reasoningEffortUnavailableReason || "当前模型不能调整推理强度。");
+    if (!settings.reasoningEffortOptions?.some((entry) => entry.id === effort)) throw new Error("当前模型不支持该推理强度。");
+    await this.postModelSetting(sessionId, "/effort", { level: effort });
+    const confirmed = await this.getSessionModelState(sessionId);
+    if (confirmed.currentReasoningEffort !== effort) throw new Error("reasonix 未确认推理强度，请刷新设置。");
+    return confirmed;
+  }
+
+  private async postModelSetting(sessionId: string, pathname: string, body: Record<string, string>): Promise<void> {
+    const transcript = findReasonixTranscript(sessionId);
+    if (!transcript) throw new Error("找不到原任务，未更改其他会话设置。");
+    const response = await fetch(`${this.endpoint}${pathname}`, {
+      method: "POST", headers: { "content-type": "application/json", "X-Reasonix-Expected-Session-Path": transcript.transcriptPath },
+      body: JSON.stringify(body), signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) throw new Error(`reasonix 未接受设置（${response.status}），请检查原任务状态。`);
   }
 
   async listResumeSessions(limit = 10): Promise<BridgeResumeSessionCandidate[]> {
@@ -1066,7 +1159,7 @@ export class ReasonixServerAdapter implements BridgeAdapter {
   }
 
   private async fetchJson(pathname: string): Promise<unknown> {
-    const response = await fetch(`${this.endpoint}${pathname}`);
+    const response = await fetch(`${this.endpoint}${pathname}`, { signal: AbortSignal.timeout(10_000) });
     if (!response.ok) throw new Error(`reasonix 接口失败（${response.status}）。`);
     return await response.json();
   }

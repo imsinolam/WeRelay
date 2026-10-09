@@ -24,6 +24,7 @@ import type {
   BridgeLifecycleMode,
   BridgeResumeSessionCandidate,
   BridgeSessionMessage,
+  BridgeSessionModelState,
 } from "./bridge-types.ts";
 import {
   detectCliApproval,
@@ -186,6 +187,22 @@ export class LocalCompanionProxyAdapter implements BridgeAdapter {
       sessionId,
       text,
     }) as import("./bridge-types.ts").BridgeSessionSendResult | void;
+  }
+
+  async getNewSessionModelState(): Promise<BridgeSessionModelState> {
+    return await this.sendRequest({ command: "get_new_session_model_state" }) as BridgeSessionModelState;
+  }
+
+  async getSessionModelState(sessionId: string): Promise<BridgeSessionModelState> {
+    return await this.sendRequest({ command: "get_session_model_state", sessionId }) as BridgeSessionModelState;
+  }
+
+  async setSessionModel(sessionId: string, model: string): Promise<BridgeSessionModelState> {
+    return await this.sendRequest({ command: "set_session_model", sessionId, model }) as BridgeSessionModelState;
+  }
+
+  async setSessionReasoningEffort(sessionId: string, reasoningEffort: string): Promise<BridgeSessionModelState> {
+    return await this.sendRequest({ command: "set_session_reasoning_effort", sessionId, reasoningEffort }) as BridgeSessionModelState;
   }
 
   async getSessionMessages(

@@ -1,9 +1,11 @@
+import { NativeSessionModelSettings } from "./native-session-model-settings.ts";
 import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { isGeneratedTaskTitle, latestUserMessageText, titleFromLatestMessage } from "./task-title-fallback.ts";
 
 import type {
   ApprovalRequest,
@@ -14,6 +16,7 @@ import type {
   BridgeResumeSessionRuntimeStatus,
   BridgeSessionMessage,
   BridgeSessionPermissionState,
+  BridgeSessionModelState,
   BridgeSessionRunSummary,
   BridgeSessionSendResult,
   BridgeTurnInputItem,
@@ -102,6 +105,7 @@ export type WorkBuddyAdapterDependencies = {
   readSession(sessionId: string): Promise<WorkBuddySessionRow | null>;
   readMessages(cwd: string, sessionId: string): Promise<BridgeSessionMessage[]>;
   readRunSummary(cwd: string, sessionId: string): Promise<BridgeSessionRunSummary | null>;
+  readCompletion?(cwd: string, sessionId: string): ReturnType<typeof readWorkBuddyDesktopCompletion>;
   readSessionTitle?(cwd: string, sessionId: string): Promise<string | null>;
   readLocalImage(pathname: string): Promise<{ data: string; mimeType: string }>;
   startupSessionRestoreTimeoutMs?: number;
@@ -563,7 +567,9 @@ function mapWorkBuddySessionRow(row: Record<string, unknown>): WorkBuddySessionR
 export async function listWorkBuddyDesktopSessions(
   cwd: string | undefined,
   limit: number,
+  options: { allowMissingDatabase?: boolean } = {},
 ): Promise<WorkBuddySessionRow[]> {
+  if (options.allowMissingDatabase && !fs.existsSync(workBuddyDatabasePath())) return [];
   const database = await openWorkBuddyDatabase();
   try {
     const rows = cwd
@@ -769,6 +775,29 @@ export async function readWorkBuddyDesktopMessages(
   }
 }
 
+async function readWorkBuddyRecentMessageText(cwd: string, sessionId: string): Promise<string | undefined> {
+  const transcript = findWorkBuddyTranscript(cwd, sessionId);
+  if (!transcript) return undefined;
+  try {
+    const handle = await fs.promises.open(transcript, "r");
+    try {
+      const stat = await handle.stat();
+      const length = Math.min(128 * 1024, stat.size);
+      const offset = stat.size - length;
+      const buffer = Buffer.alloc(length);
+      const { bytesRead } = await handle.read(buffer, 0, length, offset);
+      const text = buffer.subarray(0, bytesRead).toString("utf8");
+      const firstBreak = text.indexOf("\n");
+      const complete = offset === 0 ? text : firstBreak < 0 ? "" : text.slice(firstBreak + 1);
+      return latestUserMessageText(parseWorkBuddyTranscript(complete));
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return undefined;
+  }
+}
+
 export function parseWorkBuddyTranscriptRunSummary(
   text: string,
 ): BridgeSessionRunSummary | null {
@@ -830,6 +859,60 @@ export async function readWorkBuddyDesktopRunSummary(
   } catch {
     return null;
   }
+}
+
+/** Read-only, bounded evidence for notifications; never connects a desktop owner. */
+export function parseWorkBuddyDesktopCompletion(text: string, databaseCompletedAtMs?: number): {
+  summary: BridgeSessionRunSummary; finalMessage: BridgeSessionMessage;
+} | null {
+  let summary = parseWorkBuddyTranscriptRunSummary(text);
+  // A very long turn may put its user record outside the bounded tail. In
+  // that case require exact agreement between the DB completion timestamp
+  // and the native terminal message instead of guessing a start/duration.
+  if (!summary && Number.isFinite(databaseCompletedAtMs)) {
+    for (const line of text.split(/\r?\n/)) {
+      try {
+        const record: unknown = JSON.parse(line);
+        if (isRecord(record) && record.type === "message" && record.role === "assistant" &&
+            record.status === "completed" && Number(record.timestamp) === databaseCompletedAtMs) {
+          summary = { status: "completed", completedAtMs: databaseCompletedAtMs };
+        }
+      } catch { /* Partial tail. */ }
+    }
+  }
+  if (summary?.status !== "completed" || !Number.isFinite(summary.completedAtMs)) return null;
+  const finalMessage = parseWorkBuddyTranscript(text).at(-1);
+  if (finalMessage?.role !== "assistant" || !finalMessage.id) return null;
+  // The terminal record and visible reply must be the same native message,
+  // not an older reply followed by a metadata/tool/rename update.
+  let terminalId: string | undefined;
+  for (const line of text.split(/\r?\n/)) {
+    try {
+      const record: unknown = JSON.parse(line);
+      if (isRecord(record) && record.type === "message" && record.role === "assistant" &&
+          Number(record.timestamp) === summary.completedAtMs && record.status === "completed") {
+        terminalId = readString(record.id);
+      }
+    } catch { /* Incomplete tail records are retried on the next scan. */ }
+  }
+  return terminalId === finalMessage.id ? { summary, finalMessage } : null;
+}
+
+export async function readWorkBuddyDesktopCompletion(cwd: string, sessionId: string, databaseCompletedAtMs?: number) {
+  const transcript = findWorkBuddyTranscript(cwd, sessionId);
+  if (!transcript) return null;
+  const handle = await fs.promises.open(transcript, "r").catch(() => null);
+  if (!handle) return null;
+  try {
+    const stat = await handle.stat();
+    const length = Math.min(2 * 1024 * 1024, stat.size);
+    const offset = stat.size - length;
+    const buffer = Buffer.alloc(length);
+    const { bytesRead } = await handle.read(buffer, 0, length, offset);
+    const text = buffer.subarray(0, bytesRead).toString("utf8");
+    const newline = text.indexOf("\n");
+    return parseWorkBuddyDesktopCompletion(offset === 0 ? text : newline < 0 ? "" : text.slice(newline + 1), databaseCompletedAtMs);
+  } finally { await handle.close(); }
 }
 
 function mimeTypeForPath(pathname: string): string {
@@ -1536,11 +1619,18 @@ export class WorkBuddyHybridRpcClient implements WorkBuddyDesktopRpcClientLike {
 
 function defaultDependencies(): WorkBuddyAdapterDependencies {
   return {
-    createDesktopClient: (options) => new WorkBuddyHybridRpcClient(options),
+    createDesktopClient: (options) => options.observeOnly
+      ? new WorkBuddyDesktopRpcClient({ callbacks: options, connectExistingOnly: true, allowDesktopApplicationLaunch: false, connectTimeoutMs: 2_000 })
+      : new WorkBuddyHybridRpcClient(options),
     listSessions: listWorkBuddyDesktopSessions,
     readSession: readWorkBuddyDesktopSession,
     readMessages: readWorkBuddyDesktopMessages,
     readRunSummary: readWorkBuddyDesktopRunSummary,
+    readCompletion: async (cwd, sessionId) => {
+      const row = await readWorkBuddyDesktopSession(sessionId);
+      return await readWorkBuddyDesktopCompletion(row?.cwd ?? cwd, sessionId,
+        row?.status === "completed" ? row.lastActivityAt ?? row.updatedAt : undefined);
+    },
     readSessionTitle: readWorkBuddyDesktopSessionTitle,
     readLocalImage,
   };
@@ -1584,12 +1674,22 @@ export async function listWorkBuddyDesktopSessionCandidates(
   limit = 10,
 ): Promise<BridgeResumeSessionCandidate[]> {
   const rows = await listWorkBuddyDesktopSessions(undefined, limit);
-  return await Promise.all(rows.map(async (row) => candidateForWorkBuddyRow(
-    row,
-    row.customTitle || row.title
-      ? null
-      : await readWorkBuddyDesktopSessionTitle(row.cwd, row.id),
-  )));
+  return await Promise.all(rows.map(async (row) => {
+    const candidate = candidateForWorkBuddyRow(
+      row,
+      row.customTitle || row.title
+        ? null
+        : await readWorkBuddyDesktopSessionTitle(row.cwd, row.id),
+    );
+    if (isGeneratedTaskTitle(candidate.title, candidate.sessionId)) {
+      candidate.title = titleFromLatestMessage(
+        candidate.title,
+        candidate.sessionId,
+        await readWorkBuddyRecentMessageText(row.cwd, row.id),
+      );
+    }
+    return candidate;
+  }));
 }
 
 function parseWorkBuddyRawInput(value: unknown): Record<string, unknown> {
@@ -1687,7 +1787,19 @@ export class WorkBuddyDesktopAdapter implements BridgeAdapter {
   private eventSink: EventSink = () => undefined;
   private client: WorkBuddyDesktopRpcClientLike | null = null;
   private loadingSession = false;
-  private pendingPermission: PendingWorkBuddyPermission | null = null;
+  private readonly pendingPermissions = new Map<string, PendingWorkBuddyPermission>();
+  private approvalSnapshotTimer?: ReturnType<typeof setTimeout>;
+  private disposed = false;
+  private get pendingPermission(): PendingWorkBuddyPermission | null {
+    return [...this.pendingPermissions.values()].find((entry) => entry.sessionId === this.state.sharedSessionId) ?? null;
+  }
+  private set pendingPermission(value: PendingWorkBuddyPermission | null) {
+    if (value) this.pendingPermissions.set(this.permissionKey(value.sessionId, value.requestId), value);
+    else if (this.pendingPermission) this.pendingPermissions.delete(this.permissionKey(this.pendingPermission.sessionId, this.pendingPermission.requestId));
+  }
+  private permissionKey(sessionId: string, requestId: string): string {
+    return JSON.stringify([sessionId, requestId]);
+  }
   private pendingQuestion: PendingWorkBuddyQuestion | null = null;
   private currentReply = "";
   private currentRunStartedAtMs: number | null = null;
@@ -1701,7 +1813,7 @@ export class WorkBuddyDesktopAdapter implements BridgeAdapter {
   ) {
     this.options = options;
     this.dependencies = dependencies;
-    const initialSessionId = options.sessionStartMode === "new"
+    const initialSessionId = options.desktopNotificationsOnly || options.sessionStartMode === "new"
       ? undefined
       : options.initialSharedSessionId ?? options.initialSharedThreadId;
     this.state = {
@@ -1723,12 +1835,14 @@ export class WorkBuddyDesktopAdapter implements BridgeAdapter {
     if (this.client) return;
     this.setStatus("starting", "正在连接 WorkBuddy Desktop。");
     const client = this.dependencies.createDesktopClient({
+      ...(this.options.desktopNotificationsOnly ? { observeOnly: true } : {}),
       allowDesktopApplicationLaunch:
-        this.options.allowDesktopApplicationLaunch === true,
+        !this.options.desktopNotificationsOnly && this.options.allowDesktopApplicationLaunch === true,
       onEvent: (channel, data) => this.handleDesktopEvent(channel, data),
       onDisconnect: (error) => {
         if (this.client !== client) return;
         this.setStatus("error");
+        if (this.options.desktopNotificationsOnly) return;
         this.emit({
           type: "notice",
           level: "warning",
@@ -1741,7 +1855,9 @@ export class WorkBuddyDesktopAdapter implements BridgeAdapter {
     this.state.startedAt = nowIso();
     try {
       await client.connect();
-      await this.restoreStartupSession();
+      if (!this.options.desktopNotificationsOnly) await this.restoreStartupSession();
+      else await this.refreshDesktopApprovals().catch(() => undefined);
+      this.scheduleApprovalSnapshot();
       if (this.state.status === "starting") {
         this.setStatus("idle");
       }
@@ -1750,6 +1866,44 @@ export class WorkBuddyDesktopAdapter implements BridgeAdapter {
       this.client = null;
       this.setStatus("error");
       throw error;
+    }
+  }
+
+  private scheduleApprovalSnapshot(): void {
+    if (this.disposed) return;
+    this.approvalSnapshotTimer = setTimeout(() => {
+      void this.refreshDesktopApprovals().catch(() => undefined).finally(() => this.scheduleApprovalSnapshot());
+    }, 5_000);
+    this.approvalSnapshotTimer.unref?.();
+  }
+
+  async refreshDesktopApprovals(): Promise<void> {
+    const client = this.client;
+    if (!client || this.disposed) return;
+    const invoke = (channel: string, ...args: unknown[]) => client.invokeWithTimeout
+      ? client.invokeWithTimeout(channel, 1_500, ...args) : client.invoke(channel, ...args);
+    const result = await invoke("session:list");
+    const rows = Array.isArray(result) ? result : isRecord(result)
+      ? result.sessions ?? result.agents : undefined;
+    if (!Array.isArray(rows)) return; // Unknown schema is not an empty snapshot.
+    const sessions = rows.filter(isRecord).filter((row) => row.isProcessing === true ||
+      /^(working|running|awaiting_approval|awaiting_input|active|processing)$/i.test(String(row.status ?? row.taskState ?? "")) ||
+      this.getPendingTaskApprovals(String(row.sessionId ?? row.id ?? "")).length > 0).slice(0, 100);
+    for (let offset = 0; offset < sessions.length && !this.disposed; offset += 4) {
+      await Promise.all(sessions.slice(offset, offset + 4).map(async (row) => {
+        const sessionId = readString(row.sessionId) ?? readString(row.id);
+        if (!sessionId) return;
+        try {
+          const view = await invoke("session:get", sessionId);
+          if (this.disposed || this.client !== client || !isRecord(view) || !Array.isArray(view.pendingPermissions)) return;
+          const requests = view.pendingPermissions.filter(isRecord);
+          const ids = new Set(requests.map((entry) => readString(entry.requestId)).filter(Boolean));
+          for (const entry of this.getPendingTaskApprovals(sessionId)) {
+            if (!ids.has(entry.requestId)) this.clearPendingPermission(sessionId, entry.requestId);
+          }
+          for (const entry of requests) this.handlePermissionRequest(sessionId, entry);
+        } catch { /* Failed snapshot is not resolution; retry next pass. */ }
+      }));
     }
   }
 
@@ -1846,12 +2000,9 @@ export class WorkBuddyDesktopAdapter implements BridgeAdapter {
         ? null
         : await this.dependencies.readSessionTitle?.(row.cwd, row.id) ?? null;
       const candidate = candidateForWorkBuddyRow(row, fallbackTitle);
-      if (row.id === this.state.sharedSessionId && this.state.status === "busy") {
+      if (row.id === this.state.sharedSessionId && this.state.status === "busy" && !this.getPendingTaskApprovals(row.id).length) {
         candidate.runtimeStatus = { type: "active", activeFlags: [] };
-      } else if (
-        row.id === this.state.sharedSessionId &&
-        this.state.status === "awaiting_approval"
-      ) {
+      } else if (this.getPendingTaskApprovals(row.id).length > 0) {
         candidate.runtimeStatus = {
           type: "active",
           activeFlags: ["waitingOnApproval"],
@@ -1917,6 +2068,56 @@ export class WorkBuddyDesktopAdapter implements BridgeAdapter {
       completedAtMs,
       durationMs: Math.max(0, completedAtMs - startedAtMs),
     };
+  }
+
+  private readonly modelSettings = new Map<string, NativeSessionModelSettings>();
+
+  private settingsFor(sessionId: string): NativeSessionModelSettings {
+    let settings = this.modelSettings.get(sessionId);
+    if (!settings) { settings = new NativeSessionModelSettings(); this.modelSettings.set(sessionId, settings); }
+    return settings;
+  }
+
+  async getNewSessionModelState(): Promise<BridgeSessionModelState> {
+    return this.state.sharedSessionId ? this.getSessionModelState(this.state.sharedSessionId)
+      : { options: [], canChange: false, unavailableReason: "请先连接 WorkBuddy 并打开任务。" };
+  }
+
+  async getSessionModelState(sessionId: string): Promise<BridgeSessionModelState> {
+    if (sessionId !== this.state.sharedSessionId) return { options: [], canChange: false, unavailableReason: "请先打开这条 WorkBuddy 任务再调整设置。" };
+    const client = this.requireClient();
+    const [session, product] = await Promise.all([
+      client.invoke("session:get", sessionId), client.invoke("config:getProductConfiguration"),
+    ]);
+    const settings = this.settingsFor(sessionId);
+    if (isRecord(product) && Array.isArray(product.models)) {
+      const allowed = Array.isArray(product.availableModels) ? new Set(product.availableModels) : null;
+      settings.ingest({ availableModels: product.models.filter((entry) => isRecord(entry) &&
+        (!allowed || allowed.has(entry.id))).map((entry) => ({ modelId: entry.id, name: entry.displayName ?? entry.name ?? entry.id })) });
+    }
+    settings.ingest(session);
+    return settings.state(this.state.status === "idle" && !(isRecord(session) && session.isProcessing === true));
+  }
+
+  async setSessionModel(sessionId: string, model: string): Promise<BridgeSessionModelState> {
+    const state = await this.getSessionModelState(sessionId);
+    if (!state.canChange) throw new Error(state.unavailableReason);
+    this.settingsFor(sessionId).modelRequest(model);
+    // Desktop's native handler takes a string and may swallow backend errors.
+    await this.requireClient().invoke("session:setModel", sessionId, model);
+    const confirmed = await this.getSessionModelState(sessionId);
+    if (confirmed.currentModel !== model) throw new Error("WorkBuddy 未确认模型切换，请检查电脑端后刷新设置。");
+    return confirmed;
+  }
+
+  async setSessionReasoningEffort(sessionId: string, effort: string): Promise<BridgeSessionModelState> {
+    const state = await this.getSessionModelState(sessionId);
+    if (!state.canChangeReasoningEffort) throw new Error(state.reasoningEffortUnavailableReason);
+    const operation = this.settingsFor(sessionId).reasoningRequest(effort);
+    await this.requireClient().invoke("session:setConfigOption", sessionId, operation.params.configId, effort);
+    const confirmed = await this.getSessionModelState(sessionId);
+    if (confirmed.currentReasoningEffort !== effort) throw new Error("WorkBuddy 未确认推理强度，请检查电脑端后刷新设置。");
+    return confirmed;
   }
 
   async getSessionPermissionState(
@@ -2085,14 +2286,15 @@ export class WorkBuddyDesktopAdapter implements BridgeAdapter {
     threadId: string,
     action: "confirm" | "confirm_session" | "deny",
   ): Promise<number> {
-    if (this.pendingPermission?.request.threadId !== threadId) return 0;
-    return await this.resolvePendingPermission(action) ? 1 : 0;
+    let count = 0;
+    for (const pending of [...this.pendingPermissions.values()].filter((entry) => entry.sessionId === threadId)) {
+      if (await this.resolvePendingPermission(action, pending)) count++;
+    }
+    return count;
   }
 
   getPendingTaskApprovals(threadId: string): ApprovalRequest[] {
-    return this.pendingPermission?.request.threadId === threadId
-      ? [this.pendingPermission.request]
-      : [];
+    return [...this.pendingPermissions.values()].filter((entry) => entry.sessionId === threadId).map((entry) => entry.request);
   }
 
   async submitUserInput(answers: Record<string, string[]>): Promise<boolean> {
@@ -2111,6 +2313,9 @@ export class WorkBuddyDesktopAdapter implements BridgeAdapter {
   }
 
   async dispose(): Promise<void> {
+    this.disposed = true;
+    clearTimeout(this.approvalSnapshotTimer);
+    this.pendingPermissions.clear();
     this.activePromptToken += 1;
     this.pendingPermission = null;
     this.pendingQuestion = null;
@@ -2192,14 +2397,24 @@ export class WorkBuddyDesktopAdapter implements BridgeAdapter {
       );
       if (token !== this.activePromptToken) return;
       let finalText = this.currentReply.trim();
+      const evidence = await this.dependencies.readCompletion?.(this.options.cwd, sessionId).catch(() => null);
+      let finalMessage: BridgeSessionMessage | undefined;
+      if (evidence && evidence.summary.completedAtMs !== undefined &&
+          evidence.summary.completedAtMs >= clientSendTime &&
+          (!finalText || evidence.finalMessage.text.trim() === finalText)) {
+        finalMessage = evidence.finalMessage;
+        finalText = finalMessage.text;
+      }
       if (!finalText) {
         const messages = await this.getSessionMessages(sessionId);
-        finalText = [...messages].reverse().find((message) => message.role === "assistant")?.text ?? "";
+        finalMessage = [...messages].reverse().find((message) => message.role === "assistant");
+        finalText = finalMessage?.text ?? "";
       }
       if (finalText) {
         this.emit({
           type: "final_reply",
           text: finalText,
+          ...(finalMessage?.text.trim() === finalText.trim() && finalMessage.id ? { messageId: finalMessage.id } : {}),
           timestamp: nowIso(),
           threadId: sessionId,
           origin: "wechat",
@@ -2271,6 +2486,8 @@ export class WorkBuddyDesktopAdapter implements BridgeAdapter {
       this.state.sharedSessionId = sessionId;
       this.state.activeRuntimeSessionId = sessionId;
       this.state.lastSessionSwitchAt = nowIso();
+      this.state.pendingApproval = this.getPendingTaskApprovals(sessionId)[0] ?? null;
+      if (this.state.pendingApproval) this.setStatus("awaiting_approval");
       this.emit({
         type: "session_switched",
         sessionId,
@@ -2290,7 +2507,7 @@ export class WorkBuddyDesktopAdapter implements BridgeAdapter {
       : undefined;
     const sessionId = readString(data.sessionId) ?? channelSessionId;
     if (!sessionId) return;
-    if (this.state.sharedSessionId && sessionId !== this.state.sharedSessionId) return;
+    this.settingsFor(sessionId).ingest(data);
 
     const eventType = readString(data.type);
     if (eventType === "permissionRequest") {
@@ -2299,10 +2516,10 @@ export class WorkBuddyDesktopAdapter implements BridgeAdapter {
     }
     if (eventType === "permissionResolved") {
       const requestId = readString(data.requestId);
-      if (!requestId || requestId === this.pendingPermission?.requestId) {
-        this.clearPendingPermission();
+      for (const entry of this.getPendingTaskApprovals(sessionId)) {
+        if (!requestId || requestId === entry.requestId) this.clearPendingPermission(sessionId, entry.requestId);
       }
-      if (!requestId || requestId === this.pendingQuestion?.requestId) {
+      if (this.pendingQuestion?.sessionId === sessionId && (!requestId || requestId === this.pendingQuestion.requestId)) {
         this.clearPendingQuestion();
       }
       return;
@@ -2311,12 +2528,12 @@ export class WorkBuddyDesktopAdapter implements BridgeAdapter {
     const update = isRecord(data.update) ? data.update : null;
     if (!update) return;
     const type = readString(update.sessionUpdate) ?? readString(update.type);
-    if (
-      this.pendingPermission?.toolCallId &&
-      this.isToolCallSettled(update, this.pendingPermission.toolCallId)
-    ) {
-      this.clearPendingPermission();
+    for (const pending of [...this.pendingPermissions.values()]) {
+      if (pending.sessionId === sessionId && pending.toolCallId && this.isToolCallSettled(update, pending.toolCallId)) {
+        this.clearPendingPermission(sessionId, pending.requestId);
+      }
     }
+    if (this.state.sharedSessionId && sessionId !== this.state.sharedSessionId) return;
     if (
       this.pendingQuestion &&
       this.isToolCallSettled(update, this.pendingQuestion.toolCallId)
@@ -2348,6 +2565,10 @@ export class WorkBuddyDesktopAdapter implements BridgeAdapter {
     if (!requestId || !params) return;
     const question = buildWorkBuddyUserInputRequest(sessionId, params);
     if (question) {
+      // User-input questions remain scoped to the selected task; they are not
+      // execution approvals and must not replace a different task's question.
+      if (this.state.sharedSessionId && sessionId !== this.state.sharedSessionId) return;
+      if (this.options.desktopNotificationsOnly && !this.state.sharedSessionId && !this.loadingSession) return;
       if (this.pendingQuestion?.requestId === requestId) return;
       this.pendingQuestion = {
         sessionId,
@@ -2386,10 +2607,11 @@ export class WorkBuddyDesktopAdapter implements BridgeAdapter {
     const title = readString(toolCall.title) ?? readString(toolCall.name) ?? "工具操作";
     const detail = toolCall.rawInput ?? toolCall.input ?? params;
     const detailText = typeof detail === "string" ? detail : JSON.stringify(detail, null, 2);
+    const origin = sessionId === this.state.sharedSessionId && this.currentRunStartedAtMs !== null ? "wechat" : "local";
     const request: ApprovalRequest = {
       source: "cli",
       threadId: sessionId,
-      origin: "wechat",
+      origin,
       summary: `WorkBuddy 请求执行：${title}`,
       commandPreview: truncatePreview(detailText || title, 800),
       detailLabel: title,
@@ -2397,16 +2619,18 @@ export class WorkBuddyDesktopAdapter implements BridgeAdapter {
       allowForSession: Boolean(selectAcpPermissionOption(options, "confirm_session")),
       requestId,
     };
-    if (this.pendingPermission?.requestId === requestId) return;
+    if (this.pendingPermissions.has(this.permissionKey(sessionId, requestId))) return;
     this.pendingPermission = { sessionId, requestId, toolCallId, options, request };
-    this.state.pendingApproval = request;
-    this.setStatus("awaiting_approval");
+    if (this.state.sharedSessionId === sessionId) {
+      this.state.pendingApproval = request;
+      this.setStatus("awaiting_approval");
+    }
     this.emit({
       type: "approval_required",
       request,
       timestamp: nowIso(),
       threadId: request.threadId,
-      origin: "wechat",
+      origin,
     });
   }
 
@@ -2467,19 +2691,19 @@ export class WorkBuddyDesktopAdapter implements BridgeAdapter {
     return true;
   }
 
-  private clearPendingPermission(): void {
-    if (!this.pendingPermission) return;
-    this.pendingPermission = null;
-    this.state.pendingApproval = null;
-    if (this.state.status === "awaiting_approval") {
+  private clearPendingPermission(sessionId = this.pendingPermission?.sessionId, requestId = this.pendingPermission?.requestId): void {
+    if (!sessionId || !requestId) return;
+    this.pendingPermissions.delete(this.permissionKey(sessionId, requestId));
+    this.state.pendingApproval = this.state.sharedSessionId ? this.pendingPermission?.request ?? null : null;
+    if (this.state.status === "awaiting_approval" && !this.state.pendingApproval) {
       this.setStatus(this.currentRunStartedAtMs === null ? "idle" : "busy");
     }
   }
 
   private async resolvePendingPermission(
     action: "confirm" | "confirm_session" | "deny",
+    pending = this.pendingPermission,
   ): Promise<boolean> {
-    const pending = this.pendingPermission;
     if (!pending) return false;
     if (action === "deny") {
       await this.requireClient().invoke(
@@ -2498,7 +2722,7 @@ export class WorkBuddyDesktopAdapter implements BridgeAdapter {
         option.optionId,
       );
     }
-    this.clearPendingPermission();
+    this.clearPendingPermission(pending.sessionId, pending.requestId);
     return true;
   }
 
