@@ -4,7 +4,7 @@ import path from 'node:path';
 import net from 'node:net';
 import { randomBytes } from 'node:crypto';
 
-// This code runs inside the *visible* Pi TUI. It never opens a second Pi writer.
+// Runs inside the existing Pi writer (TUI or Desktop native-session runtime).
 export default function (pi) {
   const managedEndpoint = process.env.WERELAY_PI_OWNER_SOCKET;
   const standalone = !managedEndpoint;
@@ -12,8 +12,11 @@ export default function (pi) {
   const token = standalone ? randomBytes(32).toString('hex') : process.env.WERELAY_PI_OWNER_TOKEN;
   if (!token) return;
   const directory = process.env.WERELAY_PI_OWNER_DIRECTORY || path.join(os.homedir(), '.werelay', 'runtime', 'pi-owners');
-  const advertisement = path.join(directory, `${process.pid}.json`);
-  const endpoint = standalone ? path.join(directory, `${process.pid}.sock`) : managedEndpoint;
+  // Desktop can host several extension instances in one sidecar process.
+  // PID-only endpoints silently hide all but one of its native sessions.
+  const ownerKey = `${process.pid}-${randomBytes(8).toString('hex')}`;
+  const advertisement = path.join(directory, `${ownerKey}.json`);
+  const endpoint = standalone ? path.join(directory, `${ownerKey}.sock`) : managedEndpoint;
   let server;
   let socket;
   let buffer = '';
@@ -29,7 +32,8 @@ export default function (pi) {
   };
   const advertise = () => {
     if (!standalone || !server?.listening || !sessionId() || closing) return;
-    const record = JSON.stringify({ pid: process.pid, cwd: process.cwd(), sessionId: sessionId(), socket: endpoint, token });
+    const record = JSON.stringify({ pid: process.pid, cwd: context?.cwd || process.cwd(), sessionId: sessionId(), socket: endpoint, token,
+      status: run ? (run.status === 'running' ? 'busy' : 'idle') : context?.isIdle?.() ? 'idle' : 'busy' });
     const temporary = `${advertisement}.tmp`;
     fs.writeFileSync(temporary, record, { mode: 0o600 });
     fs.renameSync(temporary, advertisement);
@@ -166,8 +170,7 @@ export default function (pi) {
     const stat = fs.lstatSync(directory);
     if (!stat.isDirectory() || stat.isSymbolicLink() || (process.getuid && stat.uid !== process.getuid())) return;
     if (process.platform !== 'win32') fs.chmodSync(directory, 0o700);
-    // A socket with this PID may still belong to a live extension during a
-    // concurrent reload. Never unlink it and create two owners by accident.
+    // Never replace another live extension's socket.
     if (fs.existsSync(endpoint)) return;
     server = net.createServer(accept);
     server.on('error', cleanup);
@@ -179,12 +182,13 @@ export default function (pi) {
   pi.on('session_start', (_event, ctx) => {
     context = ctx;
     run = ctx.isIdle() ? null : { status: 'running', startedAtMs: Date.now() };
-    if (standalone) { listen(); advertise(); }
+    if (standalone) { listen(); advertise(); send({ type: 'session', sessionId: sessionId() }); }
     else { connect(); send({ type: 'session', sessionId: sessionId() }); }
   });
   pi.on('agent_start', () => {
     outcome = 'completed';
     run = { status: 'running', startedAtMs: Date.now() };
+    advertise();
     send({ type: 'agent_start', sessionId: sessionId(), run });
   });
   pi.on('agent_before_settle', (event) => { outcome = event.outcome || 'completed'; });
@@ -203,6 +207,7 @@ export default function (pi) {
   pi.on('agent_settled', () => {
     run = { status: outcome === 'aborted' ? 'interrupted' : outcome === 'error' ? 'failed' : 'completed',
       startedAtMs: run?.startedAtMs || Date.now(), completedAtMs: Date.now() };
+    advertise();
     send({ type: 'settled', sessionId: sessionId(), outcome, run });
   });
   pi.on('session_shutdown', (event) => {

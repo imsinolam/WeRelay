@@ -1195,9 +1195,16 @@ describe("Codex desktop IPC client", () => {
       try {
         await expect(client.startTurn("pre-submit-error", "尚未发送的输入"))
           .rejects.toThrow("Codex 桌面任务状态尚未就绪，消息尚未发送，请稍后再试。");
+        // startTurn can reject before the router's data callback observes the
+        // final follow frame. Wait for observation, keeping the exact count.
+        const expectedFollows = failure === "owner-exists" || failure === "missing-after-open" ? 2 : 1;
+        const observedDeadline = Date.now() + 1_000;
+        while (follows < expectedFollows && Date.now() < observedDeadline) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
         expect(opens).toBe(failure === "open-error" || failure === "missing-after-open" ? 1 : 0);
         expect(starts).toBe(0);
-        expect(follows).toBe(failure === "owner-exists" || failure === "missing-after-open" ? 2 : 1);
+        expect(follows).toBe(expectedFollows);
         expect(client.getThreadState("pre-submit-error")).toBeNull();
         expect((client as unknown as { pendingThreadStarts: Map<string, unknown> })
           .pendingThreadStarts.size).toBe(0);

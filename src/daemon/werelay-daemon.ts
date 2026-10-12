@@ -1222,7 +1222,7 @@ export function formatDaemonTaskDispatchReceipt(
       : "";
     return `消息已排队${position}，当前任务完成后自动发送。\n可打开下方链接查看队列和任务进展。`;
   }
-  return `已发送，${formatDaemonAdapterLabel(adapter)} 正在处理。\n完成后会在微信通知你；可打开下方链接查看实时进展。`;
+  return `已发送，${formatDaemonAdapterLabel(adapter)} 正在处理。\n完成后会尝试在微信通知你；未收到通知时，可打开下方链接查看结果。`;
 }
 
 export function prefixDaemonAdapterMessage(
@@ -1796,7 +1796,8 @@ export function detectOpenMobileAdaptersFromProcessList(
     if (processLineHasCommand(line, "reasonix") || /--adapter\s+reasonix(?:\s|$)/i.test(line)) {
       open.add("reasonix");
     }
-    if (processLineHasCommand(line, "pi") || /--adapter\s+pi(?:\s|$)/i.test(line)) {
+    if (processLineHasCommand(line, "pi") || /--adapter\s+pi(?:\s|$)/i.test(line) ||
+        /PI-Desktop(?: Local)?\.app\/Contents\/MacOS\/PI-Desktop(?:\s|$)/i.test(line)) {
       open.add("pi");
     }
     if (/(?:^|[\s/\\])dsh(?:\.exe)?\s+web(?:\s|$)/i.test(line) || /--adapter\s+deepseek(?:\s|$)/i.test(line)) {
@@ -3378,6 +3379,8 @@ export class WeRelayDaemon {
         },
         readMessages: (threadId, options, adapter) =>
           this.readMobileMessages(threadId, options, adapter),
+        readNotificationStatus: (threadId, adapter) =>
+          this.codexCompletionDeliveries.getNotificationStatus(threadId, this.resolveMobileAdapter(adapter)),
         sendMessage: (threadId, input, adapter) =>
           Promise.resolve(this.acceptMobileMessage(threadId, input, adapter)),
         submitUserInput: (threadId, requestId, answers, adapter) =>
@@ -3639,7 +3642,7 @@ export class WeRelayDaemon {
     // Dispatch this entire inbound batch first. Historical delivery must never
     // become a prerequisite for accepting a new command or refreshing tokens.
     if (messages.some((message) => message.senderId === this.authorizedUserId)) {
-      void this.outboundRecoveryScheduler.trigger();
+      void this.outboundRecoveryScheduler.trigger({ rerunIfRunning: true });
     }
   }
 
@@ -3836,7 +3839,9 @@ export class WeRelayDaemon {
       }
     }
 
-    const requiresVisibleClient = providerRequiresVisibleClient(adapter);
+    // Pi's daemon slot enumerates native history and attaches an exact owner
+    // on task selection. Merely filtering /pi never opens a new TUI.
+    const requiresVisibleClient = adapter !== "pi" && providerRequiresVisibleClient(adapter);
     let openedVisible = false;
     let visibleConnected = requiresVisibleClient
       ? isVisibleClientAlive(this.cwd, adapter)

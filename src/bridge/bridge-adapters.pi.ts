@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import type { BridgeAdapter, BridgeAdapterState, BridgeEvent, BridgeSessionMessage, BridgeSessionSendResult, BridgeResumeSessionCandidate, BridgeSessionModelState, BridgeSessionRunSummary } from "./bridge-types.ts";
 import type { AdapterOptions, EventSink } from "./bridge-adapters.shared.ts";
 import { buildCliEnvironment, resolveSpawnTarget } from "./bridge-adapters.shared.ts";
-import { findPiSessionFile, listPiSessions, readPiSessionMessages, readPiSessionProject } from "./pi-session-catalog.ts";
+import { findPiSessionFile, listPiSessions, readPiSessionMessages, readPiSessionProject, readPiNativeSessionId } from "./pi-session-catalog.ts";
 import { nowIso, truncatePreview } from "./bridge-utils.ts";
 import { acquirePiOwnerLock } from "./pi-owner-lock.ts";
 import { discoverPiOwners, selectPiOwner, type PiOwnerAdvertisement } from "./pi-owner-discovery.ts";
@@ -84,6 +84,7 @@ export class PiOwnerAdapter implements BridgeAdapter {
   private activeOrigin: "wechat" | "local" = "local";
   private externalOwner = false;
   private runSummary: BridgeSessionRunSummary | null = null;
+  private ownerTransition: Promise<void> = Promise.resolve();
 
   constructor(options: AdapterOptions) {
     this.options = options;
@@ -102,10 +103,21 @@ export class PiOwnerAdapter implements BridgeAdapter {
   }
   async start(): Promise<void> {
     if (this.child || this.socket) return;
+    // The daemon is an index and an authenticated client of the real writer,
+    // not another TUI. /pi must not create an empty owner to enumerate tasks.
+    if (this.options.renderMode !== "companion") {
+      this.status("idle");
+      return;
+    }
     const sessionId = this.state.sharedSessionId;
-    const owner = selectPiOwner(discoverPiOwners(), sessionId, this.options.cwd);
+    if (sessionId) this.state.sharedSessionId = await this.nativeSessionId(sessionId);
+    const owners = discoverPiOwners();
+    const matching = sessionId ? owners.filter((owner) => owner.sessionId === this.state.sharedSessionId)
+      : owners.filter((owner) => path.resolve(owner.cwd) === path.resolve(this.options.cwd));
+    if (matching.length > 1) throw new Error("Pi 原任务有多个 owner，拒绝猜测发送目标，未启动替代任务。");
+    const owner = selectPiOwner(owners, this.state.sharedSessionId, this.options.cwd);
     if (owner) { await this.attachOwner(owner); return; }
-    const sessionPath = sessionId ? await findPiSessionFile(sessionId) : null;
+    const sessionPath = sessionId ? await findPiSessionFile(this.state.sharedSessionId!) : null;
     if (sessionId && !sessionPath) throw new Error("找不到 Pi 原任务，未创建替代任务。");
     await this.startOwner(sessionPath ?? undefined);
   }
@@ -116,7 +128,8 @@ export class PiOwnerAdapter implements BridgeAdapter {
   }
   async sendInputToSession(sessionId: string, text: string): Promise<BridgeSessionSendResult> {
     if (!text.trim()) throw new Error("消息不能为空。");
-    if (sessionId !== this.state.sharedSessionId) await this.resumeSession(sessionId);
+    sessionId = await this.nativeSessionId(sessionId);
+    if (sessionId !== this.state.sharedSessionId || !this.socket || this.socket.destroyed || !this.ownerSessionConfirmed) await this.resumeSession(sessionId);
     // The real owner may start (and even finish) before its acknowledgement reaches us.
     this.activeOrigin = "wechat";
     const settledBeforeSend = this.settledRevision;
@@ -126,7 +139,7 @@ export class PiOwnerAdapter implements BridgeAdapter {
     return { queued: Boolean(response.queued) };
   }
   async listResumeSessions(limit = 10): Promise<BridgeResumeSessionCandidate[]> {
-    const candidates = (await listPiSessions({ limit })).map((candidate) => candidate.sessionId === this.state.sharedSessionId
+    const candidates = (await listPiSessions({ limit })).map((candidate) => this.ownerSessionConfirmed && candidate.sessionId === this.state.sharedSessionId
       ? { ...candidate, runtimeStatus: this.state.status === "busy"
         ? { type: "active" as const, activeFlags: [] } : { type: "idle" as const } } : candidate);
     const sessionId = this.state.sharedSessionId;
@@ -141,15 +154,27 @@ export class PiOwnerAdapter implements BridgeAdapter {
     return candidates.slice(0, limit);
   }
   async resumeSession(sessionId: string): Promise<void> {
-    if (sessionId === this.state.sharedSessionId) return;
-    const file = await findPiSessionFile(sessionId);
-    if (!file) throw new Error("找不到 Pi 原任务，未创建替代任务。");
-    if (this.state.status === "busy") throw new Error("Pi 正在运行，不能切换任务。");
-    const external = selectPiOwner(discoverPiOwners(), sessionId, this.state.cwd);
+    sessionId = await this.nativeSessionId(sessionId);
+    const next = this.ownerTransition.catch(() => undefined).then(() => this.resumeOwner(sessionId));
+    this.ownerTransition = next;
+    return next;
+  }
+  private async resumeOwner(sessionId: string): Promise<void> {
+    if (this.disposed) throw new Error("Pi 连接已关闭。");
+    if (sessionId === this.state.sharedSessionId && this.socket && !this.socket.destroyed && this.ownerSessionConfirmed) return;
+    const owners = discoverPiOwners();
+    if (owners.filter((owner) => owner.sessionId === sessionId).length > 1) throw new Error("Pi 原任务有多个 owner，拒绝猜测发送目标，未启动替代任务。");
+    const external = selectPiOwner(owners, sessionId, this.state.cwd);
     if (external) {
       await this.restartWithExternalOwner(external);
       return;
     }
+    if (this.options.renderMode !== "companion") {
+      throw new Error("Pi 任务已找到，但原窗口尚未提供可接入的发送接口。请在该 Pi 窗口执行 /reload；如果由 Pi Desktop 持有，请在桌面端继续。未启动第二个 Pi，也没有新建替代任务。");
+    }
+    const file = await findPiSessionFile(sessionId);
+    if (!file) throw new Error("找不到 Pi 原任务，未创建替代任务。");
+    if (this.state.status === "busy") throw new Error("Pi 正在运行，不能切换任务。");
     if (this.externalOwner) throw new Error("当前 Pi 是已打开的原窗口；请在该窗口切换任务并刷新网页，未另开第二个 Pi。");
     assertNoIndependentPiOwner(await readPiSessionProject(file), true, this.child?.pid ? new Set([this.child.pid]) : undefined);
     if (this.child) await this.request("can_switch", this.state.sharedSessionId!);
@@ -157,12 +182,14 @@ export class PiOwnerAdapter implements BridgeAdapter {
     if (this.state.sharedSessionId !== sessionId) throw new Error("Pi 未能恢复指定原任务。");
   }
   async createSession(): Promise<void> {
+    if (this.options.renderMode !== "companion") throw new Error("请在 Pi 原窗口或 Pi Desktop 中新建任务后刷新列表；未启动独立 owner。");
     if (this.state.status === "busy") throw new Error("Pi 正在运行，不能新建任务。");
     if (this.externalOwner) throw new Error("请在已经打开的 Pi 原窗口中新建任务，WeRelay 不会另开第二个窗口。");
     if (this.child && this.state.sharedSessionId) await this.request("can_switch", this.state.sharedSessionId);
     await this.restartOwner(undefined, this.state.cwd);
   }
   async createSessionInProject(sourceSessionId: string): Promise<void> {
+    if (this.options.renderMode !== "companion") throw new Error("请在 Pi 原项目窗口中新建任务后刷新列表；未在其他项目创建替代任务。");
     const file = await findPiSessionFile(sourceSessionId);
     if (!file) throw new Error("找不到 Pi 原任务所属项目。");
     const cwd = await readPiSessionProject(file);
@@ -184,6 +211,7 @@ export class PiOwnerAdapter implements BridgeAdapter {
     return (await this.getSessionMessages(sessionId)).at(-1) ?? null;
   }
   async getSessionRunSummary(sessionId: string): Promise<BridgeSessionRunSummary | null> {
+    sessionId = await this.nativeSessionId(sessionId);
     return sessionId === this.state.sharedSessionId ? this.runSummary : null;
   }
   async getNewSessionModelState(): Promise<BridgeSessionModelState> {
@@ -193,8 +221,12 @@ export class PiOwnerAdapter implements BridgeAdapter {
       : { options: [], canChange: false, unavailableReason: "请先连接 Pi，再预选新任务模型。" };
   }
   async getSessionModelState(sessionId: string): Promise<BridgeSessionModelState> {
+    sessionId = await this.nativeSessionId(sessionId);
     if (sessionId !== this.state.sharedSessionId) {
       return { options: [], canChange: false, unavailableReason: "请先打开这条 Pi 任务再切换模型。" };
+    }
+    if (!this.socket || this.socket.destroyed || !this.ownerSessionConfirmed) {
+      return { options: [], canChange: false, unavailableReason: "Pi 原窗口尚未连接；发送消息时会重新确认这条原任务。" };
     }
     let response: OwnerRecord;
     try {
@@ -207,13 +239,17 @@ export class PiOwnerAdapter implements BridgeAdapter {
     return response.modelState;
   }
   async setSessionModel(sessionId: string, model: string): Promise<BridgeSessionModelState> {
+    sessionId = await this.nativeSessionId(sessionId);
     if (sessionId !== this.state.sharedSessionId) throw new Error("请先打开这条 Pi 任务再切换模型。");
+    await this.resumeSession(sessionId);
     const response = await this.request("set_model", sessionId, undefined, model);
     if (!response.modelState) throw new Error("Pi 未确认模型切换，请刷新模型列表。");
     return response.modelState;
   }
   async setSessionReasoningEffort(sessionId: string, effort: string): Promise<BridgeSessionModelState> {
+    sessionId = await this.nativeSessionId(sessionId);
     if (sessionId !== this.state.sharedSessionId) throw new Error("请先打开这条 Pi 任务再调整推理强度。");
+    await this.resumeSession(sessionId);
     const response = await this.request("set_reasoning", sessionId, undefined, effort);
     if (!response.modelState) throw new Error("Pi 未确认推理强度，请刷新设置。");
     return response.modelState;
@@ -225,6 +261,7 @@ export class PiOwnerAdapter implements BridgeAdapter {
     return true;
   }
   async interruptSession(sessionId: string): Promise<boolean> {
+    sessionId = await this.nativeSessionId(sessionId);
     if (sessionId !== this.state.sharedSessionId) return false;
     return this.interrupt();
   }
@@ -242,6 +279,12 @@ export class PiOwnerAdapter implements BridgeAdapter {
     try { await this.stopOwner(); await this.startOwner(sessionPath, projectCwd); }
     finally { this.restarting = false; }
   }
+  private async nativeSessionId(sessionId: string): Promise<string> {
+    if (!sessionId.startsWith("native-pi:")) return sessionId;
+    const file = await findPiSessionFile(sessionId);
+    if (!file) throw new Error("找不到 Pi Desktop 对应的原生任务，未创建替代任务。");
+    return readPiNativeSessionId(file);
+  }
   private async restartWithExternalOwner(owner: PiOwnerAdvertisement): Promise<void> {
     this.restarting = true;
     try { await this.stopOwner(); await this.attachOwner(owner); }
@@ -249,7 +292,8 @@ export class PiOwnerAdapter implements BridgeAdapter {
   }
   private async attachOwner(owner: PiOwnerAdvertisement): Promise<void> {
     this.status("starting", "正在连接已打开的 Pi 原窗口…");
-    this.releaseOwnerLock ??= acquirePiOwnerLock();
+    // Attaching is not acquiring a writer. A stale managed companion must not
+    // prevent the daemon from connecting to an independently running owner.
     this.externalOwner = true;
     this.token = owner.token;
     this.ownerSessionConfirmed = false;
@@ -271,11 +315,16 @@ export class PiOwnerAdapter implements BridgeAdapter {
       this.state.pid = owner.pid;
       this.state.startedAt = nowIso();
       this.ownerSessionConfirmed = true;
-      this.status("idle");
+      this.status(this.runSummary?.status === "running" ? "busy" : "idle");
     } catch (error) { await this.stopOwner(); throw error; }
     finally { this.ready = this.readyFailure = null; }
   }
   private async startOwner(sessionPath?: string, projectCwd?: string): Promise<void> {
+    // Desktop has its own native writer lease. Never overwrite/delete it or
+    // open a TUI writer on that same file merely because CLI discovery is empty.
+    if (sessionPath && fs.existsSync(`${sessionPath}.pi-desktop.lock`)) {
+      throw new Error("该 Pi 原任务由 Pi Desktop 持有，请在桌面端继续；未启动第二个写者。");
+    }
     const cwd = sessionPath ? await readPiSessionProject(sessionPath) : projectCwd ?? this.options.cwd;
     if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) throw new Error("Pi 原项目目录不可用，未在其他位置打开任务。");
     this.status("starting", "正在连接 Pi 本地会话…");
@@ -374,8 +423,17 @@ export class PiOwnerAdapter implements BridgeAdapter {
       if (this.socket !== socket) return;
       this.socket = null;
       if (!this.disposed && !this.restarting && this.externalOwner) {
-        this.status("stopped", "Pi 原窗口连接已断开。");
-        this.emit({ type: "shutdown_requested", reason: "companion_closed", message: "Pi 原窗口连接已断开。", timestamp: nowIso() });
+        this.ownerSessionConfirmed = false;
+        this.runSummary = null;
+        if (this.options.renderMode === "companion") {
+          this.status("stopped", "Pi 原窗口连接已断开。");
+          this.emit({ type: "shutdown_requested", reason: "companion_closed", message: "Pi 原窗口连接已断开。", timestamp: nowIso() });
+        } else {
+          // The catalog remains readable after owner reload/quit. The next
+          // exact-task action discovers a fresh authenticated advertisement.
+          this.state.pid = undefined;
+          this.status("idle", "Pi 原窗口连接已断开；列表仍可读取，下次发送时重新确认原任务。");
+        }
       }
     });
   }

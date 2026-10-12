@@ -387,6 +387,85 @@ describe("Codex completion delivery expiry window", () => {
     expect(called).toBe(false);
   });
 
+  test("persists expiry even when cleanup is triggered by snapshot, without retaining content", () => {
+    let now = Date.parse("2026-08-08T12:00:00.000Z");
+    const snapshots: CodexCompletionDeliveryState[] = [];
+    const queue = new CodexCompletionDeliveryQueue({ now: () => now,
+      persist: (state) => snapshots.push(structuredClone(state)) });
+    const input = { key: "dsh:old", adapter: "deepseek" as const, threadId: "old", texts: ["private-payload"] };
+    queue.enqueue(input);
+    now += CODEX_COMPLETION_DELIVERABLE_WINDOW_MS + 1;
+    queue.snapshot();
+    const restored = new CodexCompletionDeliveryQueue({ initial: snapshots.at(-1), now: () => now });
+    expect(restored.enqueue(input).status).toBe("expired");
+    expect(restored.getNotificationStatus("old", "deepseek")).toMatchObject({ status: "not_delivered", reason: "expired" });
+    expect(JSON.stringify(snapshots.at(-1))).not.toContain("private-payload");
+    expect(restored.hasDelivered(input.key)).toBe(false);
+  });
+
+  test("capacity removal remains undelivered and cannot resurrect on restart", () => {
+    const queue = buildQueue();
+    for (let i = 0; i < 81; i++) queue.enqueue({ key: `wb:${i}`, adapter: "workbuddy", threadId: `wb-${i}`, texts: ["private-payload"] });
+    const restored = buildQueue(queue.snapshot());
+    expect(restored.getPending()).toHaveLength(80);
+    expect(restored.getNotificationStatus("wb-0", "workbuddy")).toMatchObject({ status: "not_delivered", reason: "capacity" });
+    expect(restored.enqueue({ key: "wb:0", threadId: "wb-0", texts: ["replay"] }).status).toBe("expired");
+    expect(restored.hasDelivered("wb:0")).toBe(false);
+  });
+
+  test("capacity pressure cannot discard a notification with an in-flight send", async () => {
+    const queue = buildQueue();
+    queue.enqueue({ key: "wb:active", adapter: "workbuddy", threadId: "active", texts: ["answer"] });
+    let release!: () => void;
+    const waiting = new Promise<void>((resolve) => { release = resolve; });
+    const sending = queue.deliver("wb:active", async () => { await waiting; return 1; });
+    for (let i = 0; i < 80; i++) queue.enqueue({ key: `wb:pending-${i}`, threadId: `pending-${i}`, texts: ["answer"] });
+    const snapshot = queue.snapshot();
+    const activeRetained = snapshot.pending.some((item) => item.key === "wb:active");
+    release();
+    expect((await sending).status).toBe("delivered");
+    expect(activeRetained).toBe(true);
+    expect(queue.getNotificationStatus("active", "workbuddy")).toMatchObject({ status: "delivered" });
+  });
+
+  test("terminal receipts are bounded, expire and normalize without content or guessed legacy identities", async () => {
+    let now = Date.parse("2026-10-10T00:00:00Z");
+    const queue = new CodexCompletionDeliveryQueue({ now: () => now });
+    for (let i = 0; i < 600; i++) queue.enqueue({ key: `wb:${i}`, threadId: `${i}`, texts: ["answer"] });
+    expect(queue.snapshot().undelivered).toHaveLength(512);
+    now += 31 * 24 * 60 * 60_000;
+    queue.getPending();
+    now += 31 * 24 * 60 * 60_000;
+    expect(queue.snapshot().undelivered).toBeUndefined();
+    const legacy = buildQueue({ pending: [], delivered: [{ key: "legacy", deliveredAt: "2026-08-08T12:00:00.000Z" }] });
+    expect(legacy.hasDelivered("legacy")).toBe(true);
+    expect(legacy.getNotificationStatus("legacy", "codex")).toBeNull();
+  });
+
+  test("does not claim queued when all available capacity belongs to in-flight summary items", () => {
+    const queue = buildQueue();
+    const keys = Array.from({ length: 80 }, (_, i) => `task:${i}`);
+    for (const key of keys) queue.enqueue({ key, threadId: key, texts: ["answer"] });
+    expect(queue.reserveSummary(keys)).toBe(true);
+    expect(queue.enqueue({ key: "new:task", threadId: "new", texts: ["answer"] }).status).toBe("expired");
+    expect(queue.getNotificationStatus("new", "codex")).toMatchObject({ status: "not_delivered", reason: "capacity" });
+    expect(queue.getPending().map((item) => item.key)).toEqual(keys);
+    queue.releaseSummary(keys);
+  });
+
+  test("notification status isolates adapters, preserves partial sends and confirmed receipt after restart", async () => {
+    const queue = buildQueue();
+    queue.enqueue({ key: "wb:shared", adapter: "workbuddy", threadId: "shared", texts: ["part-1", "part-2"] });
+    queue.enqueue({ key: "cx:shared", threadId: "shared", texts: ["codex"] });
+    await queue.deliver("wb:shared", async () => 1);
+    expect(queue.getNotificationStatus("shared", "workbuddy")).toMatchObject({ status: "pending", sentParts: 1, totalParts: 2 });
+    expect(queue.getNotificationStatus("shared", "codex")).toMatchObject({ status: "pending", sentParts: 0, totalParts: 1 });
+    await queue.deliver("wb:shared", async (_item, texts) => texts.length);
+    const restored = buildQueue(queue.snapshot());
+    expect(restored.getNotificationStatus("shared", "workbuddy")).toMatchObject({ status: "delivered" });
+    expect(restored.getNotificationStatus("missing", "workbuddy")).toBeNull();
+  });
+
   test("drops an already-expired backlog restored from disk on first retry", () => {
     const staleState: CodexCompletionDeliveryState = {
       pending: [{

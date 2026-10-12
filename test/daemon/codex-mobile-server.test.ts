@@ -27,6 +27,38 @@ import {
   startCodexMobileServer,
 } from "../../src/daemon/codex-mobile-server.ts";
 
+test("reads WeChat notification receipts independently of Agent history and user-message acknowledgements", async () => {
+  const authStore = createAuthStore("notification receipt fixture");
+  const calls: unknown[] = [];
+  let current: import("../../src/daemon/codex-completion-delivery.ts").CompletionNotificationStatus = {
+    status: "pending", updatedAt: "2026-10-10T00:00:00Z", sentParts: 1, totalParts: 2,
+  };
+  const server = await startCodexMobileServer({ host: "127.0.0.1", port: 0, lanAddress: "127.0.0.1", accessToken: "fixture", authStore,
+    listTasks: async () => { throw new Error("must not enumerate tasks"); },
+    readMessages: async () => { throw new Error("must not connect/read Agent"); },
+    sendMessage: async () => { throw new Error("must not send"); },
+    readNotificationStatus: (threadId, adapter) => {
+      calls.push({ threadId, adapter });
+      return threadId === "shared-session" ? current : null;
+    },
+  });
+  try {
+    const root = `http://127.0.0.1:${server.port}`;
+    const headers = { cookie: `codex_mobile_session=${authStore.createSessionToken()}` };
+    const endpoint = `${root}/api/tasks/shared-session/notification-status?adapter=workbuddy`;
+    expect((await fetch(endpoint)).status).toBe(401);
+    expect(calls).toEqual([]);
+    const response = await fetch(endpoint, { headers });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ threadId: "shared-session", notification: current });
+    expect(calls).toEqual([{ threadId: "shared-session", adapter: "workbuddy" }]);
+    current = { ...current, status: "delivered" };
+    expect((await (await fetch(endpoint, { headers })).json()).notification.status).toBe("delivered");
+    expect(await (await fetch(`${root}/api/tasks/unknown-session/notification-status?adapter=codex`, { headers })).json())
+      .toEqual({ threadId: "unknown-session", notification: null });
+  } finally { await server.close(); }
+});
+
 test("new task catalog and first-message settings do not mutate an existing task", async () => {
   const authStore = createAuthStore("draft settings fixture");
   const inputs: unknown[] = [];

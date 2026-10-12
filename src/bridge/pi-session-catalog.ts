@@ -1,9 +1,11 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import type { BridgeResumeSessionCandidate, BridgeSessionMessage } from "./bridge-types.ts";
 import { titleFromLatestMessage } from "./task-title-fallback.ts";
 import { formatPiModelError } from "./pi-model-error.ts";
+import { discoverPiOwners } from "./pi-owner-discovery.ts";
 
 const METADATA_BYTES = 128 * 1024;
 const HISTORY_BYTES = 4 * 1024 * 1024;
@@ -13,7 +15,7 @@ type PiSessionHeader = { id: string; cwd: string; timestamp: string };
 
 export function piSessionRoot(): string {
   return path.resolve(process.env.PI_CODING_AGENT_SESSION_DIR?.trim() ||
-    path.join(os.homedir(), ".pi", "agent", "sessions"));
+    path.join(process.env.PI_CODING_AGENT_DIR?.trim() || path.join(os.homedir(), ".pi", "agent"), "sessions"));
 }
 
 async function readWindow(file: string, bytes: number, tail = false): Promise<string> {
@@ -45,7 +47,7 @@ function parseLines(text: string): Record<string, unknown>[] {
 
 function headerOf(entry: Record<string, unknown> | undefined): PiSessionHeader | null {
   if (entry?.type !== "session" || typeof entry.id !== "string" ||
-    typeof entry.cwd !== "string" || typeof entry.timestamp !== "string") return null;
+    typeof entry.cwd !== "string" || typeof entry.timestamp !== "string" || !Number.isFinite(Date.parse(entry.timestamp))) return null;
   return { id: entry.id, cwd: entry.cwd, timestamp: entry.timestamp };
 }
 
@@ -79,43 +81,70 @@ async function readPiMetadata(file: string): Promise<BridgeResumeSessionCandidat
     : typeof firstText === "string" && firstText.trim() ? firstText.trim().slice(0, 100)
     : `Pi 任务 ${header.id.slice(0, 8)}`;
   const latestText = [...head, ...tail].reverse().map(piUserMessageText).find(Boolean);
-  const stat = await fs.stat(file);
+  // Copies, Desktop inspection and filesystem maintenance can touch mtime.
+  // Sort by real native events, never a viewer's file access time.
+  const latestTimestamp = entries.reduce((latest, entry) => {
+    const value = typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : NaN;
+    return Number.isFinite(value) ? Math.max(latest, value) : latest;
+  }, Date.parse(header.timestamp));
   return {
     sessionId: header.id, threadId: header.id,
     title: titleFromLatestMessage(title, header.id, latestText), projectId: header.cwd,
     cwd: header.cwd, projectName: path.basename(header.cwd),
-    lastUpdatedAt: new Date(stat.mtimeMs).toISOString(),
+    lastUpdatedAt: new Date(latestTimestamp).toISOString(),
     runtimeStatus: { type: "notLoaded" },
   };
 }
 
-export async function listPiSessions(options: { root?: string; limit?: number } = {}): Promise<BridgeResumeSessionCandidate[]> {
-  const root = options.root ?? piSessionRoot();
-  let directories: string[];
-  try {
-    directories = (await fs.readdir(root, { withFileTypes: true }))
-      .filter((entry) => entry.isDirectory()).map((entry) => path.join(root, entry.name));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw error;
-  }
+async function piSessionFiles(root: string): Promise<string[]> {
   const files: string[] = [];
-  for (const directory of directories) {
-    const entries = await fs.readdir(directory, { withFileTypes: true }).catch(() => []);
+  const directories = [{ path: root, depth: 0 }];
+  let visited = 0;
+  while (directories.length && visited++ < MAX_SESSION_FILES && files.length < MAX_SESSION_FILES) {
+    const directory = directories.shift()!;
+    const entries = await fs.readdir(directory.path, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT" || directory.depth > 0) return [];
+      throw error;
+    });
     for (const entry of entries) {
-      if (entry.isFile() && entry.name.endsWith(".jsonl")) files.push(path.join(directory, entry.name));
+      // Native Desktop enumerates recursively. Never follow directory symlinks
+      // out of the configured Pi root or recurse without a depth/work bound.
+      if (entry.isDirectory() && directory.depth < 8 && directories.length < MAX_SESSION_FILES) {
+        directories.push({ path: path.join(directory.path, entry.name), depth: directory.depth + 1 });
+      }
+      if (entry.isFile() && entry.name.endsWith(".jsonl")) files.push(path.join(directory.path, entry.name));
       if (files.length >= MAX_SESSION_FILES) break;
     }
-    if (files.length >= MAX_SESSION_FILES) break;
   }
+  return files;
+}
+
+async function readPiSessionIndex(root: string): Promise<Array<{ file: string; candidate: BridgeResumeSessionCandidate }>> {
+  const files = await piSessionFiles(root);
   // Bound simultaneous file opens even when many projects have Pi history.
-  const results: BridgeResumeSessionCandidate[] = [];
+  const results: Array<{ file: string; candidate: BridgeResumeSessionCandidate }> = [];
   for (let index = 0; index < files.length; index += 16) {
     const group = await Promise.all(files.slice(index, index + 16)
-      .map((file) => readPiMetadata(file).catch(() => null)));
-    for (const candidate of group) if (candidate) results.push(candidate);
+      .map(async (file) => {
+        const candidate = await readPiMetadata(file).catch(() => null);
+        return candidate ? { file, candidate } : null;
+      }));
+    for (const item of group) if (item) results.push(item);
   }
-  return results.sort((a, b) => b.lastUpdatedAt.localeCompare(a.lastUpdatedAt))
+  return results.sort((a, b) => b.candidate.lastUpdatedAt.localeCompare(a.candidate.lastUpdatedAt) || a.file.localeCompare(b.file));
+}
+
+export async function listPiSessions(options: { root?: string; limit?: number } = {}): Promise<BridgeResumeSessionCandidate[]> {
+  const index = await readPiSessionIndex(options.root ?? piSessionRoot());
+  const unique = new Map<string, BridgeResumeSessionCandidate>();
+  for (const { candidate } of index) if (!unique.has(candidate.sessionId)) unique.set(candidate.sessionId, candidate);
+  const owners = discoverPiOwners();
+  return [...unique.values()].map((candidate) => {
+    const matching = owners.filter((owner) => owner.sessionId === candidate.sessionId);
+    const owner = matching.length === 1 ? matching[0] : undefined;
+    return owner?.status ? { ...candidate, runtimeStatus: owner.status === "busy"
+      ? { type: "active" as const, activeFlags: [] } : { type: "idle" as const } } : candidate;
+  })
     .slice(0, Math.max(0, Math.min(options.limit ?? 100, 500)));
 }
 
@@ -163,20 +192,23 @@ export async function readPiSessionMessages(file: string): Promise<BridgeSession
 
 /** Resolve a native Pi session ID without manufacturing a copy of its history. */
 export async function findPiSessionFile(sessionId: string, root = piSessionRoot()): Promise<string | null> {
-  if (!/^[0-9a-f-]{8,64}$/i.test(sessionId)) return null;
-  const projects = await fs.readdir(root, { withFileTypes: true }).catch(() => []);
-  for (const project of projects) {
-    if (!project.isDirectory()) continue;
-    const directory = path.join(root, project.name);
-    const files = await fs.readdir(directory, { withFileTypes: true }).catch(() => []);
-    for (const file of files) {
-      if (!file.isFile() || !file.name.endsWith(`_${sessionId}.jsonl`)) continue;
-      const candidate = path.join(directory, file.name);
-      const header = headerOf(parseLines(await readWindow(candidate, 2048))[0]);
-      if (header?.id === sessionId) return candidate;
+  if (!/^[0-9a-f-]{8,64}$/i.test(sessionId) && !/^native-pi:[A-Za-z0-9_-]{24}$/.test(sessionId)) return null;
+  const index = await readPiSessionIndex(root);
+  for (const { file, candidate } of index) {
+    if (candidate.sessionId === sessionId) return file;
+    if (sessionId.startsWith("native-pi:")) {
+      const realFile = await fs.realpath(file);
+      const alias = "native-pi:" + createHash("sha256").update(`${realFile}\0${candidate.sessionId}`).digest("base64url").slice(0, 24);
+      if (alias === sessionId) return file;
     }
   }
   return null;
+}
+
+export async function readPiNativeSessionId(file: string): Promise<string> {
+  const header = headerOf(parseLines(await readWindow(file, 2048))[0]);
+  if (!header) throw new Error("Pi 原会话头无效，未创建替代任务。");
+  return header.id;
 }
 
 /** Read the project directory from the session header, not from the storage bucket. */

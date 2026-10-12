@@ -176,6 +176,24 @@ describe("daemon workspace state", () => {
     }
   });
 
+  test("retains completion delivery identities and undelivered reasons in the private state file", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "werelay-delivery-receipts-"));
+    const stateFile = path.join(directory, "daemon-state.json");
+    const cwd = path.join(directory, "workspace");
+    const createdAt = new Date(Date.now() - 60_000).toISOString();
+    const timestamp = new Date().toISOString();
+    const state = {
+      pending: [],
+      delivered: [{ key: "wb:done", adapter: "workbuddy" as const, threadId: "same", createdAt, deliveredAt: timestamp }],
+      undelivered: [{ key: "dsh:expired", adapter: "deepseek" as const, threadId: "same", createdAt, stoppedAt: timestamp, reason: "expired" as const }],
+    };
+    try {
+      new DaemonWorkspaceStateStore(cwd, { stateFile }).setCodexCompletionDeliveryState(state);
+      expect(new DaemonWorkspaceStateStore(cwd, { stateFile }).getCodexCompletionDeliveryState()).toEqual(state);
+      if (process.platform !== "win32") expect(fs.statSync(stateFile).mode & 0o777).toBe(0o600);
+    } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+  });
+
   test("persists pending and delivered approval notifications", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "werelay-daemon-state-"));
     const stateFile = path.join(directory, "daemon-state.json");

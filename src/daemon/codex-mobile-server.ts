@@ -487,6 +487,12 @@ export type StartCodexMobileServerOptions = {
     threadId: string,
     adapter?: string,
   ) => string;
+  // Completion notification receipts are separate from messages sent to Agent.
+  // This callback must remain read-only and must not connect a desktop owner.
+  readNotificationStatus?: (
+    threadId: string,
+    adapter?: string,
+  ) => import("./codex-completion-delivery.ts").CompletionNotificationStatus | null;
   readMessages: (
     threadId: string,
     options?: {
@@ -1941,6 +1947,14 @@ function createRequestHandler(
         return;
       }
 
+      const notificationStatusRoute = url.pathname.match(/^\/api\/tasks\/([^/]+)\/notification-status$/);
+      if (method === "GET" && notificationStatusRoute?.[1]) {
+        const threadId = decodeURIComponent(notificationStatusRoute[1]).trim();
+        if (!threadId) throw new HttpError(400, "任务 ID 不能为空。");
+        if (!options.readNotificationStatus) throw new HttpError(503, "当前连接暂不支持查询微信通知状态。");
+        sendJson(response, 200, { threadId, notification: options.readNotificationStatus(threadId, requestedAdapter) });
+        return;
+      }
       const messageRoute = url.pathname.match(/^\/api\/tasks\/([^/]+)\/messages$/);
       const syncStateRoute = url.pathname.match(/^\/api\/tasks\/([^/]+)\/sync-state$/);
       if (method === "GET" && syncStateRoute?.[1]) {

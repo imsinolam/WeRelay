@@ -7,7 +7,7 @@ const source = fs.readFileSync(new URL("../../src/daemon/werelay-daemon.ts", imp
 test("handles inbound messages before scheduling nonblocking recovery", () => {
   const capture = source.indexOf("const inboundTargets = messages.map");
   const dispatch = source.indexOf("await this.handleInboundMessage(message, inboundTargets[messageIndex])", capture);
-  const replay = source.indexOf("void this.outboundRecoveryScheduler.trigger()", dispatch);
+  const replay = source.indexOf("void this.outboundRecoveryScheduler.trigger({ rerunIfRunning: true })", dispatch);
   expect(capture).toBeGreaterThan(0);
   expect(dispatch).toBeGreaterThan(capture);
   expect(replay).toBeGreaterThan(dispatch);

@@ -419,7 +419,7 @@ export function isRetryableDeferredCodexDrainError(errorText: string): boolean {
 
 
 export function formatCodexTaskAcceptedMessage(): string {
-  return "已发送，Codex 正在处理。\n\n完成后会在微信通知你；任务较久时，可打开下方网页版查看实时进展。";
+  return "已发送，Codex 正在处理。\n\n完成后会尝试在微信通知你；未收到通知时，可打开下方网页版查看结果。";
 }
 
 export function formatCodexTaskDuplicateMessage(): string {

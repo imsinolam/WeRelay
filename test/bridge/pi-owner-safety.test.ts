@@ -39,6 +39,7 @@ test("Pi instant completion does not revert to stale busy after the send acknowl
   const events: Array<Record<string, unknown>> = [];
   adapter.setEventSink((event) => events.push(event as unknown as Record<string, unknown>));
   const internals = adapter as unknown as { token: string; socket: { destroyed: boolean; write: (text: string) => void }; handleRecord: (record: Record<string, unknown>) => void };
+  (adapter as unknown as { ownerSessionConfirmed: boolean }).ownerSessionConfirmed = true;
   internals.token = "secret";
   internals.socket = { destroyed: false, write: (text) => {
     const { id } = JSON.parse(text);
@@ -121,4 +122,37 @@ test("new empty Pi owner session remains selectable before the first native JSON
     else process.env.PI_CODING_AGENT_SESSION_DIR = prev;
     fs.rmSync(root,{recursive:true,force:true});
   }
+});
+
+test("daemon Pi refuses an unconnected original task rather than launching a second writer", async () => {
+  const { PiOwnerAdapter } = await import("../../src/bridge/bridge-adapters.pi.ts");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "wr-pi-no-writer-"));
+  const previous = process.env.WERELAY_PI_OWNER_DIRECTORY;
+  process.env.WERELAY_PI_OWNER_DIRECTORY = root;
+  const adapter = new PiOwnerAdapter({ kind: "pi", command: "must-never-run", cwd: root, renderMode: "headless" });
+  try {
+    await adapter.start();
+    await expect(adapter.sendInputToSession("12345678-1234-1234-1234-123456789abc", "test")).rejects.toThrow("未启动第二个 Pi");
+    expect(adapter.getState().pid).toBeUndefined();
+    await expect(adapter.createSession()).rejects.toThrow("未启动独立 owner");
+    await expect(adapter.createSessionInProject("missing")).rejects.toThrow("未在其他项目");
+  } finally {
+    await adapter.dispose();
+    if (previous === undefined) delete process.env.WERELAY_PI_OWNER_DIRECTORY; else process.env.WERELAY_PI_OWNER_DIRECTORY = previous;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Pi never starts a TUI writer for a file leased by Pi Desktop", async () => {
+  const { PiOwnerAdapter } = await import("../../src/bridge/bridge-adapters.pi.ts");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "wr-pi-desktop-lease-"));
+  const file = path.join(root, "session.jsonl");
+  const adapter = new PiOwnerAdapter({ kind: "pi", command: "must-never-run", cwd: root, renderMode: "companion" });
+  try {
+    fs.writeFileSync(`${file}.pi-desktop.lock`, "private-lease-token");
+    const internals = adapter as unknown as { startOwner: (path: string) => Promise<void>; child: unknown };
+    await expect(internals.startOwner(file)).rejects.toThrow("Pi Desktop 持有");
+    expect(internals.child).toBeNull();
+    expect(fs.readFileSync(`${file}.pi-desktop.lock`, "utf8")).toBe("private-lease-token");
+  } finally { await adapter.dispose(); fs.rmSync(root, { recursive: true, force: true }); }
 });

@@ -2,7 +2,65 @@ import { expect, test } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { listPiSessions, readPiSessionMessages } from "../../src/bridge/pi-session-catalog.ts";
+import { listPiSessions, readPiSessionMessages, findPiSessionFile, piSessionRoot } from "../../src/bridge/pi-session-catalog.ts";
+import { createHash } from "node:crypto";
+
+test("Pi CLI and Desktop share a canonical index even for root files, renamed files and duplicate IDs", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "wr-pi-shared-"));
+  const id = "12345678-1234-1234-1234-123456789abc";
+  const older = path.join(root, "old.jsonl");
+  const nested = path.join(root, "project", "nested");
+  fs.mkdirSync(nested, { recursive: true });
+  const newer = path.join(nested, "renamed.jsonl");
+  const contents = (time: string) => [
+    JSON.stringify({ type: "session", id, cwd: root, timestamp: "2026-10-01T00:00:00Z" }),
+    JSON.stringify({ type: "message", id: time, timestamp: time, message: { role: "user", content: "Shared native task" } }), "",
+  ].join("\n");
+  try {
+    fs.writeFileSync(older, contents("2026-10-01T00:00:00Z"));
+    fs.writeFileSync(newer, contents("2026-10-12T00:00:00Z"));
+    fs.utimesSync(older, new Date("2026-10-13"), new Date("2026-10-13"));
+    fs.utimesSync(newer, new Date("2026-10-12"), new Date("2026-10-12"));
+    expect(await listPiSessions({ root })).toHaveLength(1);
+    expect((await listPiSessions({ root }))[0]).toMatchObject({ sessionId: id, lastUpdatedAt: "2026-10-12T00:00:00.000Z" });
+    expect(await findPiSessionFile(id, root)).toBe(newer);
+    // Use the native realpath API used by the async catalog. On Windows the
+    // non-native sync resolver may retain an 8.3 path while this expands it.
+    const realFile = await fs.promises.realpath(newer);
+    const desktopAlias = "native-pi:" + createHash("sha256").update(`${realFile}\0${id}`).digest("base64url").slice(0, 24);
+    expect(await findPiSessionFile(desktopAlias, root)).toBe(newer);
+    expect(await findPiSessionFile("native-pi:unrecognized-alias", root)).toBeNull();
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("Pi honors its configured agent directory when no session override is set", () => {
+  const oldAgent = process.env.PI_CODING_AGENT_DIR;
+  const oldSessions = process.env.PI_CODING_AGENT_SESSION_DIR;
+  try {
+    process.env.PI_CODING_AGENT_DIR = path.join(os.tmpdir(), "pi-custom-agent");
+    delete process.env.PI_CODING_AGENT_SESSION_DIR;
+    expect(piSessionRoot()).toBe(path.join(os.tmpdir(), "pi-custom-agent", "sessions"));
+  } finally {
+    if (oldAgent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = oldAgent;
+    if (oldSessions === undefined) delete process.env.PI_CODING_AGENT_SESSION_DIR; else process.env.PI_CODING_AGENT_SESSION_DIR = oldSessions;
+  }
+});
+
+test("Pi native enumeration ignores symlink escapes and rejects alias mismatch", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "wr-pi-root-"));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "wr-pi-outside-"));
+  const id = "12345678-1234-1234-1234-123456789abc";
+  try {
+    fs.writeFileSync(path.join(outside, "hidden.jsonl"), JSON.stringify({ type: "session", id, cwd: outside, timestamp: "2026-10-12T00:00:00Z" }) + "\n");
+    if (process.platform !== "win32") fs.symlinkSync(outside, path.join(root, "outside"), "dir");
+    expect(await listPiSessions({ root })).toEqual([]);
+    expect(await findPiSessionFile(id, root)).toBeNull();
+    expect(await findPiSessionFile("../../hidden.jsonl", root)).toBeNull();
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
 
 test("Pi native session index keeps project and explicit name without copying sessions", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "werelay-pi-catalog-"));

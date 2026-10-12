@@ -3,6 +3,7 @@
 export class OutboundRecoveryScheduler {
   private timer: ReturnType<typeof setTimeout> | undefined;
   private running: Promise<void> | undefined;
+  private rerunRequested = false;
   private stopped = true;
   private closed = false;
 
@@ -19,10 +20,22 @@ export class OutboundRecoveryScheduler {
     this.schedule();
   }
 
-  trigger(): Promise<void> {
+  trigger(options: { rerunIfRunning?: boolean } = {}): Promise<void> {
     if (this.closed) return Promise.resolve();
-    if (this.running) return this.running;
-    this.running = Promise.resolve().then(() => this.closed ? undefined : this.recover()).catch(this.onError).finally(() => {
+    if (this.running) {
+      // Only real inbound context refreshes need another pass. Ordinary capture
+      // and policy callbacks can themselves run inside recovery: never loop on
+      // those internal triggers.
+      if (options.rerunIfRunning) this.rerunRequested = true;
+      return this.running;
+    }
+    this.running = Promise.resolve().then(async () => {
+      do {
+        this.rerunRequested = false;
+        if (this.closed) break;
+        try { await this.recover(); } catch (error) { this.onError(error); }
+      } while (!this.closed && this.rerunRequested);
+    }).finally(() => {
       this.running = undefined;
     });
     return this.running;
@@ -31,6 +44,7 @@ export class OutboundRecoveryScheduler {
   stop(): void {
     this.stopped = true;
     this.closed = true;
+    this.rerunRequested = false;
     if (this.timer) clearTimeout(this.timer);
     this.timer = undefined;
   }

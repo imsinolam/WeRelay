@@ -48,9 +48,7 @@ export function createBridgeAdapter(options: AdapterOptions): BridgeAdapter {
         ? new ReasonixServerAdapter(options)
         : new LocalCompanionProxyAdapter(options);
     case "pi":
-      return options.renderMode === "companion"
-        ? new PiOwnerAdapter(options)
-        : new LocalCompanionProxyAdapter(options);
+      return new PiOwnerAdapter(options);
     case "workbuddy":
       return new WorkBuddyDesktopAdapter(options);
     case "deepseek":

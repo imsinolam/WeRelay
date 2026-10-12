@@ -31,11 +31,36 @@ export type PendingCodexCompletionDelivery = {
 export type DeliveredCodexCompletionDelivery = {
   key: string;
   deliveredAt: string;
+  threadId?: string;
+  adapter?: BridgeAdapterKind;
+  createdAt?: string;
+  turnId?: string;
+};
+
+// Terminal receipts retain identity/reason only, never the answer or media paths.
+export type UndeliveredCompletionReceipt = {
+  key: string;
+  threadId: string;
+  adapter?: BridgeAdapterKind;
+  turnId?: string;
+  createdAt: string;
+  stoppedAt: string;
+  reason: "expired" | "capacity";
+};
+
+export type CompletionNotificationStatus = {
+  status: "pending" | "delivered" | "not_delivered";
+  updatedAt: string;
+  turnId?: string;
+  reason?: "expired" | "capacity";
+  sentParts?: number;
+  totalParts?: number;
 };
 
 export type CodexCompletionDeliveryState = {
   pending: PendingCodexCompletionDelivery[];
   delivered: DeliveredCodexCompletionDelivery[];
+  undelivered?: UndeliveredCompletionReceipt[];
 };
 
 export type CodexCompletionDeliveryQueueOptions = {
@@ -154,6 +179,17 @@ function normalizeDelivered(
   return {
     key: record.key.trim(),
     deliveredAt,
+    ...normalizeReceiptIdentity(record),
+  };
+}
+
+function normalizeReceiptIdentity(record: Record<string, unknown>): Partial<DeliveredCodexCompletionDelivery> {
+  return {
+    ...(typeof record.threadId === "string" && record.threadId.trim() ? { threadId: record.threadId.trim() } : {}),
+    ...(IMPLEMENTED_BRIDGE_ADAPTER_IDS.includes(record.adapter as BridgeAdapterKind)
+      ? { adapter: record.adapter as BridgeAdapterKind } : {}),
+    ...(normalizeTimestamp(record.createdAt) ? { createdAt: normalizeTimestamp(record.createdAt)! } : {}),
+    ...(typeof record.turnId === "string" && record.turnId.trim() ? { turnId: record.turnId.trim() } : {}),
   };
 }
 
@@ -181,13 +217,34 @@ export function normalizeCodexCompletionDeliveryState(
     .slice(-MAX_DELIVERED_CODEX_COMPLETIONS);
   const deliveredKeys = new Set(delivered.map((item) => item.key));
 
+  const undeliveredByKey = new Map<string, UndeliveredCompletionReceipt>();
+  for (const item of Array.isArray(record.undelivered) ? record.undelivered : []) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const receipt = item as Record<string, unknown>;
+    const identity = normalizeReceiptIdentity(receipt);
+    const stoppedAt = normalizeTimestamp(receipt.stoppedAt);
+    if (typeof receipt.key !== "string" || !receipt.key.trim() || !identity.threadId || !identity.createdAt ||
+        !stoppedAt || Date.parse(stoppedAt) < cutoff || deliveredKeys.has(receipt.key.trim()) ||
+        (receipt.reason !== "expired" && receipt.reason !== "capacity")) continue;
+    const normalized: UndeliveredCompletionReceipt = {
+      ...identity, key: receipt.key.trim(), threadId: identity.threadId,
+      createdAt: identity.createdAt, stoppedAt, reason: receipt.reason,
+    };
+    const previous = undeliveredByKey.get(normalized.key);
+    if (!previous || Date.parse(previous.stoppedAt) < Date.parse(stoppedAt)) undeliveredByKey.set(normalized.key, normalized);
+  }
+  const undelivered = [...undeliveredByKey.values()]
+    .sort((a, b) => Date.parse(a.stoppedAt) - Date.parse(b.stoppedAt))
+    .slice(-MAX_DELIVERED_CODEX_COMPLETIONS);
+  const undeliveredKeys = new Set(undelivered.map((item) => item.key));
+
   const pendingByKey = new Map<string, PendingCodexCompletionDelivery>();
   for (const item of Array.isArray(record.pending) ? record.pending : []) {
     const pending = normalizePending(item);
     if (
       !pending ||
       Date.parse(pending.createdAt) < cutoff ||
-      deliveredKeys.has(pending.key)
+      deliveredKeys.has(pending.key) || undeliveredKeys.has(pending.key)
     ) {
       continue;
     }
@@ -196,14 +253,30 @@ export function normalizeCodexCompletionDeliveryState(
       pendingByKey.set(pending.key, pending);
     }
   }
-  const pending = [...pendingByKey.values()]
-    .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt))
-    .slice(-MAX_PENDING_CODEX_COMPLETIONS);
+  const sortedPending = [...pendingByKey.values()]
+    .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
+  for (const delivery of sortedPending.slice(0, Math.max(0, sortedPending.length - MAX_PENDING_CODEX_COMPLETIONS))) {
+    undelivered.push(makeUndeliveredReceipt(delivery, "capacity", nowMs));
+  }
+  const pending = sortedPending.slice(-MAX_PENDING_CODEX_COMPLETIONS);
 
   return {
     pending: pending.map(clonePending),
     delivered: delivered.map((item) => ({ ...item })),
+    ...(undelivered.length ? { undelivered: undelivered.slice(-MAX_DELIVERED_CODEX_COMPLETIONS) } : {}),
   };
+}
+
+function completionIdentity(delivery: PendingCodexCompletionDelivery) {
+  return {
+    threadId: delivery.threadId, createdAt: delivery.createdAt,
+    ...(delivery.adapter ? { adapter: delivery.adapter } : {}),
+    ...(delivery.turnId ? { turnId: delivery.turnId } : {}),
+  };
+}
+
+function makeUndeliveredReceipt(delivery: PendingCodexCompletionDelivery, reason: UndeliveredCompletionReceipt["reason"], nowMs: number): UndeliveredCompletionReceipt {
+  return { key: delivery.key, ...completionIdentity(delivery), reason, stoppedAt: new Date(nowMs).toISOString() };
 }
 
 export function selectCodexCompletionBacklogBatch(
@@ -314,7 +387,7 @@ export class CodexCompletionDeliveryQueue {
   private readonly onExpire?: (deliveries: PendingCodexCompletionDelivery[]) => void;
   private readonly pending = new Map<string, PendingCodexCompletionDelivery>();
   private readonly delivered = new Map<string, DeliveredCodexCompletionDelivery>();
-  private readonly expired = new Map<string, number>();
+  private readonly expired = new Map<string, UndeliveredCompletionReceipt>();
   private readonly inFlight = new Set<string>();
 
   constructor(options: CodexCompletionDeliveryQueueOptions = {}) {
@@ -331,13 +404,14 @@ export class CodexCompletionDeliveryQueue {
     for (const delivery of initial.delivered) {
       this.delivered.set(delivery.key, { ...delivery });
     }
+    for (const receipt of initial.undelivered ?? []) this.expired.set(receipt.key, { ...receipt });
     // 构造阶段不主动清理：此时 onExpire 监听方尚未就绪。getPending /
     // deliver / enqueue / snapshot 都会先做一次带通知的清理，daemon 启动
     // 后的第一轮重试即可丢弃过期积压并留下日志。
   }
 
   snapshot(): CodexCompletionDeliveryState {
-    this.pruneExpired();
+    if (this.pruneExpired()) this.persistState();
     return this.snapshotWithoutPruning();
   }
 
@@ -345,7 +419,37 @@ export class CodexCompletionDeliveryQueue {
     return {
       pending: [...this.pending.values()].map(clonePending),
       delivered: [...this.delivered.values()].map((item) => ({ ...item })),
+      ...(this.expired.size ? { undelivered: [...this.expired.values()].map((item) => ({ ...item })) } : {}),
     };
+  }
+
+  getNotificationStatus(threadId: string, adapter: BridgeAdapterKind = "codex"): CompletionNotificationStatus | null {
+    if (this.pruneExpired()) this.persistState();
+    const matches = (item: { threadId?: string; adapter?: BridgeAdapterKind }) =>
+      item.threadId === threadId && (item.adapter ?? "codex") === adapter;
+    const candidates: Array<{ createdAt: string; state: CompletionNotificationStatus }> = [];
+    for (const item of this.pending.values()) {
+      if (!matches(item)) continue;
+      candidates.push({ createdAt: item.createdAt, state: {
+        status: "pending", updatedAt: item.createdAt, turnId: item.turnId,
+        sentParts: item.nextTextIndex + (item.nextImageIndex ?? 0) + (item.nextAttachmentIndex ?? 0),
+        totalParts: item.texts.length + (item.images?.length ?? 0) + (item.attachments?.length ?? 0),
+      } });
+    }
+    for (const item of this.delivered.values()) {
+      if (!matches(item)) continue;
+      candidates.push({ createdAt: item.createdAt ?? item.deliveredAt, state: {
+        status: "delivered", updatedAt: item.deliveredAt, turnId: item.turnId,
+      } });
+    }
+    for (const item of this.expired.values()) {
+      if (!matches(item)) continue;
+      candidates.push({ createdAt: item.createdAt, state: {
+        status: "not_delivered", updatedAt: item.stoppedAt, turnId: item.turnId, reason: item.reason,
+      } });
+    }
+    return candidates.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt) ||
+      Date.parse(b.state.updatedAt) - Date.parse(a.state.updatedAt))[0]?.state ?? null;
   }
 
   getPending(): PendingCodexCompletionDelivery[] {
@@ -414,6 +518,7 @@ export class CodexCompletionDeliveryQueue {
     this.pending.set(key, delivery);
     this.trimPending();
     this.persistState();
+    if (!this.pending.has(key)) return { status: "expired" };
     return { status: "queued", delivery: clonePending(delivery) };
   }
 
@@ -429,6 +534,7 @@ export class CodexCompletionDeliveryQueue {
       this.delivered.set(key, {
         key,
         deliveredAt: new Date(this.now()).toISOString(),
+        ...completionIdentity(delivery),
       });
       acknowledged.push(clonePending(delivery));
     }
@@ -533,6 +639,7 @@ export class CodexCompletionDeliveryQueue {
     this.delivered.set(delivery.key, {
       key: delivery.key,
       deliveredAt: new Date(this.now()).toISOString(),
+      ...completionIdentity(delivery),
     });
     this.trimDelivered();
     this.persistState();
@@ -540,8 +647,11 @@ export class CodexCompletionDeliveryQueue {
 
   private trimPending(): void {
     while (this.pending.size > MAX_PENDING_CODEX_COMPLETIONS) {
-      const oldestKey = this.pending.keys().next().value;
+      // An active send owns its checkpoint; evicting it would lose confirmed
+      // progress on crash and leave contradictory undelivered receipts.
+      const oldestKey = [...this.pending.keys()].find((key) => !this.inFlight.has(key));
       if (typeof oldestKey !== "string") break;
+      this.rememberExpired(this.pending.get(oldestKey)!, "capacity");
       this.pending.delete(oldestKey);
     }
   }
@@ -576,7 +686,7 @@ export class CodexCompletionDeliveryQueue {
       // 的事件重新入队，否则重放会把它“复活”成一条新通知。
       if (createdAtMs < deliverableCutoff) {
         this.pending.delete(key);
-        this.rememberExpired(key);
+        this.rememberExpired(delivery, "expired");
         expired.push(clonePending(delivery));
         changed = true;
         continue;
@@ -592,15 +702,22 @@ export class CodexCompletionDeliveryQueue {
         changed = true;
       }
     }
+    for (const [key, receipt] of this.expired) {
+      if (Date.parse(receipt.stoppedAt) < retentionCutoff) {
+        this.expired.delete(key);
+        changed = true;
+      }
+    }
     if (expired.length > 0) {
       this.onExpire?.(expired);
     }
     return changed;
   }
 
-  private rememberExpired(key: string): void {
+  private rememberExpired(delivery: PendingCodexCompletionDelivery, reason: UndeliveredCompletionReceipt["reason"]): void {
+    const key = delivery.key;
     this.expired.delete(key);
-    this.expired.set(key, this.now());
+    this.expired.set(key, makeUndeliveredReceipt(delivery, reason, this.now()));
     while (this.expired.size > MAX_DELIVERED_CODEX_COMPLETIONS) {
       const oldestKey = this.expired.keys().next().value;
       if (typeof oldestKey !== "string") break;

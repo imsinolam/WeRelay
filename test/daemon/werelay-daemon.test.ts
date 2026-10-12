@@ -433,7 +433,7 @@ describe("daemon startup resilience", () => {
     const start = source.indexOf("  private async handleInboundBatch(");
     const end = source.indexOf("\n  async shutdown", start);
     const body = source.slice(start, end);
-    expect(body.indexOf("void this.outboundRecoveryScheduler.trigger()")).toBeGreaterThan(
+    expect(body.indexOf("void this.outboundRecoveryScheduler.trigger({ rerunIfRunning: true })")).toBeGreaterThan(
       body.indexOf("await this.handleInboundMessage(message, inboundTargets[messageIndex])"),
     );
     expect(source).not.toContain("await this.runOutboundRecoveryPass()");
@@ -738,6 +738,19 @@ describe("werelay-daemon helpers", () => {
     ].join("\n"));
     expect(open.has("pi")).toBe(true);
     expect(detectOpenMobileAdaptersFromProcessList("/usr/local/bin/piano --version").has("pi")).toBe(false);
+  });
+
+  test("Pi Desktop belongs to the Pi catalog even without a plain Pi CLI", () => {
+    expect(detectOpenMobileAdaptersFromProcessList("/Applications/PI-Desktop.app/Contents/MacOS/PI-Desktop").has("pi")).toBe(true);
+    expect(detectOpenMobileAdaptersFromProcessList("/Users/test/Applications/PI-Desktop Local.app/Contents/MacOS/PI-Desktop").has("pi")).toBe(true);
+    expect(detectOpenMobileAdaptersFromProcessList("/tmp/PI-Desktop-backup.txt").has("pi")).toBe(false);
+  });
+
+  test("Pi terminal filtering does not open a fresh companion to read its task list", () => {
+    const source = readRepoFile("src/daemon/werelay-daemon.ts");
+    const start = source.indexOf("  private async ensureSlot(");
+    const end = source.indexOf("  private async ", start + 1);
+    expect(source.slice(start, end)).toContain('const requiresVisibleClient = adapter !== "pi" && providerRequiresVisibleClient(adapter)');
   });
 
   test("explains terminal capability limits instead of exposing a generic mobile error", () => {
@@ -2502,7 +2515,7 @@ describe("werelay-daemon helpers", () => {
 
   test("formats task delivery receipts for every terminal with clear accepted and queued states", () => {
     expect(formatDaemonTaskDispatchReceipt("workbuddy", {})).toBe(
-      "已发送，WorkBuddy 正在处理。\n完成后会在微信通知你；可打开下方链接查看实时进展。",
+      "已发送，WorkBuddy 正在处理。\n完成后会尝试在微信通知你；未收到通知时，可打开下方链接查看结果。",
     );
     expect(formatDaemonTaskDispatchReceipt("deepseek", {
       queued: true,

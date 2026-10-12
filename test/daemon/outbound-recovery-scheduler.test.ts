@@ -1,8 +1,98 @@
 import { describe, expect, test } from "bun:test";
 
 import { OutboundRecoveryScheduler } from "../../src/daemon/outbound-recovery-scheduler.ts";
+import { CodexCompletionDeliveryQueue, type CodexCompletionDeliveryState } from "../../src/daemon/codex-completion-delivery.ts";
 
 describe("outbound recovery scheduler", () => {
+  test("inbound refresh recovers persisted partial delivery without duplicating confirmed parts", async () => {
+    const snapshots: CodexCompletionDeliveryState[] = [];
+    let release!: () => void;
+    const waiting = new Promise<void>((resolve) => { release = resolve; });
+    let freshContext = false;
+    let passes = 0;
+    const attempts: string[][] = [];
+    const queue = new CodexCompletionDeliveryQueue({ persist: (state) => snapshots.push(structuredClone(state)) });
+    queue.enqueue({ key: "session:turn", threadId: "session", texts: ["answer", "task link"] });
+    const scheduler = new OutboundRecoveryScheduler(async () => {
+      const thisPass = ++passes;
+      await queue.deliver("session:turn", async (_item, texts, checkpoint) => {
+        attempts.push(texts);
+        if (thisPass === 1) {
+          checkpoint(); // answer confirmed, link rejected using the old context
+          await waiting;
+          return 1;
+        }
+        expect(freshContext).toBe(true);
+        return texts.length;
+      });
+    }, () => {});
+    const recovering = scheduler.trigger();
+    await Promise.resolve();
+    freshContext = true;
+    void scheduler.trigger({ rerunIfRunning: true });
+    release();
+    await recovering;
+    expect(attempts).toEqual([["answer", "task link"], ["task link"]]);
+    expect(passes).toBe(2);
+    expect(new CodexCompletionDeliveryQueue({ initial: snapshots.at(-1) }).hasDelivered("session:turn")).toBe(true);
+    scheduler.stop();
+  });
+
+  test("fresh inbound during recovery coalesces into one follow-up pass", async () => {
+    let release!: () => void;
+    let passes = 0;
+    const waiting = new Promise<void>((resolve) => { release = resolve; });
+    const scheduler = new OutboundRecoveryScheduler(async () => {
+      passes++;
+      if (passes === 1) await waiting;
+    }, () => {});
+    const first = scheduler.trigger();
+    await Promise.resolve();
+    const refresh = scheduler.trigger({ rerunIfRunning: true });
+    scheduler.trigger({ rerunIfRunning: true });
+    scheduler.trigger();
+    release();
+    await Promise.all([first, refresh]);
+    expect(passes).toBe(2);
+    scheduler.stop();
+  });
+
+  test("stop cancels an inbound follow-up and ordinary triggers never self-loop", async () => {
+    let release!: () => void;
+    let passes = 0;
+    const waiting = new Promise<void>((resolve) => { release = resolve; });
+    const scheduler = new OutboundRecoveryScheduler(async () => {
+      passes++;
+      void scheduler.trigger();
+      await waiting;
+    }, () => {});
+    const first = scheduler.trigger();
+    await Promise.resolve();
+    void scheduler.trigger({ rerunIfRunning: true });
+    scheduler.stop();
+    release();
+    await first;
+    expect(passes).toBe(1);
+  });
+
+  test("fresh inbound is not lost when the current pass fails", async () => {
+    let release!: () => void;
+    const waiting = new Promise<void>((resolve) => { release = resolve; });
+    const errors: unknown[] = [];
+    let passes = 0;
+    const scheduler = new OutboundRecoveryScheduler(async () => {
+      if (++passes === 1) { await waiting; throw new Error("old-context failure"); }
+    }, (error) => errors.push(error));
+    const first = scheduler.trigger();
+    await Promise.resolve();
+    void scheduler.trigger({ rerunIfRunning: true });
+    release();
+    await first;
+    expect(passes).toBe(2);
+    expect(errors).toHaveLength(1);
+    scheduler.stop();
+  });
+
   test("runs an independent timer pass and triggers immediately on demand", async () => {
     let passes = 0;
     const scheduler = new OutboundRecoveryScheduler(

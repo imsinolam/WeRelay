@@ -8,6 +8,7 @@ export type PiOwnerAdvertisement = {
   sessionId: string;
   socket: string;
   token: string;
+  status?: "idle" | "busy";
 };
 
 export function piOwnerDirectory(): string {
@@ -22,14 +23,15 @@ export function discoverPiOwners(directory = piOwnerDirectory()): PiOwnerAdverti
     (process.getuid && root.uid !== process.getuid()) || (root.mode & 0o077)) return [];
   const owners: PiOwnerAdvertisement[] = [];
   for (const name of fs.readdirSync(directory)) {
-    if (!/^\d+\.json$/.test(name)) continue;
+    const identity = /^(\d+)(?:-[0-9a-f]{16})?\.json$/.exec(name);
+    if (!identity) continue;
     const file = path.join(directory, name);
     try {
       const stat = fs.lstatSync(file);
       if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o077) ||
         (process.getuid && stat.uid !== process.getuid()) || stat.size > 4096) continue;
       const record = JSON.parse(fs.readFileSync(file, "utf8")) as PiOwnerAdvertisement;
-      if (record.pid !== Number(name.slice(0, -5)) || !Number.isSafeInteger(record.pid) ||
+      if (record.pid !== Number(identity[1]) || !Number.isSafeInteger(record.pid) ||
         !path.isAbsolute(record.cwd) || !/^[0-9a-f-]{36}$/i.test(record.sessionId) ||
         typeof record.token !== "string" || !/^[0-9a-f]{64}$/.test(record.token) ||
         typeof record.socket !== "string" || !path.isAbsolute(record.socket)) continue;
@@ -37,7 +39,10 @@ export function discoverPiOwners(directory = piOwnerDirectory()): PiOwnerAdverti
       const socket = fs.lstatSync(record.socket);
       if (!socket.isSocket() || socket.isSymbolicLink() || (socket.mode & 0o077) ||
         (process.getuid && socket.uid !== process.getuid())) continue;
-      owners.push(record);
+      owners.push({
+        pid: record.pid, cwd: record.cwd, sessionId: record.sessionId, socket: record.socket, token: record.token,
+        ...(record.status === "idle" || record.status === "busy" ? { status: record.status } : {}),
+      });
     } catch { /* stale or malformed owner: never attach */ }
   }
   return owners;

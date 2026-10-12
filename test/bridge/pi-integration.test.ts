@@ -22,6 +22,30 @@ test("Pi CLI and messaging routes target the visible Pi owner, not a forked runt
   }
 });
 
+test("Pi task enumeration and native history work before companion readiness without writing or spawning", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "wr-pi-unready-"));
+  const old = process.env.PI_CODING_AGENT_SESSION_DIR;
+  const id = "12345678-1234-1234-1234-123456789abc";
+  try {
+    process.env.PI_CODING_AGENT_SESSION_DIR = root;
+    fs.mkdirSync(path.join(root, "project"));
+    const file = path.join(root, "project", `2026-10-12_${id}.jsonl`);
+    const text = JSON.stringify({ type: "session", id, cwd: root, timestamp: "2026-10-12T00:00:00Z" }) + "\n" +
+      JSON.stringify({ type: "message", id: "u1", timestamp: "2026-10-12T01:00:00Z", message: { role: "user", content: "Check original task" } }) + "\n";
+    fs.writeFileSync(file, text);
+    const adapter = createBridgeAdapter({ kind: "pi", command: "pi", cwd: root, renderMode: "headless" });
+    await adapter.start();
+    expect(await adapter.listResumeSessions(10)).toMatchObject([{ sessionId: id, cwd: root }]);
+    expect(await adapter.getSessionMessages!(id)).toMatchObject([{ role: "user", text: "Check original task" }]);
+    expect(fs.readFileSync(file, "utf8")).toBe(text);
+    expect(adapter.getState().pid).toBeUndefined();
+    await adapter.dispose();
+  } finally {
+    if (old === undefined) delete process.env.PI_CODING_AGENT_SESSION_DIR; else process.env.PI_CODING_AGENT_SESSION_DIR = old;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("global task list reads Pi native JSONL and retains project identity", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "wr-pi-global-"));
   const old = process.env.PI_CODING_AGENT_SESSION_DIR;
