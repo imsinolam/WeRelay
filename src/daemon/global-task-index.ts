@@ -349,6 +349,40 @@ export function formatGlobalTaskDisplayTitle(
   return formatTaskListDisplayTitle(value, maxChars);
 }
 
+export function isGlobalTaskRunning(
+  candidate: Pick<GlobalTaskCandidate, "runtimeStatus">,
+): boolean {
+  return candidate.runtimeStatus?.type === "active";
+}
+
+export function countRunningGlobalTasks(
+  candidates: GlobalTaskCandidate[],
+): number {
+  return candidates.filter(isGlobalTaskRunning).length;
+}
+
+/**
+ * 默认列表条数：运行中任务多于常规一页时，按运行数量向上取整到 5 的倍数。
+ *
+ * 用户希望“正在跑的任务”不用翻页就能全部看到，但又不希望列表无限变长；
+ * 取整到 5 的倍数可以让 11 个运行任务显示 15 条，而不是精确的 11 条，
+ * 顺带露出几条刚完成的任务，同时保持条数稳定、不随任务数抖动。
+ */
+export function resolveDefaultGlobalTaskPageSize(params: {
+  basePageSize: number;
+  maxPageSize: number;
+  runningCount: number;
+}): number {
+  const base = Math.max(1, Math.floor(params.basePageSize));
+  if (params.runningCount <= base) return base;
+  const rounded = Math.ceil(params.runningCount / 5) * 5;
+  return Math.min(rounded, Math.max(base, params.maxPageSize));
+}
+
+function formatRunningSummary(runningCount: number): string {
+  return runningCount > 0 ? ` · ${runningCount} 个运行中` : "";
+}
+
 function taskIdentityLabel(
   candidate: GlobalTaskCandidate,
   showAdapterLabel: boolean,
@@ -399,7 +433,13 @@ export function formatGlobalTaskList(params: {
       : "当前没有可继续的任务。\n终端开始运行任务后，会自动出现在这里。";
   }
   const showAdapterLabels = true;
-  const title = params.adapter ? `${formatTaskListAdapterLabel(params.adapter)} 任务` : "全部任务";
+  const visibleCandidates = params.adapter
+    ? params.snapshot.candidates.filter((candidate) => candidate.adapter === params.adapter)
+    : params.snapshot.candidates;
+  const runningCount = countRunningGlobalTasks(visibleCandidates);
+  const title = params.adapter
+    ? `${formatTaskListAdapterLabel(params.adapter)} 任务${formatRunningSummary(runningCount)}`
+    : `全部任务${formatRunningSummary(runningCount)}`;
   const entries = page.candidates
     .map((candidate) => formatGlobalTaskEntry(candidate, params.snapshot, showAdapterLabels))
     .join("\n\n");

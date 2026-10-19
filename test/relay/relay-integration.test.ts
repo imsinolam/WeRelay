@@ -297,6 +297,7 @@ describe("WeRelay application relay", () => {
     });
     closers.push(() => relay.close());
     const client = startWeRelayRelayClient({
+      transport: "long-poll",
       relayUrl: relay.baseUrl,
       deviceId: "example-device",
       deviceToken: "test-device-token",
@@ -407,6 +408,7 @@ describe("WeRelay application relay", () => {
     });
     closers.push(() => relay.close());
     const client = startWeRelayRelayClient({
+      transport: "long-poll",
       relayUrl: relay.baseUrl,
       deviceId: "example-device",
       deviceToken: "test-device-token",
@@ -451,6 +453,7 @@ describe("WeRelay application relay", () => {
     });
     closers.push(() => relay.close());
     const client: WeRelayRelayClientHandle = startWeRelayRelayClient({
+      transport: "long-poll",
       relayUrl: relay.baseUrl,
       deviceId: "example-device",
       deviceToken: "test-device-token",
@@ -713,6 +716,7 @@ describe("WeRelay relay local preview deployment", () => {
     });
     closers.push(() => relay.close());
     const client = startWeRelayRelayClient({
+      transport: "long-poll",
       relayUrl: relay.baseUrl,
       deviceId: "example-device",
       deviceToken: "test-device-token",
@@ -859,6 +863,7 @@ describe("WeRelay relay local preview deployment", () => {
     });
     closers.push(() => relay.close());
     const client = startWeRelayRelayClient({
+      transport: "long-poll",
       relayUrl: relay.baseUrl,
       deviceId: "prewarm-device",
       deviceToken: "prewarm-token",

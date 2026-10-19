@@ -4,6 +4,7 @@ import { splitTaskListMessages } from "../../src/bridge/task-list-instructions.t
 import {
   activateGlobalTaskCandidate,
   buildGlobalTaskSnapshot,
+  countRunningGlobalTasks,
   createGlobalTaskCatalogCache,
   formatGlobalTaskDisplayTitle,
   formatGlobalTaskList,
@@ -11,6 +12,7 @@ import {
   globalTaskIdentityKey,
   paginateGlobalTaskSnapshot,
   resolveCompactGlobalTaskSearchTarget,
+  resolveDefaultGlobalTaskPageSize,
   resolveGlobalTaskCandidate,
   resolveGlobalTaskTargetedMessage,
   selectRunningGlobalTaskAdapters,
@@ -646,5 +648,82 @@ describe("global task catalog cache", () => {
     expect(await cache.load("reasonix", async () => "reasonix-value")).toBe("reasonix-value");
     expect(cache.read("grok")).toBe("grok-value");
     expect(cache.read("reasonix")).toBe("reasonix-value");
+  });
+});
+
+describe("running task count and default page size", () => {
+  function running(
+    adapter: GlobalTaskCandidate["adapter"],
+    sessionId: string,
+    title: string,
+    lastUpdatedAt: string,
+  ): GlobalTaskCandidate {
+    return {
+      ...candidate(adapter, sessionId, title, lastUpdatedAt),
+      runtimeStatus: { type: "active", activeFlags: [] },
+    };
+  }
+
+  test("shows how many tasks are currently running in the list title", () => {
+    const tasks = [
+      running("codex", "c1", "在跑的甲", "2026-10-19T12:00:00Z"),
+      running("deepseek", "d1", "在跑的乙", "2026-10-19T11:00:00Z"),
+      candidate("codex", "c2", "已完成的丙", "2026-10-19T10:00:00Z"),
+    ];
+    const snapshot = buildGlobalTaskSnapshot(tasks);
+
+    expect(formatGlobalTaskList({ snapshot, startIndex: 0, pageSize: 10 }))
+      .toStartWith("全部任务 · 2 个运行中\n");
+    expect(formatGlobalTaskList({ snapshot, adapter: "codex", startIndex: 0, pageSize: 10 }))
+      .toStartWith("Codex 任务 · 1 个运行中\n");
+  });
+
+  test("keeps the title unchanged when nothing is running", () => {
+    const snapshot = buildGlobalTaskSnapshot([
+      candidate("codex", "c1", "已完成", "2026-10-19T12:00:00Z"),
+    ]);
+
+    expect(formatGlobalTaskList({ snapshot, startIndex: 0, pageSize: 10 }))
+      .toStartWith("全部任务\n");
+  });
+
+  test("counts only the filtered adapter when a terminal is selected", () => {
+    const tasks = [
+      running("codex", "c1", "甲", "2026-10-19T12:00:00Z"),
+      running("deepseek", "d1", "乙", "2026-10-19T11:00:00Z"),
+      running("deepseek", "d2", "丙", "2026-10-19T10:00:00Z"),
+    ];
+    const snapshot = buildGlobalTaskSnapshot(tasks);
+
+    expect(countRunningGlobalTasks(snapshot.candidates)).toBe(3);
+    expect(countRunningGlobalTasks(
+      snapshot.candidates.filter((item) => item.adapter === "deepseek"),
+    )).toBe(2);
+    expect(formatGlobalTaskList({ snapshot, adapter: "deepseek", startIndex: 0, pageSize: 10 }))
+      .toStartWith("DSH 任务 · 2 个运行中\n");
+  });
+
+  test("grows the default page size to the running count rounded up to a multiple of five", () => {
+    const size = (runningCount: number) => resolveDefaultGlobalTaskPageSize({
+      basePageSize: 10,
+      maxPageSize: 100,
+      runningCount,
+    });
+
+    expect(size(0)).toBe(10);
+    expect(size(10)).toBe(10);
+    expect(size(11)).toBe(15);
+    expect(size(13)).toBe(15);
+    expect(size(15)).toBe(15);
+    expect(size(16)).toBe(20);
+    expect(size(23)).toBe(25);
+  });
+
+  test("never exceeds the maximum page size", () => {
+    expect(resolveDefaultGlobalTaskPageSize({
+      basePageSize: 10,
+      maxPageSize: 100,
+      runningCount: 500,
+    })).toBe(100);
   });
 });

@@ -13,5 +13,7 @@ thinking-orb animation from `thinking-orbs` (https://github.com/Jakubantalik/thi
 MIT License, Copyright (c) 2026 Jakub Antalik. The adaptation rewrites the
 geometry into dependency-free plain JavaScript, renders it on a 2D canvas, and
 resolves its ink from the WeRelay light/dark theme instead of the host project.
+The same animation also serves as the composer's running indicator at the
+20px preset, recoloured to the WeRelay brand green.
 
 The task-board terminal icons include SVG marks from Lobe Icons static SVG 1.95.1 (MIT) and the Reasonix project logo (MIT). The WorkBuddy icon is used solely to identify the supported WorkBuddy application. Product names and marks remain the property of their respective owners and do not imply endorsement.

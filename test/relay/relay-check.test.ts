@@ -26,6 +26,7 @@ test("relay reports real poll failures and successful connections to settings", 
   const states: string[] = [];
   let calls = 0;
   const client = startWeRelayRelayClient({
+      transport: "long-poll",
     relayUrl: "https://relay.example.com", localBaseUrl: "http://127.0.0.1:4396", deviceId: "test-device", deviceToken: "test-secret-only", retryDelayMs: 1,
     onConnectionChange: (state) => { states.push(state); },
     fetchImpl: (async (_url: unknown, init?: RequestInit) => {

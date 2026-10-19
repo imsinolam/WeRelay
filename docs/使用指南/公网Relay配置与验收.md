@@ -212,6 +212,10 @@ sudo ss -ltnp | grep 14396
 
 ## 九、配置 HTTPS 入口
 
+新版电脑优先使用 WSS 设备通道；模板增加了独立的 `/__werelay/device/ws` Upgrade 路由。升级已有服务器时不要覆盖其他站点配置，只把这段合入本项目 server 块并运行 `nginx -t`。未配置 Upgrade 或旧 Relay 不支持时，电脑会回退到 HTTPS 长轮询，仍可使用，但不能据此宣称 WSS 已验活。
+
+建议先升级 Relay 和反向代理，再升级电脑。可在电脑设置 `WERELAY_RELAY_TRANSPORT=long-poll` 回退旧通道。WSS 握手使用设备请求头认证，不把密钥放入网址；网页与微信的登录方式不变。开发验证和正式公网验收边界见[公网 WebSocket 设备通道](../架构设计/公网WebSocket设备通道.md)。
+
 GitHub 仓库和安装后的本地 tarball 提供 Nginx 模板：
 
 ```bash

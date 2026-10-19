@@ -23,6 +23,20 @@ server {
     # Setup tokens and task selectors may appear in query strings.
     access_log off;
 
+    # Device-only application WSS. Browser API requests stay on ordinary HTTPS.
+    location = /__werelay/device/ws {
+        proxy_pass http://127.0.0.1:14396;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_buffering off;
+        proxy_read_timeout 75s;
+        proxy_send_timeout 75s;
+    }
+
     location / {
         proxy_pass http://127.0.0.1:14396;
         proxy_http_version 1.1;

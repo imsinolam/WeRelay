@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { runRelayWebSocketSession, type RelaySocketSession } from "./relay-websocket-client.ts";
 
 import {
   WERELAY_RELAY_HEARTBEAT_PATH,
@@ -7,6 +8,7 @@ import {
   WERELAY_RELAY_PROTOCOL_VERSION,
   WERELAY_RELAY_RESPONSE_BODY_LIMIT,
   WERELAY_RELAY_RESPONSE_PATH,
+  WERELAY_RELAY_MAX_IN_FLIGHT,
   normalizeWeRelayRelayBaseUrl,
   type WeRelayRelayCommand,
   type WeRelayRelayCommandResponse,
@@ -17,7 +19,7 @@ import { writePrivateFileAtomic } from "../utils/private-files.ts";
 const DEFAULT_RETRY_DELAY_MS = 1_000;
 const MAX_RETRY_DELAY_MS = 15_000;
 const JOURNAL_MAX_ENTRIES = 64;
-const MAX_IN_FLIGHT_COMMANDS = 8;
+const MAX_IN_FLIGHT_COMMANDS = WERELAY_RELAY_MAX_IN_FLIGHT;
 
 export type StartWeRelayRelayClientOptions = {
   relayUrl: string;
@@ -34,6 +36,11 @@ export type StartWeRelayRelayClientOptions = {
   remoteRequestTimeoutMs?: number;
   pollRequestTimeoutMs?: number;
   heartbeatIntervalMs?: number;
+  transport?: "auto" | "long-poll";
+  webSocketHandshakeTimeoutMs?: number;
+  webSocketHeartbeatTimeoutMs?: number;
+  webSocketRetryIntervalMs?: number;
+  onTransportChange?: (transport: "websocket" | "long-poll") => void;
 };
 
 export type WeRelayRelayClientHandle = {
@@ -345,6 +352,7 @@ export function startWeRelayRelayClient(
   const inFlightCommands = new Set<Promise<void>>();
   const inFlightCommandIds = new Set<string>();
   let mutationChain = Promise.resolve();
+  let socketSession: RelaySocketSession | null = null;
 
   const executeAndRespond = async (command: WeRelayRelayCommand): Promise<void> => {
     let commandResponse = command.request.method === "GET"
@@ -363,6 +371,10 @@ export function startWeRelayRelayClient(
       if (command.request.method !== "GET") {
         journal.save(commandResponse);
       }
+    }
+    if (socketSession) {
+      try { await socketSession.respond(commandResponse); return; }
+      catch { /* Same command ID/result: supplement via HTTP, never re-execute. */ }
     }
     await postCommandResponse(commandResponse, {
       relayUrl,
@@ -391,14 +403,50 @@ export function startWeRelayRelayClient(
       .finally(() => {
         inFlightCommandIds.delete(command.id);
         inFlightCommands.delete(tracked);
+        socketSession?.ready();
       });
     inFlightCommands.add(tracked);
   };
 
   const pollDone = (async () => {
     let consecutiveFailures = 0;
+    let nextSocketAttempt = 0;
     while (!abortController.signal.aborted) {
       try {
+        if (options.transport !== "long-poll" && Date.now() >= nextSocketAttempt) {
+          try {
+            await runRelayWebSocketSession({
+              relayUrl, deviceId, deviceToken,
+              signal: abortController.signal,
+              capacity: () => MAX_IN_FLIGHT_COMMANDS - inFlightCommands.size,
+              onCommand: (value) => {
+                if (!isRelayCommand(value) || value.deviceId !== deviceId) throw new Error("无效设备指令。");
+                if (!inFlightCommandIds.has(value.id) && inFlightCommands.size >= MAX_IN_FLIGHT_COMMANDS) throw new Error("设备并发超限。");
+                scheduleCommand(value);
+              },
+              onSession: (session) => {
+                socketSession = session;
+                if (session) options.onTransportChange?.("websocket");
+              },
+              onAlive: () => {
+                consecutiveFailures = 0;
+                options.onConnectionChange?.("connected");
+              },
+              handshakeTimeoutMs: options.webSocketHandshakeTimeoutMs ?? 3_000,
+              heartbeatIntervalMs: options.heartbeatIntervalMs ?? 15_000,
+              heartbeatTimeoutMs: options.webSocketHeartbeatTimeoutMs ?? 45_000,
+              responseTimeoutMs: options.remoteRequestTimeoutMs ?? 10_000,
+            });
+          } catch {
+            if (!abortController.signal.aborted) {
+              options.onConnectionChange?.("disconnected");
+              logger("WSS 暂不可用，切换 HTTPS 长轮询；稍后自动重试。");
+            }
+          }
+          nextSocketAttempt = Date.now() + (options.webSocketRetryIntervalMs ?? 60_000);
+          if (abortController.signal.aborted) break;
+          options.onTransportChange?.("long-poll");
+        }
         if (inFlightCommands.size >= MAX_IN_FLIGHT_COMMANDS) {
           await Promise.race(inFlightCommands);
           continue;
@@ -460,6 +508,7 @@ export function startWeRelayRelayClient(
     while (!abortController.signal.aborted) {
       await delay(options.heartbeatIntervalMs ?? 15_000, abortController.signal);
       if (abortController.signal.aborted) break;
+      if (socketSession) continue;
       try {
         const response = await fetchImpl(`${relayUrl}${WERELAY_RELAY_HEARTBEAT_PATH}`, {
           method: "POST",

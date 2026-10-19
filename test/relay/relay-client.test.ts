@@ -99,6 +99,7 @@ describe("WeRelay relay command journal", () => {
       throw new Error(`unexpected fetch: ${url}`);
     }) as typeof fetch;
     const handle = startWeRelayRelayClient({
+      transport: "long-poll",
       relayUrl: "https://relay.example",
       deviceId: "device-1",
       deviceToken: "token-1",

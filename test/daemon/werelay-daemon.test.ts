@@ -381,18 +381,23 @@ describe("daemon startup resilience", () => {
     expect(source.slice(mobileMethodStart, mobileMethodEnd)).not.toContain('!this.slots.has("codex")');
   });
 
-  test("merges three or more unsent completion notifications before retrying individually", () => {
+  test("only auto-pushes recent completions and asks before resending older ones", () => {
     const source = readRepoFile("src/daemon/werelay-daemon.ts");
     const retryStart = source.indexOf("  private async retryPendingCodexCompletionNotifications(");
     const retryEnd = source.indexOf("\n  private queueWechatMessage(", retryStart);
     const retryBlock = source.slice(retryStart, retryEnd);
 
-    expect(retryBlock).toContain("selectCodexCompletionBacklogBatch");
-    expect(retryBlock).toContain("formatCodexCompletionBacklogSummary");
-    expect(retryBlock).toContain("this.codexCompletionDeliveries.acknowledge");
-    expect(retryBlock.indexOf("formatCodexCompletionBacklogSummary")).toBeLessThan(
+    // 时间窗口策略：3 分钟内自动推，更早的只发询问，超过 1 小时直接丢弃。
+    expect(retryBlock).toContain("planClawbotBacklogDelivery");
+    expect(retryBlock).toContain("requestClawbotBacklogConfirmation");
+    expect(retryBlock).toContain("this.codexCompletionDeliveries.discard");
+    expect(retryBlock).not.toContain("selectCodexCompletionBacklogBatch");
+    // 丢弃与询问都必须发生在逐条补发之前。
+    expect(retryBlock.indexOf("planClawbotBacklogDelivery")).toBeLessThan(
       retryBlock.indexOf("for (const pending of ordered)"),
     );
+    // 逐条补发只允许处理自动推送组。
+    expect(retryBlock).toContain("autoPushKeys.has(delivery.key)");
   });
 
   test("does not let the startup completion drain block daemon readiness", () => {
@@ -609,6 +614,65 @@ describe("werelay-daemon helpers", () => {
       title: "检查全部 Agent 聚合",
       completedAt: "2026-08-07T02:01:00.000Z",
     }]);
+  });
+
+  test("never marks a currently running task as recently completed", () => {
+    const board = buildCodexMobileTaskBoard({
+      taskGroups: [{
+        adapter: "codex",
+        adapterLabel: "Codex",
+        tasks: [
+          {
+            threadId: "still-running",
+            title: "继续修复任务台",
+            status: "running",
+            lastUpdatedAt: "2026-10-19T03:10:00.000Z",
+          },
+          {
+            threadId: "waiting-input",
+            title: "等待用户回答",
+            status: "input",
+            lastUpdatedAt: "2026-10-19T03:05:00.000Z",
+          },
+          {
+            threadId: "finished",
+            title: "上一轮任务",
+            status: "idle",
+            lastUpdatedAt: "2026-10-19T02:00:00.000Z",
+          },
+        ],
+      }],
+      recentCompletions: [
+        {
+          adapter: "codex",
+          threadId: "still-running",
+          title: "继续修复任务台",
+          completedAt: "2026-10-19T03:11:00.000Z",
+        },
+        {
+          adapter: "codex",
+          threadId: "waiting-input",
+          title: "等待用户回答",
+          completedAt: "2026-10-19T03:06:00.000Z",
+        },
+        {
+          adapter: "codex",
+          threadId: "finished",
+          title: "上一轮任务",
+          completedAt: "2026-10-19T02:01:00.000Z",
+        },
+      ],
+    });
+
+    expect(board.tasks.find((task) => task.threadId === "still-running"))
+      .not.toHaveProperty("completedAt");
+    expect(board.tasks.find((task) => task.threadId === "waiting-input"))
+      .not.toHaveProperty("completedAt");
+    expect(board.tasks.find((task) => task.threadId === "finished"))
+      .toHaveProperty("completedAt", "2026-10-19T02:01:00.000Z");
+    expect(board.recentCompleted.map((item) => item.threadId)).toEqual([
+      "finished",
+    ]);
   });
 
   test("sorts adapters by completed message activity from the latest 24 hours", () => {
@@ -1812,7 +1876,11 @@ describe("werelay-daemon helpers", () => {
     expect(messages.length).toBeGreaterThan(1);
     expect(messages.every((message) => message.length <= 1_200)).toBe(true);
     expect(messages.join("\n")).toContain("[任务 8 · 全文任务] 已完成，用时9s");
-    expect(messages.join("")).toContain("完整内容".repeat(500));
+    // Remove only the routing heading added to continuation messages, then
+    // require the exact original long answer to remain intact across chunks.
+    const reconstructed = messages.map((message, index) => index === 0 ? message : message.replace(/^\[任务 8 · 全文任务\]\n/, "")).join("");
+    expect(reconstructed).toContain("完整内容".repeat(500));
+    expect(messages.every((message) => message.startsWith("[任务 8 · 全文任务]"))).toBe(true);
     expect(messages.at(-1)).toEndWith(
       "http://192.168.50.10:4396/?task=thread&key=secret",
     );
@@ -1850,7 +1918,7 @@ describe("werelay-daemon helpers", () => {
       text: "这是完整回答。",
     });
     expect(messages).toEqual([
-      "[当前任务] 最近完整回答\n\n这是完整回答。",
+      "[任务 4 · 当前任务] 最近完整回答\n\n这是完整回答。",
     ]);
   });
 
@@ -1962,7 +2030,7 @@ describe("werelay-daemon helpers", () => {
       2,
       "session_a",
       "修复 hooks",
-    )).toBe("[Claude Code · 修复 hooks]\n任务已继续");
+    )).toBe("[任务 2 · Claude Code · 修复 hooks]\n任务已继续");
     expect(prefixDaemonTaskMessage(
       "codex",
       "需要审批",
@@ -1978,7 +2046,7 @@ describe("werelay-daemon helpers", () => {
       taskTitle: "整理服务器列表",
       url: "https://werelay.example/t/task-4",
     })).toBe(
-      "[WorkBuddy · 整理服务器列表]\n" +
+      "[任务 4 · WorkBuddy · 整理服务器列表]\n" +
       "已发送，WorkBuddy 正在处理。\n\n" +
       "https://werelay.example/t/task-4",
     );

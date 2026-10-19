@@ -40,7 +40,8 @@ test("daemon persists a DeepSeek final event even when outbound send is rejected
 
  test("completion recovery yields after a bounded batch and retains remaining payloads", async () => {
    const delivered: string[] = [];
-   const pending = Array.from({ length: 20 }, (_, i) => ({ key: String(i), adapter: "deepseek", threadId: String(i) }));
+   const now = new Date().toISOString();
+   const pending = Array.from({ length: 20 }, (_, i) => ({ key: String(i), adapter: "deepseek", threadId: String(i), createdAt: now, completedAt: now }));
    const daemon = Object.assign(Object.create(WeRelayDaemon.prototype), {
      codexCompletionDeliveries: { getPending: () => pending },
      stateStore: { setLatestWechatTaskTarget() {} },
@@ -56,7 +57,8 @@ test("daemon persists a DeepSeek final event even when outbound send is rejected
 
  test("failed deliveries cannot starve later tasks across recovery passes", async () => {
    const attempted: string[] = [];
-   const pending = Array.from({ length: 8 }, (_, i) => ({ key: String(i), adapter: "deepseek", threadId: String(i) }));
+   const now = new Date().toISOString();
+   const pending = Array.from({ length: 8 }, (_, i) => ({ key: String(i), adapter: "deepseek", threadId: String(i), createdAt: now, completedAt: now }));
    const daemon = Object.assign(Object.create(WeRelayDaemon.prototype), {
      codexCompletionDeliveries: { getPending: () => pending },
      deliverCodexCompletionNotification: async (key: string) => {
@@ -70,3 +72,126 @@ test("daemon persists a DeepSeek final event even when outbound send is rejected
    expect(new Set(attempted).size).toBe(8);
    expect(attempted.slice(0, 6)).toEqual(["0", "1", "2", "3", "4", "5"]);
  });
+
+/**
+ * 用户反馈的真实场景：ClawBot 积压太多，下派新任务时历史通知一起涌出。
+ * 现在只自动推送 3 分钟内完成的，更早的合并成一次询问，超过 1 小时直接丢弃。
+ */
+function buildBacklogDaemon(queue: CodexCompletionDeliveryQueue, sent: string[]) {
+  return Object.assign(Object.create(WeRelayDaemon.prototype), {
+    authorizedUserId: "test-recipient",
+    codexCompletionDeliveries: queue,
+    notificationPolicy: { sent() {} },
+    stateStore: { setLatestWechatTaskTarget() {} },
+    slots: new Map(),
+    codexFinalReplyByThreadId: new Map(),
+    codexFinalReplyByTurnId: new Map(),
+    queueWechatMessage: async (_recipient: string, text: string) => {
+      sent.push(text);
+      return true;
+    },
+    deliverCodexCompletionNotification: async (key: string) => {
+      const delivery = queue.getPending().find((item) => item.key === key);
+      if (delivery) sent.push(delivery.texts.join("\n"));
+      queue.acknowledge([key]);
+      return { status: "delivered" as const, totalCount: 1 };
+    },
+  });
+}
+
+test("a new ClawBot message only auto-pushes completions from the last three minutes", async () => {
+  const queue = new CodexCompletionDeliveryQueue();
+  const now = Date.now();
+  const enqueue = (n: number, ageMs: number, name: string) => queue.enqueue({
+    key: `k${n}`,
+    threadId: `t${n}`,
+    completedAt: new Date(now - ageMs).toISOString(),
+    texts: [`[任务 ${n} · Codex · ${name}] 已完成，用时5m`],
+  });
+  enqueue(1, 30_000, "刚完成的");
+  enqueue(2, 10 * 60_000, "十分钟前");
+  enqueue(3, 2 * 60 * 60_000, "两小时前");
+
+  const sent: string[] = [];
+  const daemon = buildBacklogDaemon(queue, sent);
+  await daemon.retryPendingCodexCompletionNotifications("test-recipient");
+
+  // 只有 3 分钟内的正文被推送。
+  expect(sent.some((text) => text.includes("刚完成的"))).toBe(true);
+  expect(sent.some((text) => text.includes("十分钟前") && text.includes("已完成，用时"))).toBe(false);
+  // 较早的只发一条询问，保留在队列里等确认。
+  expect(sent.some((text) => text.includes("还有 1 条较早的完成通知"))).toBe(true);
+  expect(queue.getPending().map((item) => item.key)).toEqual(["k2"]);
+  // 超过 1 小时直接丢弃，并留下未送达凭证。
+  expect(queue.snapshot().undelivered?.map((item) => item.key)).toEqual(["k3"]);
+});
+
+test("the backlog prompt is asked once, not on every recovery pass", async () => {
+  const queue = new CodexCompletionDeliveryQueue();
+  const now = Date.now();
+  queue.enqueue({
+    key: "old", threadId: "t-old",
+    completedAt: new Date(now - 10 * 60_000).toISOString(),
+    texts: ["[任务 5 · Codex · 十分钟前] 已完成，用时5m"],
+  });
+
+  const sent: string[] = [];
+  const daemon = buildBacklogDaemon(queue, sent);
+  await daemon.retryPendingCodexCompletionNotifications("test-recipient");
+  await daemon.retryPendingCodexCompletionNotifications("test-recipient");
+  await daemon.retryPendingCodexCompletionNotifications("test-recipient");
+
+  expect(sent.filter((text) => text.includes("还有 1 条较早的完成通知"))).toHaveLength(1);
+});
+
+test("replying 推送 resends the confirmed backlog exactly once", async () => {
+  const queue = new CodexCompletionDeliveryQueue();
+  const now = Date.now();
+  queue.enqueue({
+    key: "old", threadId: "t-old",
+    completedAt: new Date(now - 10 * 60_000).toISOString(),
+    texts: ["[任务 5 · Codex · 十分钟前] 已完成，用时5m\n\n这里是迟到的正文"],
+  });
+
+  const sent: string[] = [];
+  const daemon = buildBacklogDaemon(queue, sent);
+  await daemon.retryPendingCodexCompletionNotifications("test-recipient");
+  sent.length = 0;
+
+  await daemon.handleClawbotBacklogPushRequest({
+    senderId: "test-recipient", sender: "u", sessionId: "s", text: "推送", attachments: [],
+  } as never);
+
+  expect(sent).toHaveLength(1);
+  expect(sent[0]).toContain("这里是迟到的正文");
+  expect(queue.getPending()).toEqual([]);
+});
+
+test("replying 推送 with nothing waiting says so instead of staying silent", async () => {
+  const queue = new CodexCompletionDeliveryQueue();
+  const sent: string[] = [];
+  const daemon = buildBacklogDaemon(queue, sent);
+  await daemon.handleClawbotBacklogPushRequest({
+    senderId: "test-recipient", sender: "u", sessionId: "s", text: "推送", attachments: [],
+  } as never);
+  expect(sent).toEqual(["没有需要补发的完成通知。"]);
+});
+
+test("a failed resend after 推送 keeps the notification queued", async () => {
+  const queue = new CodexCompletionDeliveryQueue();
+  const now = Date.now();
+  queue.enqueue({
+    key: "old", threadId: "t-old",
+    completedAt: new Date(now - 10 * 60_000).toISOString(),
+    texts: ["[任务 5 · Codex · 十分钟前] 已完成，用时5m\n\n正文"],
+  });
+
+  const daemon = buildBacklogDaemon(queue, []);
+  // 微信发送失败时不能把通知当成已送达。
+  daemon.queueWechatMessage = async () => false;
+  await daemon.handleClawbotBacklogPushRequest({
+    senderId: "test-recipient", sender: "u", sessionId: "s", text: "推送", attachments: [],
+  } as never);
+
+  expect(queue.getPending().map((item) => item.key)).toEqual(["old"]);
+});

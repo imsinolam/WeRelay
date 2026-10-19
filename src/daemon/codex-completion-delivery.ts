@@ -5,10 +5,12 @@ export type CompletionAttachment = { kind: "image" | "file" | "voice" | "video";
 const MAX_PENDING_CODEX_COMPLETIONS = 80;
 const MAX_DELIVERED_CODEX_COMPLETIONS = 512;
 const CODEX_COMPLETION_RETENTION_MS = 30 * 24 * 60 * 60_000;
-// 积压完成通知的可投递窗口。超过该时长仍未送出的通知直接作废，不再补推：
+// 积压完成通知的最终保留窗口。超过该时长仍未送出的通知直接作废，不再补推：
 // 微信侧迟到的“任务已完成”已经没有操作价值，继续补推只会在下次连上时
-// 一次性轰炸用户。该窗口只约束“还能不能推”，不改变 30 天的去重保留期。
-export const CODEX_COMPLETION_DELIVERABLE_WINDOW_MS = 6 * 60 * 60_000;
+// 一次性轰炸用户。ClawBot 的自动推送只覆盖最近 3 分钟，更早的通知需要用户
+// 回复“推送”确认；这里的 1 小时是硬上限，超出即丢弃。该窗口只约束“还能不能
+// 推”，不改变 30 天的去重保留期。
+export const CODEX_COMPLETION_DELIVERABLE_WINDOW_MS = 60 * 60_000;
 
 export type PendingCodexCompletionDelivery = {
   key: string;
@@ -325,7 +327,7 @@ function formatCompletionTimestamp(value: string): string {
 
 export function formatCodexCompletionBacklogSummary(
   deliveries: PendingCodexCompletionDelivery[],
-  options: { maxTasks?: number } = {},
+  options: { maxTasks?: number; taskLabel?: (delivery: PendingCodexCompletionDelivery) => string } = {},
 ): string {
   const sorted = [...deliveries].sort((left, right) => (
     Date.parse(right.completedAt ?? right.createdAt) -
@@ -364,7 +366,9 @@ export function formatCodexCompletionBacklogSummary(
         : "";
     const repeat = group.count > 1 ? `（${group.count} 条）` : "";
     lines.push(
-      `${index + 1}. ${statusIcon} ${statusPrefix}${inferCompletionTitle(delivery)}${repeat}`,
+      options.taskLabel
+        ? `${options.taskLabel(delivery)} ${statusIcon} ${statusPrefix}${repeat}`.trimEnd()
+        : `${index + 1}. ${statusIcon} ${statusPrefix}${inferCompletionTitle(delivery)}${repeat}`,
     );
     const url = inferCompletionUrl(delivery);
     if (url) {
@@ -543,6 +547,27 @@ export class CodexCompletionDeliveryQueue {
       this.persistState();
     }
     return acknowledged;
+  }
+
+  /**
+   * 丢弃超过补发窗口的积压通知。
+   *
+   * 与 acknowledge 不同：这里没有真正送达，所以要留下一条 undelivered
+   * 终态凭证，既让状态查询显示“未送达”，也阻止同一 key 的重放事件再次
+   * 入队。正在发送中的条目跳过，避免破坏分段发送的进度。
+   */
+  discard(keys: string[]): PendingCodexCompletionDelivery[] {
+    const discarded: PendingCodexCompletionDelivery[] = [];
+    for (const key of keys) {
+      if (this.inFlight.has(key)) continue;
+      const delivery = this.pending.get(key);
+      if (!delivery) continue;
+      this.pending.delete(key);
+      this.rememberExpired(delivery, "expired");
+      discarded.push(clonePending(delivery));
+    }
+    if (discarded.length > 0) this.persistState();
+    return discarded;
   }
 
   reserveSummary(keys: string[]): boolean {

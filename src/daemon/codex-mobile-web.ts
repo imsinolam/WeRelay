@@ -209,7 +209,12 @@ export const CODEX_MOBILE_HTML = `<!doctype html>
             </div>
           </div>
           <button class="send-button" id="send-button" type="submit" aria-label="发送">
-            <svg class="send-arrow-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 18V6M7.5 10.5L12 6l4.5 4.5"/></svg>
+            <svg class="send-arrow-icon" viewBox="0 0 32 32" aria-hidden="true">
+              <rect x="16.1284" y="9" width="2.01621" height="10.081" rx="1.0081" transform="rotate(45 16.1284 9)"/>
+              <rect x="23.2568" y="16.1289" width="2.01621" height="10.081" rx="1.0081" transform="rotate(135 23.2568 16.1289)"/>
+              <rect x="17.0573" y="22" width="2" height="12" rx="1" transform="rotate(-180 17.0573 22)"/>
+            </svg>
+            <canvas class="send-running-orb" id="send-running-orb" width="20" height="20" aria-hidden="true"></canvas>
             <svg class="send-stop-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2.2"/></svg>
           </button>
         </div>
@@ -386,6 +391,7 @@ export const CODEX_MOBILE_CSS = String.raw`
   --muted-strong: #4f4f4f;
   --accent: #0d0d0d;
   --green: #10a37f;
+  --composer-action-ground: #202020;
   --orange: #c17422;
   --red: #d00e17;
   --thread-max: 48rem;
@@ -918,15 +924,15 @@ svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.75; stro
 .task-board-column[data-lane="queued"] .task-board-column-mark { background: #7c8798; }
 .task-board-column-title { font-size: 13px; font-weight: 620; }
 .task-board-column-count { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
-.task-board-card-list { display: grid; gap: 10px; }
+.task-board-card-list { display: grid; gap: 8px; }
 .task-board-card {
   position: relative;
   width: 100%;
-  min-height: 112px;
+  min-height: 96px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  padding: 15px;
+  gap: 10px;
+  padding: 12px 14px;
   border: 1px solid var(--border);
   border-radius: 14px;
   background: var(--page);
@@ -942,8 +948,8 @@ svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.75; stro
 .task-board-card:active { transform: translateY(0) scale(.99); }
 .task-board-card:focus-visible { outline: 2px solid rgba(16,163,127,.42); outline-offset: 2px; }
 .task-board-card.is-opening { opacity: .58; cursor: wait; }
-.task-board-card-title { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 3; color: var(--text); font-size: 14px; font-weight: 560; line-height: 1.48; overflow-wrap: anywhere; }
-.task-board-card-meta { margin-top: auto; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 5px 12px; min-width: 0; color: var(--muted); font-size: 11px; }
+.task-board-card-title { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; color: var(--text); font-size: 14px; font-weight: 560; line-height: 1.42; overflow-wrap: anywhere; }
+.task-board-card-meta { margin-top: auto; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 3px 10px; min-width: 0; color: var(--muted); font-size: 11px; }
 .task-board-card-status { display: inline-flex; align-items: center; gap: 5px; min-width: 0; white-space: nowrap; }
 .task-board-card-status-dot { width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: currentColor; }
 .task-board-card[data-lane="running"] .task-board-card-status { color: var(--green); }
@@ -951,7 +957,7 @@ svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.75; stro
 .task-board-card[data-lane="error"] .task-board-card-status { color: var(--red); }
 .task-board-card-context { grid-column: 1 / -1; min-width: 0; overflow: hidden; color: var(--muted-strong); font-weight: 520; text-overflow: ellipsis; white-space: nowrap; }
 .task-board-card-time { grid-column: 2; grid-row: 1; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.task-board-column-empty { min-height: 104px; display: grid; place-items: center; padding: 18px; border: 1px dashed var(--border-strong); border-radius: 14px; color: var(--muted); font-size: 12px; text-align: center; }
+.task-board-column-empty { min-height: 88px; display: grid; place-items: center; padding: 16px; border: 1px dashed var(--border-strong); border-radius: 14px; color: var(--muted); font-size: 12px; text-align: center; }
 .task-board-completed { width: min(920px, 100%); margin: 0 auto; display: grid; gap: 0; border-top: 1px solid var(--border); }
 .task-board-completed-item { width: 100%; min-height: 72px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 18px; padding: 15px 4px; border: 0; border-bottom: 1px solid var(--border); background: transparent; color: var(--text); font: inherit; text-align: left; text-decoration: none; cursor: pointer; touch-action: manipulation; }
 .task-board-completed-item:hover .task-board-completed-title { text-decoration: underline; text-underline-offset: 3px; }
@@ -971,7 +977,7 @@ svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.75; stro
 .task-board-skeleton-column { display: grid; gap: 10px; }
 .task-board-skeleton-line, .task-board-skeleton-card { border-radius: 10px; background: var(--surface); animation: board-skeleton-pulse 1.4s ease-in-out infinite; }
 .task-board-skeleton-line { width: 92px; height: 18px; }
-.task-board-skeleton-card { height: 116px; }
+.task-board-skeleton-card { height: 98px; }
 @keyframes board-skeleton-pulse { 0%, 100% { opacity: .58; } 50% { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) {
   .task-board-refresh.is-loading svg, .task-board-skeleton-line, .task-board-skeleton-card { animation: none; }
@@ -1207,13 +1213,35 @@ ${COMPOSER_BEAM_CSS}
 .composer-image-button svg { width: 19px; height: 19px; stroke-width: 1.7; }
 .composer textarea { grid-column: 1 / -1; min-width: 0; min-height: 36px; max-height: 164px; resize: none; border: 0; outline: 0; padding: 6px 8px; background: transparent; color: var(--text); font-size: 16px; line-height: 24px; }
 .composer textarea::placeholder { color: #8f8f8f; }
-.send-button { grid-column: 3; background: var(--accent); color: white; }
-.send-button svg { width: 18px; height: 18px; stroke-width: 2; }
+.send-button { grid-column: 3; background: var(--accent); color: white; transition: background-color .14s ease, color .14s ease, opacity .14s ease, transform .14s ease; }
+.send-button:hover:not(:disabled) { transform: translateY(-1px); }
+.send-button:active:not(:disabled) { transform: translateY(0) scale(.96); }
+.send-button:focus-visible { outline: 2px solid rgba(16,163,127,.38); outline-offset: 2px; }
+.send-button svg { width: 18px; height: 18px; }
+.send-button .send-arrow-icon { fill: currentColor; stroke: none; }
+.send-button .send-running-orb { width: 20px; height: 20px; display: none; pointer-events: none; }
 .send-button .send-stop-icon { width: 20px; height: 20px; display: none; fill: currentColor; stroke: none; }
-.send-button.is-stop .send-arrow-icon { display: none; }
-.send-button.is-stop .send-stop-icon { display: block; }
+.send-button.is-stop { background: var(--composer-action-ground); color: var(--green); cursor: pointer; }
+.send-button.is-stop canvas { grid-area: 1 / 1; }
+.send-button.is-stop .send-arrow-icon, .send-button.is-stop .send-stop-icon { display: none; }
+.send-button.is-stop .send-running-orb { display: none; }
+.send-button.is-stop[data-state="running"] .send-running-orb,
+.send-button.is-stop[data-state="pending"] .send-running-orb { display: block; }
+.send-button.is-stop[data-state="stopping"] .send-stop-icon { display: block; }
+.send-button.is-stop:hover .send-running-orb,
+.send-button.is-stop:focus-visible .send-running-orb { display: none; }
+.send-button.is-stop:hover .send-stop-icon,
+.send-button.is-stop:focus-visible .send-stop-icon { display: block; }
+.send-button.is-stop[data-state="pending"]:hover .send-running-orb,
+.send-button.is-stop[data-state="pending"]:focus-visible .send-running-orb { display: block; }
+.send-button.is-stop[data-state="pending"]:hover .send-stop-icon,
+.send-button.is-stop[data-state="pending"]:focus-visible .send-stop-icon { display: none; }
 .send-button:disabled { background: #d7d7d7; color: #fff; cursor: default; }
-.send-button.is-stop:disabled { background: var(--accent); opacity: .58; }
+.send-button.is-stop:disabled { background: var(--composer-action-ground); color: var(--green); opacity: .58; }
+@media (prefers-reduced-motion: reduce) {
+  .send-button { transition: none; }
+  .send-button:hover:not(:disabled), .send-button:active:not(:disabled) { transform: none; }
+}
 .message-navigation { position: absolute; left: auto; top: 68px; right: max(24px, calc((100% - var(--thread-max)) / 2)); bottom: auto; display: flex; align-items: center; gap: 7px; z-index: 14; opacity: .62; transition: opacity .16s ease; }
 .message-navigation:hover, .message-navigation:focus-within { opacity: 1; }
 .message-navigation-button { width: 36px; height: 36px; display: grid; place-items: center; padding: 0; border: 1px solid var(--border); border-radius: 12px; background: rgba(255,255,255,.72); backdrop-filter: blur(10px); box-shadow: 0 4px 16px rgba(0,0,0,.10); color: var(--muted-strong); cursor: pointer; }
@@ -1426,10 +1454,10 @@ body.task-rename-open { overflow: hidden; }
   .task-board-column.is-empty { display: none; }
   .task-board-column-head { min-height: 30px; padding: 0 2px 7px; }
   .task-board-column-title { font-size: 14px; }
-  .task-board-card-list { gap: 9px; }
-  .task-board-card { min-height: 0; gap: 12px; padding: 14px 15px; }
-  .task-board-card-title { -webkit-line-clamp: 2; font-size: 15px; line-height: 1.46; }
-  .task-board-card-meta { gap: 4px 12px; font-size: 12px; }
+  .task-board-card-list { gap: 7px; }
+  .task-board-card { min-height: 0; gap: 9px; padding: 11px 13px; }
+  .task-board-card-title { -webkit-line-clamp: 2; font-size: 15px; line-height: 1.38; }
+  .task-board-card-meta { gap: 3px 10px; font-size: 12px; }
   .task-board-completed-item { min-height: 78px; padding-left: 2px; padding-right: 2px; }
   .task-board-completed-title { white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
   .task-board-skeleton { width: 100%; min-width: 0; grid-template-columns: minmax(0, 1fr); gap: 20px; }
@@ -1482,6 +1510,7 @@ body.task-rename-open { overflow: hidden; }
     --muted: #a3a3a3;
     --muted-strong: #b4b4b4;
     --accent: #ececec;
+    --composer-action-ground: #303030;
     --shadow: 0 12px 40px rgba(0,0,0,.36);
   }
   .send-button { color: #212121; }
@@ -1569,6 +1598,7 @@ export const CODEX_MOBILE_JS = String.raw`
   var composerSessionLabelEl = document.getElementById("composer-session-label");
   var composerSessionMenu = document.getElementById("composer-session-menu");
   var sendButton = document.getElementById("send-button");
+  var sendRunningOrb = document.getElementById("send-running-orb");
   var messageNavigation = document.getElementById("message-navigation");
   var previousUserMessage = document.getElementById("previous-user-message");
   var nextUserMessage = document.getElementById("next-user-message");
@@ -2049,7 +2079,8 @@ export const CODEX_MOBILE_JS = String.raw`
           adapterLabel: adapterLabels[adapterId] || adapterId,
         }));
         if (!item) return;
-        if (item.completedAt || item.completedAtMs) completed.push(item);
+        if (isTaskBoardInProgress(item)) active.push(item);
+        else if (item.completedAt || item.completedAtMs) completed.push(item);
         else active.push(item);
       });
     });
@@ -2391,7 +2422,11 @@ export const CODEX_MOBILE_JS = String.raw`
       ? taskBoard.tasks.map(sanitizePersistentTaskBoardItem).filter(Boolean)
       : [];
     state.boardRecentCompleted = taskBoard && Array.isArray(taskBoard.recentCompleted)
-      ? taskBoard.recentCompleted.map(sanitizePersistentTaskBoardItem).filter(Boolean)
+      ? taskBoard.recentCompleted
+        .map(sanitizePersistentTaskBoardItem)
+        .filter(function (item) {
+          return Boolean(item && !isTaskBoardInProgress(item));
+        })
       : [];
     state.boardLastLoadedAtMs = taskBoard
       ? Math.max(0, Number(taskBoard.lastLoadedAtMs) || 0)
@@ -2932,6 +2967,20 @@ export const CODEX_MOBILE_JS = String.raw`
     return normalized;
   }
 
+  function isMobileConnectionUnavailable(error) {
+    return Boolean(error && (
+      error.network ||
+      error.status === 503 ||
+      error.status === 504
+    ));
+  }
+
+  function isMobileConnectionUnavailableMessage(text) {
+    return /电脑(?:当前)?离线|电脑仍?未连接|请确认 (?:DeskRelay|WeRelay) 正在运行/.test(
+      String(text || "")
+    );
+  }
+
   async function waitForMobileFetchRetry() {
     await new Promise(function (resolve) {
       setTimeout(resolve, document.hidden ? 900 : 450);
@@ -3168,7 +3217,7 @@ export const CODEX_MOBILE_JS = String.raw`
     );
   }
 
-  function bootOrbFrame(ctx, size, t, dark, opts) {
+  function bootOrbFrame(ctx, size, t, dark, opts, inkColor) {
     var cx = size / 2;
     var cy = size / 2;
     var R = (size / 2) * 0.82;
@@ -3211,6 +3260,9 @@ export const CODEX_MOBILE_JS = String.raw`
           (opts.rDepth == null ? 1.7 : opts.rDepth) * depth +
           (inActive ? (opts.rActive == null ? 0.3 : opts.rActive) : 0)
         ) * rs;
+        // The 20px composer mark needs optically larger dots than the 56px
+        // boot mark or the sphere reads as a vague smudge on a phone.
+        if (inkColor) radius *= 1.16;
         if (radius < (opts.rMin == null ? 0.3 : opts.rMin)) {
           radius = opts.rMin == null ? 0.3 : opts.rMin;
         }
@@ -3231,7 +3283,9 @@ export const CODEX_MOBILE_JS = String.raw`
     for (var i = 0; i < dots.length; i += 1) {
       var dot = dots[i];
       var g = Math.round((dark ? 1 - dot.white : dot.white) * 255);
-      ctx.fillStyle = "rgb(" + g + "," + g + "," + g + ")";
+      ctx.fillStyle = inkColor
+        ? "rgba(" + inkColor[0] + "," + inkColor[1] + "," + inkColor[2] + "," + (g / 255) + ")"
+        : "rgb(" + g + "," + g + "," + g + ")";
       ctx.beginPath();
       ctx.arc(dot.x, dot.y, dot.r, 0, Math.PI * 2);
       ctx.fill();
@@ -3309,6 +3363,80 @@ export const CODEX_MOBILE_JS = String.raw`
     };
   })();
 
+  // Reuse the boot screen's solving sphere at the composer size used by Open
+  // Design. The button owns the animation lifecycle.
+  var composerOrbAnimation = (function () {
+    var raf = 0;
+    var running = false;
+    var ctx = null;
+    var size = 20;
+    var dpr = 1;
+    var reduced = Boolean(
+      window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    );
+    var preset = {
+      speed: 1.95,
+      count: 0.088,
+      size: 1.9
+    };
+    var options = null;
+
+    function paint(tSec) {
+      if (!ctx) return;
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, size * dpr, size * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      // The sphere is monochrome by design. Paint its light ink directly in
+      // WeRelay green instead of reading pixels back every frame, which is
+      // expensive on mobile Safari and unnecessary for a 20px animation.
+      bootOrbFrame(ctx, size, tSec, true, options, [16, 163, 127]);
+    }
+
+    function loop() {
+      paint(performance.now() / 1000 * preset.speed);
+      if (running) raf = requestAnimationFrame(loop);
+    }
+
+    function stop() {
+      running = false;
+      if (raf) cancelAnimationFrame(raf);
+      raf = 0;
+    }
+
+    function start() {
+      if (!ctx || running || reduced || document.hidden) return;
+      running = true;
+      raf = requestAnimationFrame(loop);
+    }
+
+    function setup() {
+      if (!sendRunningOrb) return;
+      size = Math.max(1, Number.parseFloat(window.getComputedStyle(sendRunningOrb).width) || 20);
+      dpr = Math.min(2, window.devicePixelRatio || 1);
+      sendRunningOrb.width = Math.round(size * dpr);
+      sendRunningOrb.height = Math.round(size * dpr);
+      ctx = sendRunningOrb.getContext ? sendRunningOrb.getContext("2d") : null;
+      options = bootOrbScaleRadii(
+        bootOrbScaleCounts(BOOT_ORB_BASE, preset.count),
+        preset.size
+      );
+      if (!ctx) return;
+      paint(0.6);
+      if (sendButton.classList.contains("is-stop") && !reduced) start();
+    }
+
+    return {
+      setup: setup,
+      start: start,
+      stop: stop,
+      repaint: function () {
+        if (!ctx) return;
+        paint(0.6);
+        if (!document.hidden) start();
+      }
+    };
+  })();
+
   if (window.matchMedia) {
     var bootOrbThemeQuery = window.matchMedia("(prefers-color-scheme: dark)");
     var onBootOrbThemeChange = function () { bootOrbAnimation.repaint(); };
@@ -3323,6 +3451,8 @@ export const CODEX_MOBILE_JS = String.raw`
   document.addEventListener("visibilitychange", function () {
     if (document.visibilityState === "hidden") bootOrbAnimation.stop();
     else if (!bootScreen.hidden) bootOrbAnimation.start();
+    if (document.visibilityState === "hidden") composerOrbAnimation.stop();
+    else if (sendButton.classList.contains("is-stop")) composerOrbAnimation.start();
   });
 
   // 启动页可见性统一走这里，顺带控制思考球的启停，避免动画在后台空转。
@@ -4553,8 +4683,7 @@ export const CODEX_MOBILE_JS = String.raw`
       }
       showAuthentication("login", "", false);
     } catch (error) {
-      var waitingForComputer = error.network || error.status === 503 || error.status === 504;
-      if (waitingForComputer) {
+      if (isMobileConnectionUnavailable(error)) {
         if (!state.cachePreviewMode) {
           state.authenticated = false;
           app.hidden = true;
@@ -4640,6 +4769,11 @@ export const CODEX_MOBILE_JS = String.raw`
       renderTasks();
       renderMessages(false);
       updateHeader();
+      if (isMobileConnectionUnavailable(error)) {
+        setCacheSyncState(
+          state.connectionMode === "unknown" ? "server-retry" : "waiting-computer"
+        );
+      }
       scheduleLiveRefresh(2200);
       return;
     }
@@ -4841,16 +4975,30 @@ export const CODEX_MOBILE_JS = String.raw`
           : state.adapterError
             ? capabilityLimited ? "已连接" : "未连接"
             : "未选择";
-    sendButton.classList.toggle("is-stop", stopMode);
+    var stopRequested = state.stopRequestedThreadId === state.currentThreadId;
+    var sendingAction = Boolean(
+      state.sending || currentPendingDelivery() ||
+      visibleSummary && ["submitting", "syncing"].includes(visibleSummary.status)
+    );
+    var composerAction = composerActionState({
+      stopMode: stopMode,
+      stopRequested: stopRequested,
+      sending: sendingAction
+    });
+    sendButton.dataset.state = composerAction;
+    sendButton.classList.toggle("is-stop", composerAction !== "send");
+    sendButton.setAttribute("aria-busy", composerAction === "pending" ? "true" : "false");
+    if (composerAction === "running" || composerAction === "pending") composerOrbAnimation.start();
+    else composerOrbAnimation.stop();
     sendButton.setAttribute(
       "aria-label",
       stopMode
-        ? (state.stopRequestedThreadId === state.currentThreadId ? "正在停止" : "停止")
-        : "发送"
+        ? (stopRequested ? "正在停止" : "停止")
+        : composerAction === "pending" ? "发送中" : "发送"
     );
     sendButton.disabled = Boolean(
-      Boolean(state.queueActionMessageId) || !task ||
-      state.stopRequestedThreadId === state.currentThreadId ||
+      composerAction === "pending" || Boolean(state.queueActionMessageId) || !task ||
+      stopRequested ||
       (!stopMode && !hasComposerContent)
     );
     var reusableLocalTask = currentLocalTaskDraft();
@@ -5875,7 +6023,9 @@ export const CODEX_MOBILE_JS = String.raw`
       if (requestId !== state.boardRequestId || !state.authenticated) return;
       state.boardTasks = Array.isArray(payload.tasks) ? payload.tasks : [];
       state.boardRecentCompleted = Array.isArray(payload.recentCompleted)
-        ? payload.recentCompleted
+        ? payload.recentCompleted.filter(function (item) {
+            return Boolean(item && !isTaskBoardInProgress(item));
+          })
         : [];
       state.boardLastLoadedAtMs = Date.now();
       schedulePersistentMobileCacheWrite();
@@ -6572,7 +6722,12 @@ export const CODEX_MOBILE_JS = String.raw`
       schedulePersistentMobileCacheWrite();
     } catch (error) {
       if (requestId !== state.taskRequestId || error.status === 401) return;
-      if (error.network && !initial && state.tasks.length) {
+      if (isMobileConnectionUnavailable(error)) {
+        setCacheSyncState(
+          state.connectionMode === "unknown" ? "server-retry" : "waiting-computer"
+        );
+      }
+      if (isMobileConnectionUnavailable(error) && !initial && state.tasks.length) {
         state.nextTaskRefreshAtMs = Date.now() + TASK_REFRESH_INTERVAL_MS;
         return;
       }
@@ -6594,7 +6749,12 @@ export const CODEX_MOBILE_JS = String.raw`
       renderTasks();
       renderMessages(false);
       updateHeader();
-      if (error.status !== 409 && initial && errorChanged) showToast(nextError);
+      if (
+        !isMobileConnectionUnavailable(error) &&
+        error.status !== 409 &&
+        initial &&
+        errorChanged
+      ) showToast(nextError);
     } finally {
       if (requestId === state.taskRequestId) {
         state.loadingTasks = false;
@@ -7280,6 +7440,12 @@ export const CODEX_MOBILE_JS = String.raw`
     return Boolean(task && !hasContent && summary && summary.status === "running");
   }
 
+  function composerActionState(input) {
+    if (input.stopMode) return input.stopRequested ? "stopping" : "running";
+    if (input.sending) return "pending";
+    return "send";
+  }
+
   function runDurationMs(summary) {
     if (!summary) return 0;
     if (["running", "submitting", "syncing"].includes(summary.status)) {
@@ -7784,9 +7950,10 @@ export const CODEX_MOBILE_JS = String.raw`
   }
 
   function updateRunHeaderClock() {
-    if (state.switchingAdapter) {
-      updateHeader();
-    }
+    // Keep the composer action in step with the one-second runtime clock.
+    // A running task can settle without immediately rendering a new message;
+    // without this refresh the breathing dot and stop affordance can linger.
+    updateHeader();
     var delivery = currentPendingDelivery();
     var deliveryHeader = document.getElementById("delivery-header");
     if (deliveryHeader && delivery) {
@@ -9059,6 +9226,10 @@ export const CODEX_MOBILE_JS = String.raw`
       updateHeader();
       renderTasks();
       saveCurrentConversationSnapshot();
+      if (
+        state.cacheSyncState === "waiting-computer" ||
+        state.cacheSyncState === "server-retry"
+      ) setCacheSyncState("current");
       if (!historyOnly && (
         state.cacheSyncState === "checking" || state.cacheSyncState === "updating"
       )) setCacheSyncState("current");
@@ -9069,7 +9240,13 @@ export const CODEX_MOBILE_JS = String.raw`
         requestedThreadId === state.currentThreadId &&
         error.status !== 401
       ) {
-        if (!error.network) showToast(error.message || "消息读取失败");
+        if (isMobileConnectionUnavailable(error)) {
+          setCacheSyncState(
+            state.connectionMode === "unknown" ? "server-retry" : "waiting-computer"
+          );
+        } else {
+          showToast(error.message || "消息读取失败");
+        }
       }
       return null;
     } finally {
@@ -9371,6 +9548,12 @@ export const CODEX_MOBILE_JS = String.raw`
   }
 
   function showToast(text) {
+    if (isMobileConnectionUnavailableMessage(text)) {
+      setCacheSyncState(
+        state.connectionMode === "unknown" ? "server-retry" : "waiting-computer"
+      );
+      return;
+    }
     toastEl.textContent = text;
     toastEl.classList.add("is-visible");
     if (state.toastTimer) clearTimeout(state.toastTimer);
@@ -10305,6 +10488,20 @@ export const CODEX_MOBILE_JS = String.raw`
     if (!taskContextMenu.hidden && !taskContextMenu.contains(event.target)) {
       closeTaskContextMenu();
     }
+    if (
+      cacheSyncIndicator.hidden === false &&
+      ["waiting-computer", "server-retry"].includes(state.cacheSyncState)
+    ) {
+      state.nextTaskRefreshAtMs = 0;
+      state.pendingMessages.forEach(function (pending) {
+        pending.retryAtMs = 0;
+      });
+      void loadTasks(false);
+      if (state.currentThreadId) {
+        void refreshMessagesIfChanged(false, true);
+        submitNextWaitingMessage();
+      }
+    }
   });
   document.addEventListener("keydown", function (event) {
     if (event.key === "Escape") {
@@ -10384,6 +10581,8 @@ export const CODEX_MOBILE_JS = String.raw`
 
   document.addEventListener("visibilitychange", function () {
     if (!state.authenticated) return;
+    if (document.hidden) composerOrbAnimation.stop();
+    else if (sendButton.classList.contains("is-stop")) composerOrbAnimation.start();
     if (!document.hidden) {
       void (async function () {
         if (await checkForAppUpdate(true)) return;
@@ -10404,6 +10603,7 @@ export const CODEX_MOBILE_JS = String.raw`
   updateDocumentTitle();
   async function startMobileApplication() {
     bootOrbAnimation.setup();
+    composerOrbAnimation.setup();
     restoreTrustedPersistentMobileCachePreview();
     void waitForComputerConnection();
     await initializeAuthentication();

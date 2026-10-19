@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { attachRelayWebSocketServer } from "./relay-websocket-server.ts";
 import http, {
   type IncomingMessage,
   type Server,
@@ -105,6 +106,7 @@ export type StartWeRelayRelayServerOptions = {
   commandTimeoutMs?: number;
   commandLeaseMs?: number;
   deviceOfflineMs?: number;
+  webSocketHeartbeatTimeoutMs?: number;
   warmCacheFreshMs?: number;
   warmCacheTtlMs?: number;
   warmRefreshIntervalMs?: number;
@@ -453,7 +455,7 @@ export async function startWeRelayRelayServer(
     }
   };
 
-  const nextCommand = (): PendingCommand | null => {
+  const nextCommand = (exclude = new Set<string>()): PendingCommand | null => {
     cleanCommandOrder();
     const currentMs = now();
     let firstReadable: PendingCommand | null = null;
@@ -462,6 +464,7 @@ export async function startWeRelayRelayServer(
       if (!pending) {
         continue;
       }
+      if (exclude.has(commandId)) continue;
       if (pending.command.expiresAtMs <= currentMs) {
         clearTimeout(pending.timer);
         pendingCommands.delete(commandId);
@@ -490,6 +493,7 @@ export async function startWeRelayRelayServer(
   };
 
   const dispatchWaitingPoll = () => {
+    if (deviceSocket?.active()) { deviceSocket.dispatch(); return; }
     if (!waitingPoll) {
       return;
     }
@@ -499,6 +503,17 @@ export async function startWeRelayRelayServer(
     }
     waitingPoll = null;
     clearTimeout(activePoll.timer);
+  };
+
+  const completeCommand = (value: unknown): WeRelayRelayCommandResponse => {
+    if (!isRelayCommandResponse(value)) throw new RelayHttpError(400, "设备响应格式不正确。");
+    const pending = pendingCommands.get(value.commandId);
+    if (pending) {
+      clearTimeout(pending.timer);
+      pendingCommands.delete(value.commandId);
+      pending.resolve(value);
+    }
+    return value;
   };
 
   const enqueueRelayRequest = async (input: {
@@ -1136,6 +1151,7 @@ export async function startWeRelayRelayServer(
       if (method === "POST" && url.pathname === WERELAY_RELAY_POLL_PATH) {
         validateDeviceRequest(request, deviceId, deviceToken);
         await readBody(request, 4_096);
+        if (deviceSocket?.active()) throw new RelayHttpError(409, "设备已通过 WSS 连接，请关闭旧通道后重试。");
         lastDeviceSeenAtMs = now();
         if (deliverCommand(response)) {
           return;
@@ -1174,18 +1190,10 @@ export async function startWeRelayRelayServer(
           request,
           WERELAY_RELAY_RESPONSE_BODY_LIMIT * 2,
         );
-        if (!isRelayCommandResponse(commandResponse)) {
-          throw new RelayHttpError(400, "设备响应格式不正确。");
-        }
-        const pending = pendingCommands.get(commandResponse.commandId);
-        if (!pending) {
-          sendJson(response, 200, { ok: true, ignored: true });
-          return;
-        }
-        clearTimeout(pending.timer);
-        pendingCommands.delete(commandResponse.commandId);
-        pending.resolve(commandResponse);
-        sendJson(response, 200, { ok: true });
+        if (!isRelayCommandResponse(commandResponse)) throw new RelayHttpError(400, "设备响应格式不正确。");
+        const ignored = !pendingCommands.has(commandResponse.commandId);
+        completeCommand(commandResponse);
+        sendJson(response, 200, { ok: true, ...(ignored ? { ignored: true } : {}) });
         return;
       }
 
@@ -1241,6 +1249,27 @@ export async function startWeRelayRelayServer(
     });
   });
 
+  const deviceSocket = attachRelayWebSocketServer({
+    server,
+    authenticate: (request) => validateDeviceRequest(request, deviceId, deviceToken),
+    seen: () => { lastDeviceSeenAtMs = now(); },
+    cancelPoll: () => {
+      if (!waitingPoll) return;
+      clearTimeout(waitingPoll.timer);
+      if (!waitingPoll.response.headersSent) sendJson(waitingPoll.response, 409, { error: "设备已切换至 WSS。" });
+      waitingPoll = null;
+    },
+    take: (exclude) => {
+      const pending = nextCommand(exclude);
+      if (!pending) return null;
+      pending.leaseExpiresAtMs = now() + commandLeaseMs;
+      return pending.command;
+    },
+    hasPending: (id) => pendingCommands.has(id),
+    complete: completeCommand,
+    heartbeatTimeoutMs: options.webSocketHeartbeatTimeoutMs ?? 45_000,
+  });
+
   server.on("connection", (socket) => {
     activeSockets.add(socket);
     socket.once("close", () => activeSockets.delete(socket));
@@ -1263,6 +1292,7 @@ export async function startWeRelayRelayServer(
     port,
     baseUrl: `http://${host}:${port}`,
     close: async () => {
+      deviceSocket?.close();
       clearInterval(warmRefreshTimer);
       if (waitingPoll) {
         clearTimeout(waitingPoll.timer);

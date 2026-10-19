@@ -829,6 +829,61 @@ describe("mobile fetch resilience", () => {
     expect(helpers.isNetworkError(new Error("业务失败"))).toBe(false);
   });
 
+  test("treats transport and unavailable-server failures as one persistent connection state", () => {
+    const helpers = loadMobileFetchResilienceHelpers();
+    const network = Object.assign(new Error("网络连接暂时中断"), { network: true });
+
+    expect(helpers.isConnectionUnavailable(network)).toBe(true);
+    expect(helpers.isConnectionUnavailable(
+      Object.assign(new Error("电脑当前离线"), { status: 503 }),
+    )).toBe(true);
+    expect(helpers.isConnectionUnavailable(
+      Object.assign(new Error("服务器暂时不可用"), { status: 504 }),
+    )).toBe(true);
+    expect(helpers.isConnectionUnavailable(
+      Object.assign(new Error("审批请求无效"), { status: 400 }),
+    )).toBe(false);
+    expect(helpers.isConnectionUnavailable(new Error("业务失败"))).toBe(false);
+    expect(
+      helpers.isConnectionUnavailableMessage("电脑当前离线，请确认 WeRelay 正在运行。"),
+    ).toBe(true);
+    expect(helpers.isConnectionUnavailableMessage("电脑仍未连接")).toBe(true);
+    expect(helpers.isConnectionUnavailableMessage("消息已复制")).toBe(false);
+  });
+
+  test("keeps offline loading quiet and only updates persistent connection feedback", () => {
+    const loadTasksStart = CODEX_MOBILE_JS.indexOf("  async function loadTasks");
+    const loadTasksEnd = CODEX_MOBILE_JS.indexOf("\n  function syncComposerInset", loadTasksStart);
+    const loadTasksBlock = CODEX_MOBILE_JS.slice(loadTasksStart, loadTasksEnd);
+    const loadMessagesStart = CODEX_MOBILE_JS.indexOf("  async function loadMessages");
+    const loadMessagesEnd = CODEX_MOBILE_JS.indexOf(
+      "\n  async function refreshMessagesIfChanged",
+      loadMessagesStart,
+    );
+    const loadMessagesBlock = CODEX_MOBILE_JS.slice(loadMessagesStart, loadMessagesEnd);
+
+    expect(loadTasksBlock).toContain("isMobileConnectionUnavailable(error)");
+    expect(loadTasksBlock).toContain('"waiting-computer"');
+    expect(loadTasksBlock).toContain(
+      "!isMobileConnectionUnavailable(error) &&\n        error.status !== 409",
+    );
+    expect(loadMessagesBlock).toContain("if (isMobileConnectionUnavailable(error)) {");
+    expect(loadMessagesBlock).toContain("showToast(error.message");
+    const showToastStart = CODEX_MOBILE_JS.indexOf("  function showToast");
+    const showToastEnd = CODEX_MOBILE_JS.indexOf("\n  function setCacheSyncState", showToastStart);
+    const showToastBlock = CODEX_MOBILE_JS.slice(showToastStart, showToastEnd);
+    expect(showToastBlock).toContain(
+      "if (isMobileConnectionUnavailableMessage(text))",
+    );
+    expect(showToastBlock).toContain('"waiting-computer"');
+    expect(CODEX_MOBILE_JS).toContain(
+      'state.cacheSyncState === "waiting-computer" ||\n        state.cacheSyncState === "server-retry"\n      ) setCacheSyncState("current");',
+    );
+    expect(CODEX_MOBILE_JS).toContain(
+      '["waiting-computer", "server-retry"].includes(state.cacheSyncState)',
+    );
+  });
+
   test("retries one read-only request and translates the final network failure", () => {
     const helpers = loadMobileFetchResilienceHelpers();
     const failure = new TypeError("Failed to fetch");
@@ -869,8 +924,10 @@ describe("mobile fetch resilience", () => {
   });
 
   test("keeps transient background refresh failures quiet and retries POST acceptance with one stable id", () => {
-    expect(CODEX_MOBILE_JS).toContain("if (error.network && !initial && state.tasks.length)");
-    expect(CODEX_MOBILE_JS).toContain("if (!error.network) showToast");
+    expect(CODEX_MOBILE_JS).toContain(
+      "if (isMobileConnectionUnavailable(error) && !initial && state.tasks.length)",
+    );
+    expect(CODEX_MOBILE_JS).toContain("if (isMobileConnectionUnavailable(error)) {");
     expect(CODEX_MOBILE_JS).toContain("clientId: pending.clientId");
     expect(CODEX_MOBILE_JS).toContain("pending.browserAttempts = Math.min(30");
     expect(CODEX_MOBILE_JS).toContain("keepalive: body.length < 60 * 1024");
@@ -1340,16 +1397,20 @@ return fetchJson;`)(
 
 function loadMobileFetchResilienceHelpers(): {
   isNetworkError: (error: unknown) => boolean;
+  isConnectionUnavailable: (error: unknown) => boolean;
+  isConnectionUnavailableMessage: (message: unknown) => boolean;
   shouldRetry: (error: unknown, method: string, attempt: number) => boolean;
   normalize: (error: unknown) => Error & { network?: boolean };
 } {
   const start = CODEX_MOBILE_JS.indexOf("  function isMobileFetchNetworkError");
-  const end = CODEX_MOBILE_JS.indexOf("\n  async function waitForMobileFetchRetry", start);
+  const end = CODEX_MOBILE_JS.indexOf("\n  async function fetchJson", start);
   if (start < 0 || end < 0) throw new Error("Mobile fetch resilience helpers not found");
   const source = CODEX_MOBILE_JS.slice(start, end);
   return new Function(`${source}
 return {
   isNetworkError: isMobileFetchNetworkError,
+  isConnectionUnavailable: isMobileConnectionUnavailable,
+  isConnectionUnavailableMessage: isMobileConnectionUnavailableMessage,
   shouldRetry: shouldRetryMobileFetch,
   normalize: normalizeMobileFetchError
 };`)() as ReturnType<typeof loadMobileFetchResilienceHelpers>;
@@ -1717,6 +1778,20 @@ function loadMobileComposerActionPredicate(): (
   const source = CODEX_MOBILE_JS.slice(start, end);
   return new Function(`${source}\nreturn shouldUseStopComposerAction;`)() as ReturnType<
     typeof loadMobileComposerActionPredicate
+  >;
+}
+
+function loadMobileComposerActionState(): (input: {
+  stopMode: boolean;
+  stopRequested: boolean;
+  sending: boolean;
+}) => "send" | "pending" | "running" | "stopping" {
+  const start = CODEX_MOBILE_JS.indexOf("  function composerActionState");
+  const end = CODEX_MOBILE_JS.indexOf("\n  function runDurationMs", start);
+  if (start < 0 || end < 0) throw new Error("Mobile composer action state helper not found");
+  const source = CODEX_MOBILE_JS.slice(start, end);
+  return new Function(`${source}\nreturn composerActionState;`)() as ReturnType<
+    typeof loadMobileComposerActionState
   >;
 }
 
@@ -2934,11 +3009,23 @@ describe("Codex mobile persistent cache", () => {
             completedAt: "2026-08-31T08:00:00.000Z",
             lastUpdatedAt: "2026-08-31T08:00:00.000Z",
           },
+          {
+            threadId: "cached-running-stale-completion",
+            title: "仍在运行但留有上次完成记录",
+            status: "running",
+            completedAt: "2026-08-31T07:30:00.000Z",
+            lastUpdatedAt: "2026-08-31T09:10:00.000Z",
+          },
         ],
       },
     }, ["codex"], [{ id: "codex", label: "Codex" }]);
 
     expect(fallback.tasks).toEqual([
+      expect.objectContaining({
+        adapter: "codex",
+        adapterLabel: "Codex",
+        threadId: "cached-running-stale-completion",
+      }),
       expect.objectContaining({
         adapter: "codex",
         adapterLabel: "Codex",
@@ -4086,6 +4173,15 @@ describe("Codex mobile web rendering", () => {
     )).toBe(false);
   });
 
+  test("maps send, admission, running, and stopping to distinct composer actions", () => {
+    const composerActionState = loadMobileComposerActionState();
+
+    expect(composerActionState({ stopMode: false, stopRequested: false, sending: false })).toBe("send");
+    expect(composerActionState({ stopMode: false, stopRequested: false, sending: true })).toBe("pending");
+    expect(composerActionState({ stopMode: true, stopRequested: false, sending: false })).toBe("running");
+    expect(composerActionState({ stopMode: true, stopRequested: true, sending: true })).toBe("stopping");
+  });
+
   test("keeps project expansion bounded and resets it after collapsing", () => {
     const helpers = loadMobileTaskSidebarHelpers();
     const collapsedGroups: Record<string, boolean> = {};
@@ -4164,6 +4260,40 @@ describe("Codex mobile web rendering", () => {
       "2026-08-07T02:30:00.000Z",
       Date.parse("2026-08-07T03:00:00.000Z"),
     )).toBe("30 分钟前");
+  });
+
+  test("keeps task-board cards vertically compact on desktop and mobile", () => {
+    const desktopCard = CODEX_MOBILE_CSS.match(/\.task-board-card\s*\{[^}]*\}/)?.[0] ?? "";
+    const mobileCard = CODEX_MOBILE_CSS.match(
+      /\.task-board-card \{ min-height: 0; gap: 9px; padding: 11px 13px; \}/,
+    )?.[0] ?? "";
+    const desktopTitle = CODEX_MOBILE_CSS.match(
+      /\.task-board-card-title \{[^}]*\}/,
+    )?.[0] ?? "";
+
+    expect(desktopCard).toContain("min-height: 96px");
+    expect(desktopCard).toContain("gap: 10px");
+    expect(desktopCard).toContain("padding: 12px 14px");
+    expect(desktopTitle).toContain("-webkit-line-clamp: 2");
+    expect(desktopTitle).toContain("line-height: 1.42");
+    expect(mobileCard).not.toBe("");
+    expect(CODEX_MOBILE_CSS).toContain(".task-board-card-list { gap: 7px; }");
+  });
+
+  test("filters running tasks out of the recent-completed view", () => {
+    const restoreStart = CODEX_MOBILE_JS.indexOf("  function restorePersistentMobileCache");
+    const restoreEnd = CODEX_MOBILE_JS.indexOf(
+      "\n  function restoreTrustedPersistentMobileCachePreview",
+      restoreStart,
+    );
+    const restoreBlock = CODEX_MOBILE_JS.slice(restoreStart, restoreEnd);
+    const loadStart = CODEX_MOBILE_JS.indexOf("  async function loadTaskBoard");
+    const loadEnd = CODEX_MOBILE_JS.indexOf("\n  function setTaskBoardView", loadStart);
+    const loadBlock = CODEX_MOBILE_JS.slice(loadStart, loadEnd);
+
+    expect(restoreBlock).toContain("!isTaskBoardInProgress(item)");
+    expect(loadBlock).toContain("!isTaskBoardInProgress(item)");
+    expect(loadBlock).toContain("payload.recentCompleted.filter(function (item)");
   });
 
   test("keeps project names visible in recent lists and task-board contexts", () => {
@@ -5415,6 +5545,10 @@ describe("Codex mobile server", () => {
       expect(html).not.toContain('aria-label="添加文件等"');
       expect(html).toContain('aria-label="添加图片"');
       expect(html).toContain('<path d="M12 5v14M5 12h14"/>');
+      expect(html).toContain('class="send-arrow-icon" viewBox="0 0 32 32"');
+      expect(html).toContain('x="16.1284" y="9" width="2.01621" height="10.081"');
+      expect(html).toContain('class="send-running-orb"');
+      expect(html).toContain('id="send-running-orb" width="20" height="20"');
       expect(html).toContain('class="send-stop-icon"');
       expect(html).toContain('<rect x="5" y="5" width="14" height="14" rx="2.2"/>');
       expect(html).not.toContain('<rect x="3.5" y="5" width="17" height="14" rx="2.5"/>');
@@ -5489,7 +5623,13 @@ describe("Codex mobile server", () => {
       expect(css).toContain("gap: 4px;");
       expect(css).toContain("min-height: 52px;");
       expect(css).toContain(".send-button { width: 36px; height: 36px;");
+      expect(css).toContain(".send-button .send-arrow-icon { fill: currentColor; stroke: none; }");
+      expect(css).toContain(".send-button .send-running-orb { width: 20px; height: 20px;");
       expect(css).toContain(".send-button .send-stop-icon { width: 20px; height: 20px;");
+      expect(css).toContain('--composer-action-ground: #202020;');
+      expect(css).toContain('--composer-action-ground: #303030;');
+      expect(css).toContain('.send-button.is-stop[data-state="running"] .send-running-orb');
+      expect(css).toContain('.send-button.is-stop[data-state="stopping"] .send-stop-icon');
       expect(css).not.toContain("grid-template-areas:");
       expect(css).toContain(".topbar { position: absolute; top: 0;");
       expect(css).toContain(".sidebar {\n  height: 100%;\n  min-height: 0;");
@@ -5652,6 +5792,13 @@ describe("Codex mobile server", () => {
       expect(js).toContain("resolveVisibleRunSummary");
       expect(js).toContain("stopCurrentTask");
       expect(js).toContain("shouldUseStopComposerAction");
+      expect(js).toContain("composerActionState");
+      expect(js).toContain("sendButton.dataset.state = composerAction;");
+      expect(js).toContain('sendButton.setAttribute("aria-busy"');
+      expect(js).toContain("composerOrbAnimation.start();");
+      expect(js).toContain("bootOrbFrame(ctx, size, tSec, true, options, [16, 163, 127]);");
+      expect(js).not.toContain("ctx.getImageData(0, 0, size * dpr, size * dpr)");
+      expect(js).toContain("    updateHeader();\n    var delivery = currentPendingDelivery();");
       expect(js).toContain('sendButton.classList.toggle("is-stop"');
       expect(js).toContain("pending.optimisticRun = true;");
       expect(js).not.toContain('class="run-stop-button"');
@@ -6877,6 +7024,7 @@ function loadMobilePersistentCacheRuntime(params: {
     "isNearBottom",
     "setTimeout",
     "clearTimeout",
+    "isTaskBoardInProgress",
     "MAX_COMPOSER_DRAFTS",
     "MAX_CONVERSATION_SNAPSHOTS",
     `async function restorePendingMessageImages() {}
@@ -6917,6 +7065,9 @@ return {
       return 1;
     },
     () => {},
+    (task: { status?: string } | null) => Boolean(task && (
+      task.status === "running" || task.status === "approval" || task.status === "input"
+    )),
     40,
     12,
   ) as {

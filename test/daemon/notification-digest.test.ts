@@ -17,7 +17,8 @@ test("unlocked combines cross-agent completions and live approvals; failure and 
     notificationPolicy: new ScreenNotificationPolicy({ now: () => now, read: async () => locked ? "locked" : "unlocked", persist: (at) => { persisted = at; } }),
     queueWechatMessage: async (_id: string, text: string) => { texts.push(text); return successful; },
     isApprovalNotificationStillPending: async () => true,
-    clearCodexFinalReplyCache() {}, rememberWechatCandidate() {}, slots: new Map(),
+    clearCodexFinalReplyCache() {}, slots: new Map(),
+    stateStore: { setLatestWechatTaskTarget() {} },
   });
   completions.enqueue({ key: "a", adapter: "workbuddy", threadId: "same", title: "任务A", texts: ["完成A"], url: "https://example.test/a" });
   completions.enqueue({ key: "b", adapter: "pi", threadId: "same", title: "任务B", texts: ["完成B"], url: "https://example.test/b" });
@@ -37,7 +38,7 @@ test("unlocked combines cross-agent completions and live approvals; failure and 
   completions.enqueue({ key: "e", adapter: "workbuddy", threadId: "locked", texts: ["锁屏完成"] });
   locked = true;
   daemon.notificationPolicy = new ScreenNotificationPolicy({ read: async () => "locked" });
-  await daemon.runOutboundRecoveryPass(); expect(texts.at(-1)).toBe("锁屏完成");
+  await daemon.runOutboundRecoveryPass(); expect(texts.at(-1)).toMatch(/^\[任务 \d+ · WorkBuddy · WorkBuddy 任务\]\n锁屏完成$/);
 });
 
 test("locked delivers backlog separately; pending media remains durable when a digest cannot link to it", async () => {
@@ -47,12 +48,13 @@ test("locked delivers backlog separately; pending media remains durable when a d
     authorizedUserId: "test", notificationPolicy: new ScreenNotificationPolicy({ read: async () => "locked" }),
     codexCompletionDeliveries: queue, approvalNotificationDeliveries: new ApprovalNotificationDeliveryQueue(),
     queueWechatMessage: async (_id: string, text: string) => { sent.push(text); return true; },
-    clearCodexFinalReplyCache() {}, rememberWechatCandidate() {}, slots: new Map(),
+    clearCodexFinalReplyCache() {}, slots: new Map(),
+    stateStore: { setLatestWechatTaskTarget() {} },
     persistCodexWechatThreadId() {},
   });
   for (let i = 0; i < 3; i++) queue.enqueue({ key: String(i), threadId: String(i), texts: [`已完成${i}`] });
   await daemon.runOutboundRecoveryPass();
-  expect(sent).toEqual(["已完成0", "已完成1", "已完成2"]);
+  expect(sent).toEqual(["[任务 1 · Codex 任务]\n已完成0", "[任务 2 · Codex 任务]\n已完成1", "[任务 3 · Codex 任务]\n已完成2"]);
   expect(queue.getPending()).toHaveLength(0);
   daemon.notificationPolicy = new ScreenNotificationPolicy({ read: async () => "unlocked" });
   queue.enqueue({ key: "media", adapter: "workbuddy", threadId: "media", texts: ["附件"], images: ["/fake/image.png"] });
@@ -75,4 +77,31 @@ test("summary reservations prevent a concurrent full delivery", async () => {
   expect(sends).toBe(0);
   queue.releaseSummary(["x"]);
   expect((await queue.deliver("x", async () => { sends++; return 1; })).status).toBe("delivered");
+});
+
+test("the unlocked digest never sweeps in older backlog that still needs confirmation", async () => {
+  const now = Date.now();
+  const texts: string[] = [];
+  const completions = new CodexCompletionDeliveryQueue();
+  const old = new Date(now - 20 * 60_000).toISOString();
+  completions.enqueue({
+    key: "old", adapter: "workbuddy", threadId: "t-old", title: "二十分钟前的任务",
+    texts: ["[任务 5 · WorkBuddy · 二十分钟前的任务] 已完成，用时5m"],
+    completedAt: old, url: "https://example.test/old",
+  });
+  const daemon = Object.assign(Object.create(WeRelayDaemon.prototype), {
+    authorizedUserId: "test",
+    codexCompletionDeliveries: completions,
+    approvalNotificationDeliveries: new ApprovalNotificationDeliveryQueue(),
+    notificationPolicy: new ScreenNotificationPolicy({ now: () => now, read: async () => "unlocked" }),
+    queueWechatMessage: async (_id: string, text: string) => { texts.push(text); return true; },
+    isApprovalNotificationStillPending: async () => true,
+    clearCodexFinalReplyCache() {}, rememberWechatCandidate() {}, slots: new Map(),
+  });
+
+  await daemon.runOutboundRecoveryPass();
+
+  // 较早的通知必须走“先询问”，不能被解锁摘要直接推出去。
+  expect(texts.every((text) => !text.includes("二十分钟前的任务") || text.includes("较早的完成通知"))).toBe(true);
+  expect(completions.getPending().map((item) => item.key)).toEqual(["old"]);
 });

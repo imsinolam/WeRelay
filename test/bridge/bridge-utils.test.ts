@@ -331,6 +331,26 @@ describe("parseWechatControlCommand", () => {
       target: "design",
     });
     expect(parseWechatControlCommand("任务：", options)).toEqual({ type: "resume" });
+  });
+
+  test("supports customising how many tasks one list shows", () => {
+    const options = {
+      adapter: "codex" as const,
+      hasPendingConfirmation: false,
+      hasPendingUserInput: false,
+    };
+    // 三种写法都应只改变条数，而不是进入某个序号的任务。
+    for (const text of ["任务20条", "任务 20条", "任务数20", "任务数 20", "列表20", "列表 20", "任务列表 20"]) {
+      expect(parseWechatControlCommand(text, options)).toEqual({ type: "resume", pageSize: 20 });
+    }
+    // 中文冒号同样可用。
+    expect(parseWechatControlCommand("任务数：20", options)).toEqual({ type: "resume", pageSize: 20 });
+    expect(parseWechatControlCommand("列表：30", options)).toEqual({ type: "resume", pageSize: 30 });
+    // “任务 20”必须继续表示进入 20 号任务，不能被数量写法抢走。
+    expect(parseWechatControlCommand("任务 20", options)).toEqual({ type: "resume", target: "20" });
+    // 超过上限或非数量文本不当作列表条数。
+    expect(parseWechatControlCommand("任务200条", options)).toBeNull();
+    expect(parseWechatControlCommand("任务完成了吗", options)).toBeNull();
     expect(parseWechatControlCommand("下一页", options)).toEqual({
       type: "resume_page",
       direction: "next",

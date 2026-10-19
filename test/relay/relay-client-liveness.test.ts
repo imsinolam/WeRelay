@@ -41,7 +41,8 @@ describe("Relay liveness independent of business requests", () => {
         init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
       });
     }) as typeof fetch;
-    const client = startWeRelayRelayClient({ relayUrl: "https://relay.example.test", deviceId: "device-1", deviceToken: "test-token",
+    const client = startWeRelayRelayClient({
+      transport: "long-poll", relayUrl: "https://relay.example.test", deviceId: "device-1", deviceToken: "test-token",
       localBaseUrl: "http://127.0.0.1:4396", fetchImpl, heartbeatIntervalMs: 10, localRequestTimeoutMs: 100, remoteRequestTimeoutMs: 200 });
     try {
       await delay(60);
@@ -62,7 +63,8 @@ describe("Relay liveness independent of business requests", () => {
       polls += 1;
       return await aborting(init);
     }) as typeof fetch;
-    const client = startWeRelayRelayClient({ relayUrl: "https://relay.example.test", deviceId: "device-1", deviceToken: "test-token",
+    const client = startWeRelayRelayClient({
+      transport: "long-poll", relayUrl: "https://relay.example.test", deviceId: "device-1", deviceToken: "test-token",
       localBaseUrl: "http://127.0.0.1:4396", fetchImpl, pollRequestTimeoutMs: 20, heartbeatIntervalMs: 10, retryDelayMs: 1 });
     try { await waitFor(() => polls > 1); expect(polls).toBeGreaterThan(1); }
     finally { await client.close(); }
@@ -87,7 +89,8 @@ describe("Relay liveness independent of business requests", () => {
       executions += 1;
       return await aborting(init);
     }) as typeof fetch;
-    const client = startWeRelayRelayClient({ relayUrl: "https://relay.example.test", deviceId: "device-1", deviceToken: "test-token",
+    const client = startWeRelayRelayClient({
+      transport: "long-poll", relayUrl: "https://relay.example.test", deviceId: "device-1", deviceToken: "test-token",
       localBaseUrl: "http://127.0.0.1:4396", fetchImpl, localRequestTimeoutMs: 20 });
     try { await waitFor(() => posted === 2); expect(executions).toBe(1); expect(posted).toBe(2); }
     finally { await client.close(); }

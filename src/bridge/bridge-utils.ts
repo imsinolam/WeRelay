@@ -586,6 +586,17 @@ export function parseWechatControlCommand(
   if (exactText === "任务" || exactText === "任务列表") {
     return { type: "resume" };
   }
+  // 列表条数定制。用户已习惯“任务 20”表示进入 20 号任务，所以数量写法必须
+  // 显式带上“条”单位，或使用“任务数/列表”前缀，避免两种语义互相抢占。
+  const listCountMatch = exactText.match(
+    /^(?:任务\s*(?:数|数量|条数|列表)|列表)\s*[：:]?\s*([1-9]\d*)\s*条?$/u,
+  ) ?? exactText.match(/^任务\s*[：:]?\s*([1-9]\d*)\s*条$/u);
+  if (listCountMatch?.[1]) {
+    const count = Number(listCountMatch[1]);
+    return Number.isSafeInteger(count) && count <= CODEX_TASK_LIST_MAX_PAGE_SIZE
+      ? { type: "resume", pageSize: count }
+      : null;
+  }
   const taskTargetMatch = exactText.match(/^任务(?:\s*[：:]\s*|\s+)(.*)$/);
   if (taskTargetMatch) {
     const target = taskTargetMatch[1]?.trim() ?? "";
@@ -1681,6 +1692,7 @@ export function formatClawBotWechatHelp(
     "停止任务：发送“停止”",
     ...(!adapter || adapter === "codex" ? ["Codex 完整回答：发送“全文”"] : []),
     "翻页：发送“下一页”、“下一页20”或“上一页”",
+    "补发较早通知：回复“推送”",
     "切换终端：/codex、/workbuddy、/claude、/tclaude、/grok、/codebuddy、/reasonix、/pi、/deepseek 或 /opencode",
     "帮助：/h 或 /help",
     "任务运行较久时，可打开消息中的网页版链接查看实时进展。",

@@ -12,6 +12,7 @@ import { findPiSessionFile, listPiSessions, readPiSessionMessages, readPiSession
 import { nowIso, truncatePreview } from "./bridge-utils.ts";
 import { acquirePiOwnerLock } from "./pi-owner-lock.ts";
 import { discoverPiOwners, selectPiOwner, type PiOwnerAdvertisement } from "./pi-owner-discovery.ts";
+import { readPiOwnerModels, readPiInstalledModels } from "./pi-model-catalog.ts";
 import { formatPiModelError } from "./pi-model-error.ts";
 
 type OwnerRecord = { type: string; token?: string; id?: string; sessionId?: string; ok?: boolean; error?: string; text?: string; queued?: boolean; outcome?: "completed" | "aborted" | "error"; modelState?: BridgeSessionModelState; run?: BridgeSessionRunSummary | null };
@@ -182,22 +183,59 @@ export class PiOwnerAdapter implements BridgeAdapter {
     if (this.state.sharedSessionId !== sessionId) throw new Error("Pi 未能恢复指定原任务。");
   }
   async createSession(): Promise<void> {
-    if (this.options.renderMode !== "companion") throw new Error("请在 Pi 原窗口或 Pi Desktop 中新建任务后刷新列表；未启动独立 owner。");
-    if (this.state.status === "busy") throw new Error("Pi 正在运行，不能新建任务。");
-    if (this.externalOwner) throw new Error("请在已经打开的 Pi 原窗口中新建任务，WeRelay 不会另开第二个窗口。");
-    if (this.child && this.state.sharedSessionId) await this.request("can_switch", this.state.sharedSessionId);
-    await this.restartOwner(undefined, this.state.cwd);
+    await this.createInProject(this.state.cwd);
   }
   async createSessionInProject(sourceSessionId: string): Promise<void> {
-    if (this.options.renderMode !== "companion") throw new Error("请在 Pi 原项目窗口中新建任务后刷新列表；未在其他项目创建替代任务。");
     const file = await findPiSessionFile(sourceSessionId);
-    if (!file) throw new Error("找不到 Pi 原任务所属项目。");
-    const cwd = await readPiSessionProject(file);
-    if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) throw new Error("Pi 原项目目录已不存在，未在其他位置新建任务。");
-    if (this.state.status === "busy") throw new Error("Pi 正在运行，不能新建任务。");
-    if (this.externalOwner) throw new Error("请在已经打开的 Pi 原窗口中新建任务，WeRelay 不会另开第二个窗口。");
-    if (this.child && this.state.sharedSessionId) await this.request("can_switch", this.state.sharedSessionId);
-    await this.restartOwner(undefined, cwd);
+    if (!file) throw new Error("找不到 Pi 原任务所属项目，未在其他项目新建任务。");
+    await this.createInProject(await readPiSessionProject(file), await this.nativeSessionId(sourceSessionId));
+  }
+  private async createInProject(cwd: string, sourceSessionId?: string): Promise<void> {
+    const next = this.ownerTransition.catch(() => undefined).then(async () => {
+      if (this.disposed) throw new Error("Pi 连接已关闭。");
+      if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) throw new Error("Pi 原项目目录已不存在，未在其他位置新建任务。");
+      const owners = discoverPiOwners().filter((owner) => path.resolve(owner.cwd) === path.resolve(cwd));
+      const exact = sourceSessionId ? owners.filter((owner) => owner.sessionId === sourceSessionId) : [];
+      const matches = exact.length ? exact : owners;
+      if (matches.length > 1) throw new Error("该项目有多个 Pi 窗口，请先选择要使用的原窗口任务，未猜测新建位置。");
+      const owner = matches[0];
+      if (owner) {
+        if (owner.sessionId !== this.state.sharedSessionId || !this.socket || this.socket.destroyed) await this.restartWithExternalOwner(owner);
+        await this.request("can_switch", owner.sessionId);
+        let response: OwnerRecord;
+        try { response = await this.request("new_session", owner.sessionId); }
+        catch (error) {
+          if (error instanceof Error && /Unsupported Pi owner request/i.test(error.message)) throw new Error("请在 Pi 原窗口执行 /reload，加载网页新建任务能力。", { cause: error });
+          throw error;
+        }
+        if (!response.sessionId || response.sessionId === owner.sessionId) throw new Error("Pi 未确认新任务，未发送消息，请刷新原窗口检查。");
+        // Session replacement reloads extensions. Reconnect to the fresh extension
+        // in the SAME process; never reuse the invalidated old extension API.
+        let replacement: PiOwnerAdvertisement | undefined;
+        const deadline = Date.now() + 3000;
+        do {
+          replacement = selectPiOwner(discoverPiOwners().filter((item) => item.pid === owner.pid), response.sessionId, cwd);
+          if (replacement) break;
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        } while (Date.now() < deadline);
+        if (!replacement) throw new Error("Pi 已新建任务，但新窗口连接尚未就绪；请刷新列表查看，勿重复新建。");
+        if (replacement.socket !== owner.socket) await this.restartWithExternalOwner(replacement);
+        this.state.sharedSessionId = response.sessionId;
+        this.state.activeRuntimeSessionId = response.sessionId;
+        this.state.cwd = cwd;
+        this.ownerSessionConfirmed = true;
+        this.runSummary = null;
+        this.status("idle");
+        return;
+      }
+      if (this.options.renderMode !== "companion") throw new Error("这个项目没有已接入的 Pi 原窗口；请先打开该项目的 Pi 并执行 /reload。未启动独立 owner。");
+      if (this.state.status === "busy") throw new Error("Pi 正在运行，不能新建任务。");
+      if (this.externalOwner) throw new Error("Pi 原窗口已断开，请重新连接后新建任务。");
+      if (this.child && this.state.sharedSessionId) await this.request("can_switch", this.state.sharedSessionId);
+      await this.restartOwner(undefined, cwd);
+    });
+    this.ownerTransition = next;
+    return next;
   }
   async getSessionMessages(sessionId: string): Promise<BridgeSessionMessage[]> {
     const file = await findPiSessionFile(sessionId);
@@ -215,10 +253,24 @@ export class PiOwnerAdapter implements BridgeAdapter {
     return sessionId === this.state.sharedSessionId ? this.runSummary : null;
   }
   async getNewSessionModelState(): Promise<BridgeSessionModelState> {
-    const sessionId = this.state.sharedSessionId;
-    return sessionId
-      ? this.getSessionModelState(sessionId)
-      : { options: [], canChange: false, unavailableReason: "请先连接 Pi，再预选新任务模型。" };
+    let catalog: BridgeSessionModelState;
+    const id = this.state.sharedSessionId;
+    if (id && this.socket && !this.socket.destroyed && this.ownerSessionConfirmed) catalog = await this.getSessionModelState(id);
+    else {
+      const owners = discoverPiOwners();
+      const owner = selectPiOwner(owners, id, this.state.cwd);
+      try {
+        if (owner) {
+          try { catalog = await readPiOwnerModels(owner); }
+          catch { catalog = await readPiInstalledModels(this.options.command); }
+        } else catalog = await readPiInstalledModels(this.options.command);
+      }
+      catch { return { options: [], canChange: false, unavailableReason: "暂时无法读取 Pi 模型，请确认电脑端已配置模型，或在原 Pi 窗口执行 /reload 后重试。" }; }
+    }
+    // Draft selection does not change the running task. It is applied only to
+    // the newly created task before its first user message.
+    return { ...catalog, canChange: catalog.options.length > 0,
+      unavailableReason: catalog.options.length ? undefined : "Pi 当前没有可用的模型，请先在电脑端配置。" };
   }
   async getSessionModelState(sessionId: string): Promise<BridgeSessionModelState> {
     sessionId = await this.nativeSessionId(sessionId);
@@ -487,7 +539,7 @@ export class PiOwnerAdapter implements BridgeAdapter {
       this.lastReply = ""; this.lastError = ""; this.activeOrigin = "local"; this.status("idle");
     }
   }
-  private async request(type: "prompt" | "abort" | "can_switch" | "model_state" | "set_model" | "set_reasoning", sessionId: string, text?: string, model?: string): Promise<OwnerRecord> {
+  private async request(type: "prompt" | "abort" | "can_switch" | "model_state" | "set_model" | "set_reasoning" | "new_session", sessionId: string, text?: string, model?: string): Promise<OwnerRecord> {
     const socket = this.socket;
     if (!socket || socket.destroyed) throw new Error("Pi 本地 owner 未连接，未另建任务。");
     const id = randomUUID();
@@ -497,7 +549,7 @@ export class PiOwnerAdapter implements BridgeAdapter {
         reject(new Error(type === "set_model"
           ? "Pi 模型切换结果暂未确认，请刷新模型列表，避免重复操作。"
           : "Pi 未确认收到消息，请先检查原任务以免重复发送。"));
-      }, type === "set_model" ? 30_000 : 10_000);
+      }, (type === "set_model" || type === "new_session") ? 30_000 : 10_000);
       this.pending.set(id, { resolve, reject, timer });
       socket.write(`${JSON.stringify({ id, token: this.token, type, sessionId, text, model })}\n`);
     });

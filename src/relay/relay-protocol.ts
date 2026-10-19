@@ -6,6 +6,10 @@ export const WERELAY_RELAY_POLL_PATH = "/__werelay/device/poll";
 export const WERELAY_RELAY_RESPONSE_PATH = "/__werelay/device/respond";
 export const WERELAY_RELAY_CLIENT_IP_PATH = "/__werelay/client-ip";
 export const WERELAY_RELAY_CHECK_PATH = "/__werelay/device/check";
+export const WERELAY_RELAY_WEBSOCKET_PATH = "/__werelay/device/ws";
+export const WERELAY_RELAY_SOCKET_VERSION = 1;
+export const WERELAY_RELAY_SOCKET_MAX_PAYLOAD = 72 * 1024 * 1024;
+export const WERELAY_RELAY_MAX_IN_FLIGHT = 8;
 
 export const WERELAY_RELAY_REQUEST_BODY_LIMIT = 36 * 1024 * 1024;
 export const WERELAY_RELAY_RESPONSE_BODY_LIMIT = 36 * 1024 * 1024;

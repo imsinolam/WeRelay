@@ -25,6 +25,37 @@ export default function (pi) {
   let authenticated = !standalone;
   let closing = false;
   let switchingModel = false;
+  let creatingSession = false;
+  const createCommand = `werelay-new-${randomBytes(8).toString('hex')}`;
+  let createRequest;
+  let replacingRequest;
+  pi.registerCommand?.(createCommand, {
+    description: 'WeRelay 内部新建任务控制命令',
+    handler: async (key, ctx) => {
+      const pending = createRequest;
+      if (!pending || key !== pending.key) return;
+      createRequest = undefined;
+      replacingRequest = pending;
+      try {
+        if (!ctx.isIdle() || ctx.hasPendingMessages?.()) throw new Error('Pi 正在运行，请完成后再新建任务。');
+        if (ctx.ui.getEditorText().trim()) throw new Error('Pi 编辑区有尚未发送的内容。');
+        const result = await ctx.newSession({ withSession: async (fresh) => {
+          // Do not call the old pi/ctx after replacement. Fresh session metadata
+          // and the authenticated response socket are all that is needed here.
+          send({ type: 'response', id: pending.id, ok: true, sessionId: fresh.sessionManager.getSessionId() });
+        } });
+        if (result.cancelled) send({ type: 'response', id: pending.id, ok: false, error: 'Pi 原窗口取消了新建任务。' });
+      } catch {
+        send({ type: 'response', id: pending.id, ok: false, error: 'Pi 原窗口未能新建任务，请检查窗口状态后重试。' });
+      } finally {
+        creatingSession = false;
+        replacingRequest = undefined;
+        // New Pi versions replace the extension on /new. Remove its stale
+        // advertisement only after the acknowledgement has left the socket.
+        if (pending.replaced) setTimeout(cleanup, 50);
+      }
+    },
+  });
   let run = null;
   const sessionId = () => context?.sessionManager.getSessionId();
   const send = (value) => {
@@ -70,7 +101,7 @@ export default function (pi) {
       seen.add(id);
       return [{ id, label: String(model.name || model.id).slice(0, 160), group: model.provider.slice(0, 80), reasoningEffortOptions: thinkingOptions(model) }];
     });
-    const idle = Boolean(context?.isIdle?.()) && !context?.hasPendingMessages?.() && !switchingModel;
+    const idle = Boolean(context?.isIdle?.()) && !context?.hasPendingMessages?.() && !switchingModel && !creatingSession;
     return {
       ...(current?.provider && current?.id ? { currentModel: `${current.provider}/${current.id}` } : {}),
       options, canChange: idle && options.length > 0,
@@ -90,12 +121,23 @@ export default function (pi) {
       return;
     }
     try {
-      if (request.type === 'can_switch') {
-        const safe = context.isIdle() && !context.ui.getEditorText().trim();
+      if (request.type === 'release') {
+        send({ type: 'response', id: request.id, ok: true });
+        socket = undefined;
+        peer.end();
+      } else if (request.type === 'new_session') {
+        if (creatingSession || switchingModel || !context.isIdle() || context.hasPendingMessages?.()) throw new Error('Pi 正在运行，请完成后再新建任务。');
+        if (context.ui.getEditorText().trim()) throw new Error('Pi 编辑区有尚未发送的内容。');
+        if (!context.hasUI || typeof pi.registerCommand !== 'function') throw new Error('Pi Desktop 的原生导入任务暂不支持网页新建；请使用桌面端新建按钮。未创建替代会话。');
+        creatingSession = true;
+        createRequest = { id: request.id, key: randomBytes(16).toString('hex'), replaced: false };
+        pi.sendUserMessage(`/${createCommand} ${createRequest.key}`, { expandPromptTemplates: true });
+      } else if (request.type === 'can_switch') {
+        const safe = !creatingSession && !switchingModel && !context.hasPendingMessages?.() && context.isIdle() && !context.ui.getEditorText().trim();
         send({ type: 'response', id: request.id, ok: safe,
           ...(!safe ? { error: context.isIdle() ? 'Pi 编辑区有尚未发送的内容。' : 'Pi 正在运行。' } : {}) });
       } else if (request.type === 'prompt' && typeof request.text === 'string' && request.text.trim()) {
-        if (switchingModel) throw new Error('Pi 正在切换模型，请稍后发送消息。');
+        if (switchingModel || creatingSession) throw new Error('Pi 正在切换模型或新建任务，请稍后发送消息。');
         const queued = !context.isIdle();
         pi.sendUserMessage(request.text, queued ? { deliverAs: 'followUp' } : undefined);
         send({ type: 'response', id: request.id, ok: true, queued });
@@ -211,6 +253,8 @@ export default function (pi) {
     send({ type: 'settled', sessionId: sessionId(), outcome, run });
   });
   pi.on('session_shutdown', (event) => {
+    if (event.reason === 'new' && replacingRequest) { replacingRequest.replaced = true; return; }
+    if (event.reason === 'new' || event.reason === 'resume' || event.reason === 'fork') { cleanup(); return; }
     if (event.reason === 'quit' || event.reason === 'reload') cleanup();
   });
 }

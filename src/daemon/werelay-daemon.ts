@@ -123,6 +123,7 @@ import {
   sanitizeWechatInboundPromptForDisplay,
   shouldNotifyTaskInterrupted,
   isStrictApprovalModeEnabled,
+  WECHAT_TEXT_CHUNK_MAX_CHARS,
   splitWechatTextIntoChunks,
   truncatePreview,
 } from "../bridge/bridge-utils.ts";
@@ -153,6 +154,7 @@ import {
   BoundedTtlMap,
   BoundedTtlSet,
 } from "../utils/bounded-ttl-cache.ts";
+import { ClawbotUpdateNotifier, createClawbotUpdateNotifier } from "./clawbot-update-notifier.ts";
 import { getCurrentVersion } from "../utils/version-checker.ts";
 import { MobileConversationRevisionStore } from "./mobile-conversation-revisions.ts";
 import { ensureWechatCredentials } from "../wechat/setup.ts";
@@ -206,9 +208,15 @@ import {
   CodexCompletionDeliveryQueue,
   CODEX_COMPLETION_DELIVERABLE_WINDOW_MS,
   formatCodexCompletionBacklogSummary,
-  selectCodexCompletionBacklogBatch,
   type CodexCompletionDeliveryResult,
+  type PendingCodexCompletionDelivery,
 } from "./codex-completion-delivery.ts";
+import {
+  CLAWBOT_BACKLOG_DISCARD_MS,
+  formatClawbotBacklogConfirmPrompt,
+  isClawbotBacklogConfirmReply,
+  planClawbotBacklogDelivery,
+} from "./clawbot-backlog-policy.ts";
 import {
   ApprovalNotificationDeliveryQueue,
   type PendingApprovalNotificationDelivery,
@@ -260,6 +268,7 @@ import { MobileRemoteAccess, type MobileRemoteConfig } from "./mobile-remote-acc
 import {
   activateGlobalTaskCandidate,
   buildGlobalTaskSnapshot,
+  countRunningGlobalTasks,
   createGlobalTaskCatalogCache,
   formatGlobalTaskList,
   paginateGlobalTaskSnapshot,
@@ -267,6 +276,7 @@ import {
   globalTaskIdentityKey,
   parseTaskTargetedMessageText,
   resolveCompactGlobalTaskSearchTarget,
+  resolveDefaultGlobalTaskPageSize,
   resolveGlobalTaskCandidate,
   resolveGlobalTaskTargetedMessage,
   searchGlobalTaskCandidates,
@@ -1261,7 +1271,8 @@ export function prefixDaemonTaskMessage(
       ? truncatePreview(normalizeOutput(taskTitle).trim().replace(/\s+/g, " "), 50)
       : "";
     const labelParts = [
-      ...(normalizedTitle || normalizedTaskNumber ? [getBridgeProvider(adapter).label] : []),
+      ...(normalizedTaskNumber ? [`任务 ${normalizedTaskNumber}`] : []),
+      ...(normalizedTitle || normalizedTaskNumber ? [adapter === "pi" ? "Pi" : getBridgeProvider(adapter).label] : []),
       ...(normalizedTitle ? [normalizedTitle] : []),
     ];
     const label = labelParts.length > 0 ? `[${labelParts.join(" · ")}]` : "";
@@ -2515,6 +2526,13 @@ export function buildCodexMobileTaskBoard(params: {
       completion,
     ]),
   );
+  const runningTaskKeys = new Set(
+    params.taskGroups.flatMap((group) =>
+      group.tasks
+        .filter((task) => isRunningCodexTaskStatus(task.status))
+        .map((task) => `${group.adapter}\u0000${task.threadId}`),
+    ),
+  );
   const tasks = params.taskGroups.flatMap((group) =>
     group.tasks.map((task) => {
       const completion = completionByTask.get(
@@ -2524,6 +2542,7 @@ export function buildCodexMobileTaskBoard(params: {
       const completionAtMs = Date.parse(completion?.completedAt ?? "") || 0;
       const completionMatchesLatestActivity = Boolean(
         completion &&
+        !runningTaskKeys.has(`${group.adapter}\u0000${task.threadId}`) &&
         (!taskUpdatedAtMs || completionAtMs >= taskUpdatedAtMs - 5 * 60 * 1000),
       );
       return {
@@ -2542,11 +2561,15 @@ export function buildCodexMobileTaskBoard(params: {
   });
   return {
     tasks,
-    recentCompleted: params.recentCompletions.map((completion) => ({
-      ...completion,
-      adapterLabel: adapterLabels.get(completion.adapter) ??
-        formatDaemonAdapterLabel(completion.adapter),
-    })),
+    recentCompleted: params.recentCompletions
+      .filter((completion) =>
+        !runningTaskKeys.has(`${completion.adapter}\u0000${completion.threadId}`)
+      )
+      .map((completion) => ({
+        ...completion,
+        adapterLabel: adapterLabels.get(completion.adapter) ??
+          formatDaemonAdapterLabel(completion.adapter),
+      })),
   };
 }
 
@@ -2708,6 +2731,16 @@ function formatCodexTaskCompletionHeading(params: {
   return `[${identity}] ${params.status}，用时${formatCompactTaskDuration(params.durationMs)}`;
 }
 
+function splitTaskScopedWechatText(text: string): string[] {
+  const firstLine = text.split("\n", 1)[0] ?? "";
+  const label = /^\[[^\]\n]+\]/.exec(firstLine)?.[0];
+  if (!label) return splitWechatTextIntoChunks(text);
+  // Reserve space for the repeated identity; each continuation is independently
+  // actionable rather than relying on a heading sent in an earlier message.
+  return splitWechatTextIntoChunks(text, WECHAT_TEXT_CHUNK_MAX_CHARS - label.length - 1)
+    .map((chunk, index) => index === 0 ? chunk : `${label}\n${chunk}`);
+}
+
 export function formatCodexTaskCompletionMessage(params: {
   title: string;
   taskNumber?: number;
@@ -2798,7 +2831,7 @@ export function formatCodexTaskCompletionMessages(params: {
       fallback,
       params.url,
     ].filter(Boolean);
-    return splitWechatTextIntoChunks(sections.join("\n\n"));
+    return splitTaskScopedWechatText(sections.join("\n\n"));
   }
 
   const title = normalizeDaemonTaskDisplayTitle(params.title, "Codex 任务");
@@ -2824,7 +2857,7 @@ export function formatCodexTaskCompletionMessages(params: {
     .replace(/\n{3,}/g, "\n\n");
   const sections = [[heading, requestLine].filter(Boolean).join("\n"), fullText, params.url]
     .filter(Boolean);
-  return splitWechatTextIntoChunks(sections.join("\n\n"));
+  return splitTaskScopedWechatText(sections.join("\n\n"));
 }
 
 export function shouldSendCodexCompletionNotification(params: {
@@ -2880,12 +2913,14 @@ export function formatCurrentCodexFullReplyMessages(params: {
     return [];
   }
   const taskName = truncatePreview(title, 55);
+  const identity = Number.isSafeInteger(params.taskNumber) && Number(params.taskNumber) > 0
+    ? `任务 ${params.taskNumber} · ${taskName}` : taskName;
   const sections = [
-    `[${taskName}] 最近完整回答`,
+    `[${identity}] 最近完整回答`,
     text,
     params.url,
   ].filter(Boolean);
-  return splitWechatTextIntoChunks(sections.join("\n\n"));
+  return splitTaskScopedWechatText(sections.join("\n\n"));
 }
 
 export function observeCodexTask(
@@ -3058,6 +3093,7 @@ export class WeRelayDaemon {
   /** Debug acknowledgement mode; see DEBUG_ACK_ENV. */
   private debugAckEnabled = process.env[DEBUG_ACK_ENV] === "1";
   private cachedBuildVersion: string | null = null;
+  private updateNotifier?: ClawbotUpdateNotifier;
   private shutdownPromise: Promise<void> | null = null;
   private ipcServer: net.Server | null = null;
   private endpointToken = "";
@@ -3122,6 +3158,10 @@ export class WeRelayDaemon {
   private readonly codexCompletionDeliveries: CodexCompletionDeliveryQueue;
   private readonly approvalNotificationDeliveries: ApprovalNotificationDeliveryQueue;
   private completionRecoveryCursor?: string;
+  // 上一次“要不要补发较早通知”的询问指纹和发送时间。指纹没变就不再重复询问，
+  // 避免 60 秒一轮的恢复把同一句提示反复发进微信。
+  private clawbotBacklogConfirmSignature?: string;
+  private clawbotBacklogConfirmAtMs?: number;
   private readonly livenessMonitor = new DaemonLivenessMonitor((lagMs) => {
     appendDaemonLog(`daemon_event_loop_lag: lag_ms=${lagMs}`);
   });
@@ -3451,6 +3491,8 @@ export class WeRelayDaemon {
       localBaseUrl: `http://127.0.0.1:${this.codexMobileServer.port}`,
       localPrewarmToken: accessToken,
       journalFile: path.join(workspaceDir, "relay-command-journal.json"),
+      transport: process.env.WERELAY_RELAY_TRANSPORT === "long-poll" ? "long-poll" : "auto",
+      onTransportChange: (transport) => appendDaemonLog(`relay_transport: ${transport}`),
       logger: (message) => appendDaemonLog(`relay_client: ${truncatePreview(message, 400)}`),
       onConnectionChange: (status) => {
         if (generation === this.mobileRemoteGeneration) {
@@ -3536,6 +3578,13 @@ export class WeRelayDaemon {
     this.passiveCompletionMonitor.start();
     this.scheduleWorkBuddyApprovalObserver();
     this.livenessMonitor.start();
+    // Never await GitHub or a WeChat notification before beginning inbound polling.
+    this.updateNotifier = await createClawbotUpdateNotifier({
+      send: (text) => this.shutdownPromise ? Promise.resolve(false)
+        : this.queueWechatMessage(this.authorizedUserId, text, "notice"),
+    });
+    if (this.shutdownPromise) this.updateNotifier.stop();
+    else this.updateNotifier.start();
 
     while (!this.shutdownPromise) {
       let pollResult: Awaited<ReturnType<WeChatTransport["pollMessages"]>>;
@@ -3643,6 +3692,7 @@ export class WeRelayDaemon {
     // become a prerequisite for accepting a new command or refreshing tokens.
     if (messages.some((message) => message.senderId === this.authorizedUserId)) {
       void this.outboundRecoveryScheduler.trigger({ rerunIfRunning: true });
+      void this.updateNotifier?.tick({ inbound: true });
     }
   }
 
@@ -3655,6 +3705,7 @@ export class WeRelayDaemon {
 
   private async cleanup(): Promise<void> {
     appendDaemonLog("shutdown_started");
+    this.updateNotifier?.stop();
     this.outboundRecoveryScheduler.stop();
     clearTimeout(this.workBuddyObserverTimer);
     this.passiveCompletionMonitor.stop();
@@ -4446,7 +4497,7 @@ export class WeRelayDaemon {
               this.prefixSlotMessage(
                 slot,
                 formatMirroredUserInputMessage(slot.adapter, event.text),
-                event.threadId,
+                event.threadId ?? (slot.adapter !== "codex" ? changedThreadId : undefined),
               ),
               "mirrored_user_input",
             );
@@ -4572,7 +4623,7 @@ export class WeRelayDaemon {
               this.prefixSlotMessage(
                 slot,
                 formatTaskInterruptedMessage(slot.adapter),
-                event.threadId,
+                completedThreadId,
               ),
               "notice",
             );
@@ -4612,7 +4663,7 @@ export class WeRelayDaemon {
             this.prefixSlotMessage(
               slot,
               formatTaskFailedMessage(slot.adapter, event.message),
-              event.threadId,
+              event.threadId ?? changedThreadId,
             ),
             "task_failed",
           );
@@ -4705,6 +4756,12 @@ export class WeRelayDaemon {
         formatDaemonWechatHelp(this.getActiveSlot()?.adapter),
         "notice",
       );
+      return;
+    }
+    // 积压补发确认：较早的完成通知不会被自动推送，只有用户明确回复
+    // “推送”后才补发。放在普通命令解析之前，避免这几个字被当成新任务。
+    if (isClawbotBacklogConfirmReply(message.text)) {
+      await this.handleClawbotBacklogPushRequest(message);
       return;
     }
     // Debug acknowledgement toggle: `/debug` or `调试` flips it for this
@@ -5386,7 +5443,7 @@ export class WeRelayDaemon {
           }
           const texts = formatCurrentCodexFullReplyMessages({
             title,
-            taskNumber: activeSlot.taskNumberByThreadId.get(threadId),
+            taskNumber: this.rememberWechatTaskTarget(activeSlot, threadId, title, false).taskNumber,
             text: latestMessage.text,
             url: this.codexMobileServer?.buildTaskUrl(threadId, activeSlot.adapter),
           });
@@ -7998,16 +8055,20 @@ export class WeRelayDaemon {
         // The failure notice remains useful even when task metadata is unavailable.
       }
       const url = this.codexMobileServer?.buildTaskUrl(entry.threadId, entry.adapter);
+      const remembered = this.rememberWechatCandidate({
+        adapter, sessionId: entry.threadId, threadId: entry.threadId, title,
+        lastUpdatedAt: nowIso(),
+      }, false);
       try {
         const sent = await this.queueWechatMessage(
           this.authorizedUserId,
-          formatMobileMessageFailureNotice({
+          this.formatNumberedDeliveryText({ adapter, threadId: entry.threadId, title: remembered.candidate.title }, formatMobileMessageFailureNotice({
             title,
             text: entry.text,
             error: current.lastError ?? (current.status === "unconfirmed" ? "暂未确认原任务是否收到消息" : "电脑端暂时无法接收消息"),
             unconfirmed: current.status === "unconfirmed" || isMobileMessageDeliveryUncertain(current),
             ...(url ? { url } : {}),
-          }),
+          })),
           "inbound_error",
         );
         if (!sent) return false;
@@ -8777,7 +8838,8 @@ export class WeRelayDaemon {
       return;
     }
     if (command.type !== "resume") return;
-    const pageSize = command.taskListPosition?.pageSize ?? CODEX_TASK_LIST_PAGE_SIZE;
+    const requestedPageSize = command.taskListPosition?.pageSize ?? command.pageSize;
+    const pageSize = requestedPageSize ?? CODEX_TASK_LIST_PAGE_SIZE;
     const page = command.page ?? 1;
     const pageStart = command.taskListPosition?.startIndex ??
       (page - 1) * CODEX_TASK_LIST_PAGE_SIZE;
@@ -8800,20 +8862,31 @@ export class WeRelayDaemon {
     this.globalTaskListSnapshot = snapshot;
     this.activeTaskListScope = "global";
     if (!command.target) {
-      this.globalTaskListPosition = { startIndex: pageStart, pageSize };
+      // 默认条数随运行中任务数增长：运行任务超过一页时自动放大到能一次看全，
+      // 并向上取整到 5 的倍数。用户显式指定条数时始终以用户为准。
+      const effectivePageSize = requestedPageSize ?? resolveDefaultGlobalTaskPageSize({
+        basePageSize: CODEX_TASK_LIST_PAGE_SIZE,
+        maxPageSize: CODEX_TASK_LIST_MAX_PAGE_SIZE,
+        runningCount: countRunningGlobalTasks(
+          this.globalTaskAdapterFilter
+            ? snapshot.candidates.filter((candidate) => candidate.adapter === this.globalTaskAdapterFilter)
+            : snapshot.candidates,
+        ),
+      });
+      this.globalTaskListPosition = { startIndex: pageStart, pageSize: effectivePageSize };
       this.globalTaskListHistory = command.taskListHistory ?? [];
       const activeSlot = this.getActiveSlot();
       if (activeSlot) {
         activeSlot.awaitingBareTaskSelection = paginateGlobalTaskSnapshot(snapshot, {
-          adapter: this.globalTaskAdapterFilter, startIndex: pageStart, pageSize,
+          adapter: this.globalTaskAdapterFilter, startIndex: pageStart, pageSize: effectivePageSize,
         }).candidates.length > 0;
       }
       await this.queueWechatTaskListMessage(
         message.senderId,
-        formatGlobalTaskList({ snapshot, adapter: this.globalTaskAdapterFilter, startIndex: pageStart, pageSize }),
+        formatGlobalTaskList({ snapshot, adapter: this.globalTaskAdapterFilter, startIndex: pageStart, pageSize: effectivePageSize }),
       );
       appendDaemonLog(
-        `wechat_global_task_list_processed: adapters=${[...new Set(snapshot.candidates.map((candidate) => candidate.adapter))].join(",") || "none"} candidates=${snapshot.candidates.length} page_start=${pageStart} page_size=${pageSize}`,
+        `wechat_global_task_list_processed: adapters=${[...new Set(snapshot.candidates.map((candidate) => candidate.adapter))].join(",") || "none"} candidates=${snapshot.candidates.length} page_start=${pageStart} page_size=${effectivePageSize}`,
       );
       return;
     }
@@ -8961,6 +9034,37 @@ export class WeRelayDaemon {
       taskTitle: remembered.candidate.title,
       url: this.codexMobileServer?.buildTaskUrl(threadId, slot.adapter),
     });
+  }
+
+  private formatNumberedDeliveryText(
+    delivery: { adapter?: string; threadId: string; title?: string },
+    text: string,
+  ): string {
+    if (!isDaemonAdapterKind(delivery.adapter ?? "codex")) return text;
+    const adapter = (delivery.adapter ?? "codex") as DaemonAdapterKind;
+    const match = /^\[([^\]\n]+)\]/.exec(text);
+    const oldParts = match?.[1]?.split(" · ") ?? [];
+    const adapterLabels = new Set([getBridgeProvider(adapter).label, formatDaemonAdapterLabel(adapter), adapter === "pi" ? "Pi" : ""]);
+    const numbered = /^任务 \d+$/.test(oldParts[0] ?? "");
+    const terminalPrefixed = adapterLabels.has(oldParts[0] ?? "");
+    const inferredTitle = oldParts.filter((part, index) => !(index === 0 && numbered) && !adapterLabels.has(part)).join(" · ");
+    const known = this.globalTaskListSnapshot?.candidates.find((candidate) =>
+      candidate.adapter === adapter && candidate.sessionId === delivery.threadId);
+    const legacyCodexHeading = adapter === "codex" && match && /^\s*(?:已完成|执行失败|已中断|最近完整回答)/.test(text.slice(match[0].length));
+    const title = known?.title || delivery.title?.trim() || (numbered || terminalPrefixed || legacyCodexHeading ? inferredTitle : "");
+    const remembered = this.rememberWechatCandidate({
+      adapter, sessionId: delivery.threadId, threadId: delivery.threadId, title,
+      lastUpdatedAt: known?.lastUpdatedAt ?? nowIso(),
+    }, false);
+    // Only replace a recognized routing heading, never arbitrary bracketed
+    // answer content. Preserve inline status text such as “已完成，用时…”.
+    const replace = match && (numbered || terminalPrefixed || match[1] === title || match[1] === delivery.title);
+    const suffix = replace ? text.slice(match[0].length) : "";
+    const inline = Boolean(replace && suffix && !/^\r?\n/.test(suffix));
+    const label = prefixDaemonTaskMessage(adapter, "", remembered.taskNumber, delivery.threadId,
+      remembered.candidate.title || `${formatDaemonAdapterLabel(adapter)} 任务`);
+    return replace ? `${label}${inline ? suffix : suffix.trim() ? `\n${suffix.trim()}` : ""}`
+      : text.trim() ? `${label}\n${text.trim()}` : label;
   }
 
   private rememberWechatTaskTarget(
@@ -9440,7 +9544,7 @@ export class WeRelayDaemon {
       key,
       (delivery) => this.queueWechatMessage(
         senderId,
-        delivery.text,
+        this.formatNumberedDeliveryText(delivery, delivery.text),
         "approval_required",
       ),
     );
@@ -9452,7 +9556,7 @@ export class WeRelayDaemon {
       return { status: "pending" as const };
     }
     const result = await this.approvalNotificationDeliveries.deliver(key,
-      (delivery) => this.queueWechatMessage(senderId, delivery.text, "approval_required"));
+      (delivery) => this.queueWechatMessage(senderId, this.formatNumberedDeliveryText(delivery, delivery.text), "approval_required"));
     if (result.status === "delivered") this.notificationPolicy.sent();
     return result;
   }
@@ -9517,7 +9621,7 @@ export class WeRelayDaemon {
       async (delivery, remainingTexts, checkpoint) => {
         let count = 0;
         for (const text of remainingTexts) {
-          if (!await this.queueWechatMessage(senderId, text, delivery.adapter ? "final_reply" : "mobile_link")) break;
+          if (!await this.queueWechatMessage(senderId, this.formatNumberedDeliveryText(delivery, text), delivery.adapter ? "final_reply" : "mobile_link")) break;
           checkpoint();
           count++;
         }
@@ -9601,40 +9705,146 @@ export class WeRelayDaemon {
     await this.retryPendingCodexCompletionNotifications(this.authorizedUserId);
   }
 
+  /**
+   * 用户回复“推送”后补发较早的完成通知。
+   *
+   * 补发同样受 1 小时丢弃规则约束：用户在询问后很久才回复“推送”时，中间
+   * 已经过期的通知会被丢掉，而不是借这次确认重新涌出。
+   */
+  private async handleClawbotBacklogPushRequest(
+    message: InboundWechatMessage,
+  ): Promise<void> {
+    const plan = planClawbotBacklogDelivery(
+      this.codexCompletionDeliveries.getPending(),
+      Date.now(),
+    );
+    if (plan.discard.length > 0) {
+      this.codexCompletionDeliveries.discard(
+        plan.discard.map((delivery) => delivery.key),
+      );
+    }
+    const target = [...plan.awaitingConfirmation, ...plan.autoPush];
+    if (target.length === 0) {
+      await this.queueWechatMessage(
+        message.senderId,
+        "没有需要补发的完成通知。",
+        "notice",
+      );
+      return;
+    }
+    // 确认后清空询问指纹，让后续新出现的积压可以重新询问。
+    this.clawbotBacklogConfirmSignature = undefined;
+    this.clawbotBacklogConfirmAtMs = undefined;
+    appendDaemonLog(
+      `codex_completion_push_confirmed: completions=${target.length} tasks=${new Set(target.map((delivery) => delivery.threadId)).size}`,
+    );
+    // 先发送、再确认：发送失败的通知必须留在队列里，不能因为用户点了
+    // “推送”就当作已送达而丢掉真实结果。
+    const sentKeys: string[] = [];
+    const mediaDeliveries: PendingCodexCompletionDelivery[] = [];
+    for (const delivery of target) {
+      if (this.shutdownPromise) break;
+      if ((delivery.images?.length ?? 0) > 0 || (delivery.attachments?.length ?? 0) > 0) {
+        mediaDeliveries.push(delivery);
+        continue;
+      }
+      const ok = await this.queueWechatMessage(
+        message.senderId,
+        delivery.texts.map((text) => this.formatNumberedDeliveryText(delivery, text)).join("\n\n"),
+        delivery.adapter ? "final_reply" : "mobile_link",
+      );
+      if (!ok) continue;
+      sentKeys.push(delivery.key);
+      this.clearCodexFinalReplyCache(delivery.threadId, delivery.turnId);
+    }
+    // 带图片/附件的通知用汇总形式补发，避免逐条搬运附件。
+    if (mediaDeliveries.length > 0) {
+      const ok = await this.queueWechatMessage(
+        message.senderId,
+        formatCodexCompletionBacklogSummary(mediaDeliveries, {
+          taskLabel: (delivery) => this.formatNumberedDeliveryText(delivery, delivery.texts[0] ?? "").split("\n")[0]!,
+        }),
+        "mobile_link",
+      );
+      if (ok) sentKeys.push(...mediaDeliveries.map((delivery) => delivery.key));
+    }
+    if (sentKeys.length > 0) {
+      this.codexCompletionDeliveries.acknowledge(sentKeys, { summarizedMedia: true });
+    }
+  }
+
+  /**
+   * 询问用户是否补发较早的完成通知。
+   *
+   * 同一个询问只发一次：记录已询问过的 key 集合，避免每 60 秒一轮的恢复
+   * 重复发同样的“有 N 条较早通知”提示。只有集合内容发生变化（出现新的
+   * 待确认通知）时才重新询问。
+   */
+  private async requestClawbotBacklogConfirmation(
+    senderId: string,
+    awaiting: PendingCodexCompletionDelivery[],
+  ): Promise<void> {
+    const keys = awaiting.map((delivery) => delivery.key);
+    const signature = [...keys].sort().join("\u0000");
+    if (this.clawbotBacklogConfirmSignature === signature) return;
+    if (this.shutdownPromise) return;
+    const sent = await this.queueWechatMessage(
+      senderId,
+      formatClawbotBacklogConfirmPrompt(awaiting, {
+        taskLabel: (delivery) => {
+          const firstLine = this.formatNumberedDeliveryText(delivery, delivery.texts[0] ?? "").split("\n")[0]!;
+          return /^\[[^\]\n]+\]/.exec(firstLine)?.[0] ?? firstLine;
+        },
+      }),
+      "notice",
+    );
+    if (!sent) {
+      appendDaemonLog(
+        `codex_completion_confirm_pending: completions=${awaiting.length} reason=wechat_unavailable`,
+      );
+      return;
+    }
+    this.clawbotBacklogConfirmSignature = signature;
+    this.clawbotBacklogConfirmAtMs = Date.now();
+    appendDaemonLog(
+      `codex_completion_confirm_asked: completions=${awaiting.length} tasks=${new Set(awaiting.map((delivery) => delivery.threadId)).size}`,
+    );
+  }
+
   private async retryPendingCodexCompletionNotifications(
     senderId: string,
   ): Promise<void> {
-    const backlog = this.notificationPolicy ? [] : selectCodexCompletionBacklogBatch(
-      this.codexCompletionDeliveries.getPending().filter((delivery) => !delivery.images?.length && !delivery.attachments?.length && !delivery.adapter),
-    );
-    if (backlog.length > 0) {
-      const summarySent = await this.queueWechatMessage(
-        senderId,
-        formatCodexCompletionBacklogSummary(backlog),
-        "mobile_link",
+    const pending = this.codexCompletionDeliveries.getPending();
+    if (pending.length === 0) return;
+    const plan = planClawbotBacklogDelivery(pending, Date.now());
+
+    // 超过 1 小时的积压直接丢弃：既不再补推，也不会在下一轮恢复里重新出现。
+    if (plan.discard.length > 0) {
+      const discarded = this.codexCompletionDeliveries.discard(
+        plan.discard.map((delivery) => delivery.key),
       );
-      if (!summarySent) {
+      if (discarded.length > 0) {
         appendDaemonLog(
-          `codex_completion_backlog_pending: completions=${backlog.length} reason=wechat_unavailable`,
+          `codex_completion_discarded: completions=${discarded.length} tasks=${new Set(discarded.map((delivery) => delivery.threadId)).size} max_age_ms=${CLAWBOT_BACKLOG_DISCARD_MS}`,
         );
-        return;
       }
-      const acknowledged = this.codexCompletionDeliveries.acknowledge(
-        backlog.map((delivery) => delivery.key),
-      );
-      for (const delivery of acknowledged) {
-        this.clearCodexFinalReplyCache(delivery.threadId, delivery.turnId);
-      }
-      appendDaemonLog(
-        `codex_completion_backlog_summarized: completions=${acknowledged.length} tasks=${new Set(acknowledged.map((delivery) => delivery.threadId)).size}`,
-      );
     }
+
+    // 较早的通知不再自动推，改成一条汇总询问；只有用户明确回复“推送”后
+    // 才会补发，避免用户下派新任务时被历史通知一次性轰炸。
+    if (plan.awaitingConfirmation.length > 0) {
+      await this.requestClawbotBacklogConfirmation(senderId, plan.awaitingConfirmation);
+    }
+
+    // 只有 3 分钟内完成的通知识才自动推送。
+    const autoPushKeys = new Set(plan.autoPush.map((delivery) => delivery.key));
 
     // Bound work between deliveries, without abandoning an in-flight send (which
     // could cause duplicate messages). Persistent leftovers survive the next pass.
     const deadline = Date.now() + 5_000;
     let attempted = 0;
-    const pendingDeliveries = this.codexCompletionDeliveries.getPending();
+    const pendingDeliveries = this.codexCompletionDeliveries.getPending()
+      .filter((delivery) => autoPushKeys.has(delivery.key));
     const nextIndex = pendingDeliveries.findIndex((item) => item.key === this.completionRecoveryCursor) + 1;
     const ordered = [...pendingDeliveries.slice(nextIndex), ...pendingDeliveries.slice(0, nextIndex)];
     for (const pending of ordered) {
@@ -9692,16 +9902,23 @@ export class WeRelayDaemon {
       const pending = await this.isApprovalNotificationStillPending(delivery);
       if (pending === false) { this.approvalNotificationDeliveries.cancel(delivery.key); continue; }
       if (pending === null) continue;
-      const heading = delivery.text.split("\n")[0]!.slice(0, 120);
+      const numberedText = this.formatNumberedDeliveryText(delivery, delivery.text);
+      const heading = numberedText.split("\n")[0]!.slice(0, 120);
       const url = delivery.text.split(/\r?\n/).find((line) => /^https?:\/\//.test(line.trim()));
       const block = url ? `${heading}\n待审批，请打开任务确认\n${url}`
-        : `${heading}\n待审批\n${delivery.text.slice(heading.length).trim().slice(0, 1_000)}`;
+        : `${heading}\n待审批\n${numberedText.slice(heading.length).trim().slice(0, 1_000)}`;
       if (add(block)) approvalKeys.push(delivery.key);
     }
+    // 汇总路径同样只覆盖 3 分钟内完成的通知识。屏幕解锁时的汇总如果也把
+    // 较早的积压塞进来，就等于绕过了“先询问再补发”的规则。
+    const digestPlan = planClawbotBacklogDelivery(
+      this.codexCompletionDeliveries.getPending(),
+      Date.now(),
+    );
+    const digestKeys = new Set(digestPlan.autoPush.map((delivery) => delivery.key));
     for (const delivery of this.codexCompletionDeliveries.getPending()) {
-      const firstLine = delivery.texts[0]?.split("\n")[0] ?? "";
-      const heading = firstLine.startsWith("[") ? firstLine.slice(0, 120)
-        : `[${formatDaemonAdapterLabel(isDaemonAdapterKind(delivery.adapter) ? delivery.adapter : "codex")} · ${delivery.title ?? "任务"}]`;
+      if (!digestKeys.has(delivery.key)) continue;
+      const heading = this.formatNumberedDeliveryText(delivery, delivery.texts[0] ?? "").split("\n")[0]!.slice(0, 120);
       const url = delivery.url ?? delivery.texts.flatMap((text) => text.split(/\r?\n/)).find((line) => /^https?:\/\//.test(line.trim()));
       if (!url && (delivery.images?.length || delivery.attachments?.length)) continue;
       const at = new Date(delivery.completedAt ?? delivery.createdAt).toLocaleString("zh-CN", {

@@ -154,6 +154,9 @@ Only one integration owner may control a candidate baseline at a time, and only 
 
 Chinese release notes are the user-facing source of truth. Write them in plain, non-technical Chinese: describe what users can now do, what visible problem was fixed, whether any action is required, and what limitations remain. Keep class names, fields, file paths, commit SHAs, test commands, and implementation details in the technical report or commit body, not in the public change record. Follow `docs/开发协作/多Agent协作规范.md`, `docs/发布/体验部署与正式发布.md`, `docs/发布/对外发布操作手册.md`, and `docs/发布/版本记录/中文版本说明模板.md`.
 
+## 仅 GitHub 发布边界
+用户明确要求“发布，不要部署”时，不安装、不重启、不修改公网服务、不推进活动运行基线；正式版本仍只能使用已体验验收的候选。未体验的新提交单独登记，不因发布授权自动上线。新版提醒只通知，不自动更新，旧运行端必须先安装提醒能力才会生效。
+
 ## Release Process
 - Development completion requires scoped validation, a local commit and registration of the full SHA as pending integration. It does not automatically authorize deployment or wake the release Agent. Only an explicit user request starts a batch deployment, owned by one integration Agent. Report committed-but-not-deployed work clearly; never claim deployment until the same candidate tarball is installed and verified. Documentation-only, test-description or CI-maintenance commits do not restart runtime services when packaged runtime behavior is unchanged.
 - Experience deployment is not a GitHub formal release. Use a traceable preview version such as `0.3.5-preview.20260826.1`, record the candidate SHA and tarball SHA-256, deploy the same tarball locally and to the public Relay, retain a rollback artifact, and start observation from the last successful deployment.
@@ -250,7 +253,7 @@ Prefer surgical fixes backed by focused tests. Avoid broad rewrites of adapter f
 - **给运行中的 LaunchAgent 部署本地 npm 格式安装包时必须安装 `npm pack` 产出的 tarball，不能直接 `npm install -g <仓库目录>`。** 直接安装目录会把全局包变成指向工作区的软链接，后续 `npm run build` 删除并重建 `dist/` 时就可能让正在运行的服务短暂失去入口；先卸载服务、打包并安装 tarball、再恢复服务和验活，才能让开发目录与线上运行副本保持隔离。
 - **网页审批结果必须按 Agent、任务和 turn 持久化并重新合并进消息流，不能在清空待审批卡片后只保留短暂 Toast。** 审批卡片消失并不代表用户不再需要确认自己的选择；记录允许、拒绝、任务级允许或免审结果，并在刷新后恢复到对应轮次附近，才能避免用户误以为操作未生效，也能防止结果串到其他任务。
 - **WeRelay 的敏感运行时写入必须统一经过私有目录与原子私有文件 helper，并在启动时递归修复旧数据权限。** 只在个别调用点传 `mode` 会遗漏已存在文件、原子临时文件和迁移复制内容；POSIX 上统一目录 `0700`、普通敏感文件 `0600`，并跳过符号链接，才能避免凭据、上下文令牌、日志和附件因 umask 或历史版本遗留而被同机其他用户读取。
-- **Codex 完成通知必须把待发送正文、分段进度和成功去重键持久化，发送前只能标记 in-flight，不能提前标记 delivered 或清理 final reply。** 微信 context token 可能在长任务结束时失效，且多段消息可能只成功一部分；只有全部文本送达后再清缓存，并从未送达分段继续补发，才能同时避免通知永久丢失和重复发送，daemon 重启后也能恢复。若恢复连接时有三条或更多完全未发送的完成通知，必须合并成一条按北京时间倒序排列的摘要，写清完成时间、任务名和网页版链接，摘要成功后再批量确认 delivered；否则一次用户输入会触发大量历史回答逐条轰炸。
+- **Codex 完成通知必须把待发送正文、分段进度和成功去重键持久化，发送前只能标记 in-flight，不能提前标记 delivered 或清理 final reply。** 微信 context token 可能在长任务结束时失效，且多段消息可能只成功一部分；只有全部文本送达后再清缓存，并从未送达分段继续补发，才能同时避免通知永久丢失和重复发送，daemon 重启后也能恢复。补发必须按完成时间分级：只有最近 3 分钟内完成的通知识才允许在 ClawBot 恢复后自动推送，3 分钟到 1 小时之间的合并成一条“回复推送补发”的询问、每个待确认集合只问一次，超过 1 小时直接从队列丢弃并留下未送达凭证。曾在恢复时把三条以上未发送通知合并成摘要后**无条件补发**，用户下派新任务时仍会被历史通知轰炸；分级策略把“能不能自动推”和“要不要补”分开，才真正解决积压刷屏。
 - **用某个 nvm 目录下的 `npm` 绝对路径执行安装时，仍必须把同目录的 Node 放到 `PATH` 最前面。** `npm` 的入口使用 `#!/usr/bin/env node`，只指定 `.../bin/npm` 仍可能由另一套 Node 运行并安装到错误的全局前缀；先固定 `PATH`、再核对 `npm prefix -g` 和最终命令解析，才能确保 LaunchAgent 使用的是真正验收过的副本。
 - **macOS 打包给 Linux 使用的公开快照时必须设置 `COPYFILE_DISABLE=1`。** 否则 BSD tar 会把扩展属性编码成 `._*` AppleDouble 文件，Linux 解包后这些文件会进入 Git 候选列表并触发隐私审计；禁用 copyfile 元数据并在服务器检查不存在 `._*`，才能保证上传内容和本机审计快照一致。
 - **Codex Desktop 的 follower 写请求必须同时匹配当前桌面应用的 IPC 方法版本和参数结构，不能只复用旧字段名。** ChatGPT Desktop 26.818.41509 已把 `thread-follower-start-turn` 升到 v2，并把正文与模型放到 `turnStart.request`；继续发送 v1 或旧 `turnStartParams` 会分别造成 Router 等到超时、或 Desktop 读取空请求报错。桌面应用更新后应先从当前 `app.asar` 的协议版本表和 owner handler 核对契约，再用会拒绝错误版本/结构的测试与真实 turnId 验收，才能避免 ClawBot/网页显示“未确认”却没有任何消息进入原任务。
