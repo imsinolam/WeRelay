@@ -1726,7 +1726,7 @@ describe("DeepSeek Desktop endpoint discovery", () => {
       readProcessList: () => `  4242 ${DESKTOP_MAIN}\n`,
       readListeners: () => "",
       readPortListeners: () =>
-        "DSH\\x20De 18738 xiaolonglin 30u IPv4 0x1 0t0 TCP 127.0.0.1:43120 (LISTEN)\n",
+        "DSH\\x20De 18738 tester 30u IPv4 0x1 0t0 TCP 127.0.0.1:43120 (LISTEN)\n",
     });
     expect(baseUrl).toBe("http://127.0.0.1:43120");
   });

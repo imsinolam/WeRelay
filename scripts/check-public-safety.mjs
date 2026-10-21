@@ -6,7 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 
-import { containsPersonalProductionDomain } from "./public-safety-rules.mjs";
+import { containsPersonalProductionDomain, isPrivateWebsitePath } from "./public-safety-rules.mjs";
 
 const root = process.cwd();
 const scanHistory = process.argv.includes("--history");
@@ -187,6 +187,9 @@ for (const relativePath of listCandidateFiles()) {
     stat = fs.statSync(absolutePath);
   } catch {
     continue;
+  }
+  if (isPrivateWebsitePath(relativePath)) {
+    findings.push(`${relativePath}: private website material must not enter the public snapshot`);
   }
   if (stat.isFile() && rasterImagePattern.test(relativePath)) {
     addReviewedRasterFinding(

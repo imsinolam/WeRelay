@@ -68,6 +68,17 @@ function listMarkdownFiles(directory: string): string[] {
 }
 
 describe("documentation structure", () => {
+  test("keeps private website materials out of the open-source tree and package", () => {
+    const metadata = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
+    expect(metadata.files).not.toContain("docs/官网素材/");
+    expect(fs.existsSync(path.join(root, "docs/官网素材"))).toBe(false);
+    expect(fs.existsSync(path.join(root, "scripts/generate-brand-logo.mjs"))).toBe(false);
+    expect(fs.existsSync(path.join(root, "src/daemon/codex-mobile-brand.ts"))).toBe(true);
+    const index = fs.readFileSync(path.join(root, "docs/README.md"), "utf8");
+    expect(index).toContain("官网源码、营销文案和演示素材在独立私有仓库维护");
+    expect(index).not.toContain("](官网素材/");
+  });
+
   test("uses the Chinese documentation hierarchy and exposes the Agent rules", () => {
     for (const filePath of requiredDocs) {
       expect(fs.existsSync(path.join(root, filePath))).toBe(true);

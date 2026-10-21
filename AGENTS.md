@@ -31,7 +31,7 @@ Runtime data lives under `~/.werelay` by default. WeRelay copy-migrates missing 
 - `bin/*.mjs`: packaged CLI wrappers. These are tracked source files, not generated output.
 - `scripts`: release, safety, snapshot, and packaging helpers, especially `check-public-safety.mjs`, `create-public-snapshot.mjs`, and `smoke-global-install.mjs`.
 - `test/<area>` mirrors the runtime areas: `bridge`, `companion`, `daemon`, and `wechat`.
-- `docs/README.md`: human-friendly documentation entrypoint. User, architecture, collaboration, release, and website documents live in Chinese-named subdirectories.
+- `docs/README.md`: human-friendly documentation entrypoint. User, architecture, collaboration, and release documents live in Chinese-named subdirectories. Website source and marketing drafts belong to a separate private repository; see `docs/开发协作/公开仓库与官网边界.md`.
 - `docs/发布/版本记录`: release notes and the release index. Chinese notes are primary; keep matching `-英文.md` notes aligned when preparing a release.
 
 ## Runtime State And Files

@@ -49,8 +49,12 @@ output/
 deploy/**/*.local.*
 
 # Local marketing drafts may contain unreviewed product screenshots.
-# Curate and privacy-review a final site before tracking it.
-website/
+# Website source and marketing materials belong to a separate private repository.
+/website/
+/docs/官网素材/
+/scripts/generate-brand-logo.mjs
+/WeRelay-website-private/
+/werelay-website-private/
 
 # Generated illustration sources and alternate exports. The reviewed public
 # assets are the privacy-reviewed README images.
