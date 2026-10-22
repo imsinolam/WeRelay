@@ -381,18 +381,22 @@ describe("daemon startup resilience", () => {
     expect(source.slice(mobileMethodStart, mobileMethodEnd)).not.toContain('!this.slots.has("codex")');
   });
 
-  test("only auto-pushes recent completions and asks before resending older ones", () => {
+  test("only auto-pushes recent completions; backlog reminders belong to successful lists", () => {
     const source = readRepoFile("src/daemon/werelay-daemon.ts");
     const retryStart = source.indexOf("  private async retryPendingCodexCompletionNotifications(");
     const retryEnd = source.indexOf("\n  private queueWechatMessage(", retryStart);
     const retryBlock = source.slice(retryStart, retryEnd);
 
-    // 时间窗口策略：3 分钟内自动推，更早的只发询问，超过 1 小时直接丢弃。
+    // 后台仅自动推 3 分钟内完成的，积压等待列表入口，超过 1 小时丢弃。
     expect(retryBlock).toContain("planClawbotBacklogDelivery");
-    expect(retryBlock).toContain("requestClawbotBacklogConfirmation");
+    expect(retryBlock).not.toContain("requestClawbotBacklogConfirmation");
+    expect(retryBlock).not.toContain("remindClawbotBacklogAfterTaskList");
+    const listStart = source.indexOf("  private async queueWechatTaskListMessage(");
+    const listEnd = source.indexOf("\n  private queueWechatMessages(", listStart);
+    expect(source.slice(listStart, listEnd)).toContain("await this.remindClawbotBacklogAfterTaskList(senderId)");
     expect(retryBlock).toContain("this.codexCompletionDeliveries.discard");
     expect(retryBlock).not.toContain("selectCodexCompletionBacklogBatch");
-    // 丢弃与询问都必须发生在逐条补发之前。
+    // 时间分组必须发生在逐条补发之前。
     expect(retryBlock.indexOf("planClawbotBacklogDelivery")).toBeLessThan(
       retryBlock.indexOf("for (const pending of ordered)"),
     );
@@ -3006,9 +3010,9 @@ describe("werelay-daemon helpers", () => {
       previousAdapter: "codex",
       error: new TypeError("fetch failed"),
     })).toBe(
-      "DSH Desktop 已打开，但本地接口没有响应，未完成切换。\n" +
+      "DeepSeek Harness 本机接口暂不可用，未完成切换。\n" +
       "仍使用 Codex。\n" +
-      "请在电脑上重启 DSH Desktop 后，再发送 /dsh。",
+      "请确认桌面端已就绪，稍后发送 /dsh 重试；无需另开 dsh web 或新任务。",
     );
 
     expect(formatSwitchedAdapterTaskListFailure({

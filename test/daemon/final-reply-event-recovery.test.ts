@@ -9,6 +9,8 @@ test("daemon persists a DeepSeek final event even when outbound send is rejected
   const targets: unknown[] = [];
   const daemon = Object.assign(Object.create(WeRelayDaemon.prototype), {
     authorizedUserId: "test-recipient", codexCompletionDeliveries: queue,
+    shouldPushCompletionForTask: async () => true,
+    slots: new Map(),
     mobileConversationRevisions: { touch() {} }, recordAdapterMessageActivity() {},
     getSlotThreadId: () => "session", prefixSlotMessage: (_slot: unknown, text: string) => text,
     collectFinalReplyImages: async () => [], queueWechatMessage: async () => false,
@@ -44,6 +46,7 @@ test("daemon persists a DeepSeek final event even when outbound send is rejected
    const pending = Array.from({ length: 20 }, (_, i) => ({ key: String(i), adapter: "deepseek", threadId: String(i), createdAt: now, completedAt: now }));
    const daemon = Object.assign(Object.create(WeRelayDaemon.prototype), {
      codexCompletionDeliveries: { getPending: () => pending },
+     shouldPushCompletionForTask: async () => true,
      stateStore: { setLatestWechatTaskTarget() {} },
      deliverCodexCompletionNotification: async (key: string) => {
        delivered.push(key);
@@ -61,6 +64,7 @@ test("daemon persists a DeepSeek final event even when outbound send is rejected
    const pending = Array.from({ length: 8 }, (_, i) => ({ key: String(i), adapter: "deepseek", threadId: String(i), createdAt: now, completedAt: now }));
    const daemon = Object.assign(Object.create(WeRelayDaemon.prototype), {
      codexCompletionDeliveries: { getPending: () => pending },
+     shouldPushCompletionForTask: async () => true,
      deliverCodexCompletionNotification: async (key: string) => {
        attempted.push(key);
        return { status: "pending" };
@@ -75,12 +79,13 @@ test("daemon persists a DeepSeek final event even when outbound send is rejected
 
 /**
  * 用户反馈的真实场景：ClawBot 积压太多，下派新任务时历史通知一起涌出。
- * 现在只自动推送 3 分钟内完成的，更早的合并成一次询问，超过 1 小时直接丢弃。
+ * 现在只自动推送 3 分钟内完成的，更早的仅在获取任务列表后询问，超过 1 小时直接丢弃。
  */
 function buildBacklogDaemon(queue: CodexCompletionDeliveryQueue, sent: string[]) {
   return Object.assign(Object.create(WeRelayDaemon.prototype), {
     authorizedUserId: "test-recipient",
     codexCompletionDeliveries: queue,
+    shouldPushCompletionForTask: async () => true,
     notificationPolicy: { sent() {} },
     stateStore: { setLatestWechatTaskTarget() {} },
     slots: new Map(),
@@ -119,14 +124,16 @@ test("a new ClawBot message only auto-pushes completions from the last three min
   // 只有 3 分钟内的正文被推送。
   expect(sent.some((text) => text.includes("刚完成的"))).toBe(true);
   expect(sent.some((text) => text.includes("十分钟前") && text.includes("已完成，用时"))).toBe(false);
-  // 较早的只发一条询问，保留在队列里等确认。
+  // 普通入站恢复不提醒积压；只在用户主动获取列表后提醒。
+  expect(sent.some((text) => text.includes("较早的完成通知"))).toBe(false);
+  await daemon.remindClawbotBacklogAfterTaskList("test-recipient");
   expect(sent.some((text) => text.includes("还有 1 条较早的完成通知"))).toBe(true);
   expect(queue.getPending().map((item) => item.key)).toEqual(["k2"]);
   // 超过 1 小时直接丢弃，并留下未送达凭证。
   expect(queue.snapshot().undelivered?.map((item) => item.key)).toEqual(["k3"]);
 });
 
-test("the backlog prompt is asked once, not on every recovery pass", async () => {
+test("the backlog prompt is asked after a list, not on every recovery pass", async () => {
   const queue = new CodexCompletionDeliveryQueue();
   const now = Date.now();
   queue.enqueue({
@@ -138,8 +145,10 @@ test("the backlog prompt is asked once, not on every recovery pass", async () =>
   const sent: string[] = [];
   const daemon = buildBacklogDaemon(queue, sent);
   await daemon.retryPendingCodexCompletionNotifications("test-recipient");
+  expect(sent).toEqual([]);
+  await daemon.remindClawbotBacklogAfterTaskList("test-recipient");
   await daemon.retryPendingCodexCompletionNotifications("test-recipient");
-  await daemon.retryPendingCodexCompletionNotifications("test-recipient");
+  await daemon.remindClawbotBacklogAfterTaskList("test-recipient");
 
   expect(sent.filter((text) => text.includes("还有 1 条较早的完成通知"))).toHaveLength(1);
 });

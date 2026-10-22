@@ -1695,6 +1695,65 @@ describe("DeepSeek Desktop endpoint discovery", () => {
   const DESKTOP_HELPER =
     "/Applications/DSH Desktop.app/Contents/Frameworks/DSH Desktop Helper.app/Contents/MacOS/DSH Desktop Helper --type=utility";
 
+  test("new Harness host wins over an idle installed legacy Desktop and excludes its inspector port", () => {
+    const baseUrl = discoverDeepSeekDesktopHarnessBaseUrl({
+      platform: "darwin",
+      readProcessList: () => `10 ${DESKTOP_MAIN}\n20 /Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness\n` +
+        "21 /Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness --expose-internals /Applications/DeepSeek Harness.app/Contents/Resources/app.asar/dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/index.js /runtime\n",
+      readListeners: (pid) => pid === 21 ? "p21\nn127.0.0.1:9230\nn127.0.0.1:62301\n"
+        : pid === 10 ? "p10\nn127.0.0.1:43120\n" : "",
+      readPortListeners: () => "",
+    });
+    expect(baseUrl).toBe("http://127.0.0.1:62301");
+  });
+
+  test("ignores renderer/debug listeners and a command merely mentioning the new app", () => {
+    expect(discoverDeepSeekDesktopHarnessBaseUrl({
+      platform: "darwin",
+      readProcessList: () => "21 /Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness --expose-internals /Applications/DeepSeek Harness.app/Contents/Resources/app.asar/dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/index.js\n" +
+        "22 /Applications/DeepSeek Harness.app/Contents/Frameworks/DeepSeek Harness Helper (Renderer).app/Contents/MacOS/DeepSeek Harness Helper (Renderer)\n" +
+        "23 /usr/bin/echo /Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness\n",
+      readListeners: (pid) => pid === 21 ? "p21\nn127.0.0.1:9230\n" : "p22\nn127.0.0.1:64000\n",
+      readPortListeners: () => "",
+    })).toBeNull();
+  });
+
+  test("new Harness discovery never accepts a public listening interface", () => {
+    expect(discoverDeepSeekDesktopHarnessBaseUrl({
+      platform: "darwin",
+      readProcessList: () => "21 /Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness --expose-internals /Applications/DeepSeek Harness.app/Contents/Resources/app.asar/dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/index.js\n",
+      readListeners: () => "p21\nn*:62301\nn0.0.0.0:62301\nn127.0.0.1:9230\n",
+      readPortListeners: () => "",
+    })).toBeNull();
+  });
+
+  test("new Harness supports IPv6-only loopback and excludes an explicitly configured inspector", () => {
+    const host = "/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness --expose-internals /Applications/DeepSeek Harness.app/Contents/Resources/app.asar/dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/index.js";
+    expect(discoverDeepSeekDesktopHarnessBaseUrl({
+      platform: "darwin",
+      readProcessList: () => `21 ${host} --inspect=127.0.0.1:64000`,
+      readListeners: () => "p21\nn127.0.0.1:64000\nn[::1]:62301\n",
+      readPortListeners: () => "",
+    })).toBe("http://[::1]:62301");
+  });
+
+  test("a starting or ambiguous new Desktop never falls back to the old owner's port", () => {
+    const main = "/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness";
+    for (const hostReady of [false, true]) {
+      const discovery = {
+        platform: "darwin" as const,
+        readProcessList: () => `10 ${DESKTOP_MAIN}\n20 ${main}\n` + (hostReady
+          ? `21 ${main} --expose-internals /Applications/DeepSeek Harness.app/Contents/Resources/app.asar/dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/index.js\n`
+          : ""),
+        readListeners: (pid: number) => pid === 10 ? "p10\nn127.0.0.1:43120\n"
+          : "p21\nn127.0.0.1:62000\nn127.0.0.1:62001\n",
+        readPortListeners: () => "",
+        appInstalled: () => true,
+      };
+      expect(() => resolveDeepSeekHarnessBaseUrl(undefined, discovery)).toThrow("本机接口尚未就绪或无法唯一确定");
+    }
+  });
+
   test("finds the web port when the Helper child owns the listener", () => {
     // DSH Desktop 2.0.9 serves its loopback API from a Helper child process,
     // so the parent PID owns no TCP socket at all.

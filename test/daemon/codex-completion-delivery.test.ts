@@ -510,3 +510,38 @@ describe("Codex completion delivery expiry window", () => {
     expect(expiredBatches).toEqual([]);
   });
 });
+
+test("backlog reminder receipt is persisted once without consuming the pending result", async () => {
+  const snapshots: CodexCompletionDeliveryState[] = [];
+  const queue = buildQueue(undefined, snapshots);
+  queue.enqueue({ key: "pending", threadId: "t", texts: ["answer", "link"] });
+  const before = snapshots.length;
+  queue.markBacklogNotified(["pending", "missing"]);
+  expect(snapshots.length).toBe(before + 1);
+  const pending = snapshots.at(-1)!.pending[0]!;
+  expect(pending.backlogNotifiedAt).toBe("2026-08-08T12:00:00.000Z");
+  expect(pending.nextTextIndex).toBe(0);
+  expect(pending.texts).toEqual(["answer", "link"]);
+  expect(queue.hasDelivered("pending")).toBe(false);
+  queue.markBacklogNotified(["pending"]);
+  expect(snapshots.length).toBe(before + 1);
+  const restored = buildQueue(snapshots.at(-1));
+  expect(restored.getPending()[0]?.backlogNotifiedAt).toBe(pending.backlogNotifiedAt);
+  await restored.deliver("pending", async (_delivery, texts) => texts.length);
+  expect(restored.getPending()).toEqual([]);
+  expect(restored.snapshot().delivered[0]).not.toHaveProperty("backlogNotifiedAt");
+});
+
+test("invalid backlog reminder timestamps are ignored on restore", () => {
+  const initial = buildQueue();
+  initial.enqueue({ key: "pending", threadId: "t", texts: ["answer"] });
+  const state = initial.snapshot();
+  state.pending[0]!.backlogNotifiedAt = "invalid";
+  const restored = buildQueue(state);
+  expect(restored.getPending()[0]?.backlogNotifiedAt).toBeUndefined();
+  restored.markBacklogNotified(["pending"]);
+  expect(restored.getPending()[0]?.backlogNotifiedAt).toBe("2026-08-08T12:00:00.000Z");
+  restored.discard(["pending"]);
+  expect(restored.snapshot().pending).toEqual([]);
+  expect(restored.snapshot().undelivered?.[0]).not.toHaveProperty("backlogNotifiedAt");
+});

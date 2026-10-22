@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 import { reconcilePendingUserInputs } from "../bridge/pending-user-input.ts";
 import { splitTaskListMessages } from "../bridge/task-list-instructions.ts";
 import { sendWechatTextBatch } from "../wechat/wechat-text-batch.ts";
+import { classifyDeepSeekDesktopProcess } from "../bridge/deepseek-desktop-process.ts";
 import {
   resolveDefaultAdapterCommand,
 } from "../bridge/bridge-adapters.ts";
@@ -1814,7 +1815,7 @@ export function detectOpenMobileAdaptersFromProcessList(
     if (/(?:^|[\s/\\])dsh(?:\.exe)?\s+web(?:\s|$)/i.test(line) || /--adapter\s+deepseek(?:\s|$)/i.test(line)) {
       open.add("deepseek");
     }
-    if (/\/Applications\/DSH Desktop\.app\/Contents\/MacOS\/DSH Desktop(?:\s|$)/i.test(line)) {
+    if (classifyDeepSeekDesktopProcess(line.replace(/^\d+\s+/, ""))) {
       open.add("deepseek");
     }
     if (processLineHasCommand(line, "opencode") || /--adapter\s+opencode(?:\s|$)/i.test(line)) {
@@ -1864,9 +1865,9 @@ export function formatSwitchedAdapterTaskListFailure(params: {
   if (params.adapter === "deepseek" &&
       /fetch failed|timed?\s*out|timeout|ETIMEDOUT|ECONNREFUSED|socket hang up/i.test(raw)) {
     return [
-      "DSH Desktop 已打开，但本地接口没有响应，未完成切换。",
+      "DeepSeek Harness 本机接口暂不可用，未完成切换。",
       fallback,
-      "请在电脑上重启 DSH Desktop 后，再发送 /dsh。",
+      "请确认桌面端已就绪，稍后发送 /dsh 重试；无需另开 dsh web 或新任务。",
     ].join("\n");
   }
   return [
@@ -3158,10 +3159,8 @@ export class WeRelayDaemon {
   private readonly codexCompletionDeliveries: CodexCompletionDeliveryQueue;
   private readonly approvalNotificationDeliveries: ApprovalNotificationDeliveryQueue;
   private completionRecoveryCursor?: string;
-  // 上一次“要不要补发较早通知”的询问指纹和发送时间。指纹没变就不再重复询问，
-  // 避免 60 秒一轮的恢复把同一句提示反复发进微信。
-  private clawbotBacklogConfirmSignature?: string;
-  private clawbotBacklogConfirmAtMs?: number;
+  // 列表后的积压提醒单飞；已提醒状态保存在各条 pending 记录中以跨重启去重。
+  private clawbotBacklogReminderInFlight?: Promise<void>;
   private readonly livenessMonitor = new DaemonLivenessMonitor((lagMs) => {
     appendDaemonLog(`daemon_event_loop_lag: lag_ms=${lagMs}`);
   });
@@ -9732,9 +9731,6 @@ export class WeRelayDaemon {
       );
       return;
     }
-    // 确认后清空询问指纹，让后续新出现的积压可以重新询问。
-    this.clawbotBacklogConfirmSignature = undefined;
-    this.clawbotBacklogConfirmAtMs = undefined;
     appendDaemonLog(
       `codex_completion_push_confirmed: completions=${target.length} tasks=${new Set(target.map((delivery) => delivery.threadId)).size}`,
     );
@@ -9776,21 +9772,20 @@ export class WeRelayDaemon {
   /**
    * 询问用户是否补发较早的完成通知。
    *
-   * 同一个询问只发一次：记录已询问过的 key 集合，避免每 60 秒一轮的恢复
-   * 重复发同样的“有 N 条较早通知”提示。只有集合内容发生变化（出现新的
-   * 待确认通知）时才重新询问。
+   * 只在用户主动获取任务列表且列表成功送达后调用。按每条积压记录保存
+   * 成功提醒状态，数量变化、到期和 daemon 重启都不能再次提醒旧消息。
    */
   private async requestClawbotBacklogConfirmation(
     senderId: string,
     awaiting: PendingCodexCompletionDelivery[],
   ): Promise<void> {
-    const keys = awaiting.map((delivery) => delivery.key);
-    const signature = [...keys].sort().join("\u0000");
-    if (this.clawbotBacklogConfirmSignature === signature) return;
+    const unannounced = awaiting.filter((delivery) => !delivery.backlogNotifiedAt);
+    if (unannounced.length === 0) return;
+    const keys = unannounced.map((delivery) => delivery.key);
     if (this.shutdownPromise) return;
     const sent = await this.queueWechatMessage(
       senderId,
-      formatClawbotBacklogConfirmPrompt(awaiting, {
+      formatClawbotBacklogConfirmPrompt(unannounced, {
         taskLabel: (delivery) => {
           const firstLine = this.formatNumberedDeliveryText(delivery, delivery.texts[0] ?? "").split("\n")[0]!;
           return /^\[[^\]\n]+\]/.exec(firstLine)?.[0] ?? firstLine;
@@ -9800,15 +9795,33 @@ export class WeRelayDaemon {
     );
     if (!sent) {
       appendDaemonLog(
-        `codex_completion_confirm_pending: completions=${awaiting.length} reason=wechat_unavailable`,
+        `codex_completion_confirm_pending: completions=${unannounced.length} reason=wechat_unavailable`,
       );
       return;
     }
-    this.clawbotBacklogConfirmSignature = signature;
-    this.clawbotBacklogConfirmAtMs = Date.now();
+    this.codexCompletionDeliveries.markBacklogNotified(keys);
     appendDaemonLog(
-      `codex_completion_confirm_asked: completions=${awaiting.length} tasks=${new Set(awaiting.map((delivery) => delivery.threadId)).size}`,
+      `codex_completion_confirm_asked: completions=${unannounced.length} tasks=${new Set(unannounced.map((delivery) => delivery.threadId)).size} trigger=task_list`,
     );
+  }
+
+  private async remindClawbotBacklogAfterTaskList(senderId: string): Promise<void> {
+    if (this.clawbotBacklogReminderInFlight) return this.clawbotBacklogReminderInFlight;
+    const task = (async () => {
+      const plan = planClawbotBacklogDelivery(await this.pendingBacklogCompletions(), Date.now());
+      await this.requestClawbotBacklogConfirmation(senderId, plan.awaitingConfirmation);
+    })().catch((error: unknown) => {
+      // The requested list has already arrived. A failed optional reminder
+      // must not turn it into a failed terminal switch or list retry.
+      appendDaemonLog(`codex_completion_list_reminder_error: error=${truncatePreview(error instanceof Error ? error.message : String(error), 200)}`);
+    });
+    this.clawbotBacklogReminderInFlight = task;
+    try { await task; }
+    finally { if (this.clawbotBacklogReminderInFlight === task) this.clawbotBacklogReminderInFlight = undefined; }
+  }
+
+  private async pendingBacklogCompletions(): Promise<PendingCodexCompletionDelivery[]> {
+    return this.codexCompletionDeliveries.getPending();
   }
 
   private async retryPendingCodexCompletionNotifications(
@@ -9830,11 +9843,8 @@ export class WeRelayDaemon {
       }
     }
 
-    // 较早的通知不再自动推，改成一条汇总询问；只有用户明确回复“推送”后
-    // 才会补发，避免用户下派新任务时被历史通知一次性轰炸。
-    if (plan.awaitingConfirmation.length > 0) {
-      await this.requestClawbotBacklogConfirmation(senderId, plan.awaitingConfirmation);
-    }
+    // 较早的通知静默等待用户：提醒仅挂在成功的任务列表之后，不能由后台
+    // 恢复、token 刷新、数量减少或过期清理触发。
 
     // 只有 3 分钟内完成的通知识才自动推送。
     const autoPushKeys = new Set(plan.autoPush.map((delivery) => delivery.key));
@@ -9981,6 +9991,9 @@ export class WeRelayDaemon {
     const parts = splitTaskListMessages(text).flatMap((part) => splitWechatTextIntoChunks(part));
     const sentCount = await this.queueWechatMessages(senderId, parts);
     appendDaemonLog(`wechat_task_list_delivery: sent=${sentCount} total=${parts.length} complete=${sentCount === parts.length}`);
+    if (sentCount === parts.length && parts.length > 0) {
+      await this.remindClawbotBacklogAfterTaskList(senderId);
+    }
     return sentCount;
   }
 

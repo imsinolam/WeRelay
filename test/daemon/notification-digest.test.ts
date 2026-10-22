@@ -17,6 +17,7 @@ test("unlocked combines cross-agent completions and live approvals; failure and 
     notificationPolicy: new ScreenNotificationPolicy({ now: () => now, read: async () => locked ? "locked" : "unlocked", persist: (at) => { persisted = at; } }),
     queueWechatMessage: async (_id: string, text: string) => { texts.push(text); return successful; },
     isApprovalNotificationStillPending: async () => true,
+    shouldPushCompletionForTask: async () => true,
     clearCodexFinalReplyCache() {}, slots: new Map(),
     stateStore: { setLatestWechatTaskTarget() {} },
   });
@@ -48,6 +49,7 @@ test("locked delivers backlog separately; pending media remains durable when a d
     authorizedUserId: "test", notificationPolicy: new ScreenNotificationPolicy({ read: async () => "locked" }),
     codexCompletionDeliveries: queue, approvalNotificationDeliveries: new ApprovalNotificationDeliveryQueue(),
     queueWechatMessage: async (_id: string, text: string) => { sent.push(text); return true; },
+    shouldPushCompletionForTask: async () => true,
     clearCodexFinalReplyCache() {}, slots: new Map(),
     stateStore: { setLatestWechatTaskTarget() {} },
     persistCodexWechatThreadId() {},
@@ -96,12 +98,13 @@ test("the unlocked digest never sweeps in older backlog that still needs confirm
     notificationPolicy: new ScreenNotificationPolicy({ now: () => now, read: async () => "unlocked" }),
     queueWechatMessage: async (_id: string, text: string) => { texts.push(text); return true; },
     isApprovalNotificationStillPending: async () => true,
+    shouldPushCompletionForTask: async () => true,
     clearCodexFinalReplyCache() {}, rememberWechatCandidate() {}, slots: new Map(),
   });
 
   await daemon.runOutboundRecoveryPass();
 
   // 较早的通知必须走“先询问”，不能被解锁摘要直接推出去。
-  expect(texts.every((text) => !text.includes("二十分钟前的任务") || text.includes("较早的完成通知"))).toBe(true);
+  expect(texts).toEqual([]);
   expect(completions.getPending().map((item) => item.key)).toEqual(["old"]);
 });

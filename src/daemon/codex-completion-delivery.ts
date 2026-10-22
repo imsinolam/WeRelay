@@ -21,6 +21,8 @@ export type PendingCodexCompletionDelivery = {
   turnId?: string;
   title?: string;
   completedAt?: string;
+  /** Successful list-attached reminder, not delivery of the actual result. */
+  backlogNotifiedAt?: string;
   url?: string;
   outcome?: "completed" | "failed" | "interrupted";
   texts: string[];
@@ -146,6 +148,9 @@ function normalizePending(
       : {}),
     ...(normalizeTimestamp(record.completedAt)
       ? { completedAt: normalizeTimestamp(record.completedAt) as string }
+      : {}),
+    ...(normalizeTimestamp(record.backlogNotifiedAt)
+      ? { backlogNotifiedAt: normalizeTimestamp(record.backlogNotifiedAt)! }
       : {}),
     ...(typeof record.url === "string" && record.url.trim()
       ? { url: record.url.trim() }
@@ -461,6 +466,17 @@ export class CodexCompletionDeliveryQueue {
       this.persistState();
     }
     return [...this.pending.values()].map(clonePending);
+  }
+
+  markBacklogNotified(keys: readonly string[]): void {
+    let changed = false;
+    for (const key of keys) {
+      const item = this.pending.get(key);
+      if (!item || item.backlogNotifiedAt) continue;
+      item.backlogNotifiedAt = new Date(this.now()).toISOString();
+      changed = true;
+    }
+    if (changed) this.persistState();
   }
 
   hasDelivered(key: string): boolean {

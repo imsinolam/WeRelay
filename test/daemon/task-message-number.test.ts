@@ -22,6 +22,7 @@ function fixture() {
     stateStore: { setLatestWechatTaskTarget() {} }, clearCodexFinalReplyCache() {},
     queueWechatMessage: async (_id: string, text: string) => { sent.push(text); return true; },
     isApprovalNotificationStillPending: async () => true,
+    shouldPushCompletionForTask: async () => true,
   });
   return { daemon, sent, completions, approvals };
 }
@@ -86,7 +87,7 @@ test("legacy approval delivery uses current number and leaves answer brackets in
 test("confirmed older backlog preserves real task numbers in both prompt and delivery", async () => {
   const { daemon, completions, sent } = fixture();
   for (let i = 0; i < 3; i++) completions.enqueue({ key: String(i), threadId: `task-${i}`, title: `Task ${i}`, texts: ["done"], url: `https://example.test/${i}`, completedAt: new Date(Date.now() - 10 * 60_000).toISOString() });
-  await daemon.retryPendingCodexCompletionNotifications("test");
+  await daemon.remindClawbotBacklogAfterTaskList("test");
   expect(sent).toHaveLength(1);
   expect(sent[0]).toContain("回复“推送”");
   expect(completions.getPending()).toHaveLength(3);

@@ -25,6 +25,7 @@ import type { AdapterOptions, EventSink } from "./bridge-adapters.shared.ts";
 import { nowIso, truncatePreview } from "./bridge-utils.ts";
 import { DeepSeekHarnessRemoteMux } from "./deepseek-harness-remote.ts";
 import { recoverDeepSeekDesktopHarnessAccess } from "./deepseek-desktop-lifecycle.ts";
+import { classifyDeepSeekDesktopProcess, DEEPSEEK_HARNESS_APP_PATH } from "./deepseek-desktop-process.ts";
 import {
   classifyDeepSeekHarnessProbe,
   deepSeekHarnessEndpoint,
@@ -477,19 +478,38 @@ export function discoverDeepSeekDesktopHarnessBaseUrl(
   // DSH Desktop 2.0.9 serves its loopback API from a Helper child process, so
   // discovery must accept both the main executable and its Helper, and read
   // listeners by port rather than assuming the parent owns the socket.
-  const desktopPids = processList.split(/\r?\n/).flatMap((line) => {
+  const desktopProcesses = processList.split(/\r?\n/).flatMap((line) => {
     const match = line.match(/^\s*(\d+)\s+(.+)$/);
     if (!match?.[1] || !match[2]) return [];
     const command = match[2].trim();
-    const isDesktop = command ===
-      "/Applications/DSH Desktop.app/Contents/MacOS/DSH Desktop" ||
-      command.startsWith(
-        "/Applications/DSH Desktop.app/Contents/Frameworks/DSH Desktop Helper.app/Contents/MacOS/",
-      );
-    return isDesktop ? [Number(match[1])] : [];
-  }).filter((pid) => Number.isSafeInteger(pid) && pid > 0);
+    const kind = classifyDeepSeekDesktopProcess(command);
+    return kind ? [{ pid: Number(match[1]), kind, command }] : [];
+  }).filter(({ pid }) => Number.isSafeInteger(pid) && pid > 0);
   const readListeners = discovery.readListeners ?? readDeepSeekDesktopListeners;
   const readPortListeners = discovery.readPortListeners ?? readDeepSeekDesktopPortListeners;
+  // New Harness Desktop owns an ephemeral web port in its bundled Host process.
+  // Its main/renderer processes and Node inspector (9230) are not API owners.
+  // Prefer that exact Host over an installed/running but obsolete Desktop.
+  const harnessPorts = new Map<number, string>();
+  for (const item of desktopProcesses.filter((entry) => entry.kind === "host")) {
+    const inspectorPorts = new Set([9229, 9230]);
+    for (const match of item.command.matchAll(/--inspect(?:-brk|-port)?=(?:[^\s:]+:)?(\d+)(?:\s|$)/g)) {
+      inspectorPorts.add(Number(match[1]));
+    }
+    for (const line of readListeners(item.pid).split(/\r?\n/)) {
+      const match = line.match(/^n(127(?:\.\d{1,3}){3}|\[?::1\]?):([1-9]\d{0,4})$/u);
+      const port = Number(match?.[2] ?? 0);
+      if (match && port > 0 && port <= 65_535 && !inspectorPorts.has(port) && !harnessPorts.has(port)) {
+        const host = match[1]!.includes(":") ? "[::1]" : match[1]!;
+        harnessPorts.set(port, `http://${host}:${port}`);
+      }
+    }
+  }
+  if (harnessPorts.size === 1) return [...harnessPorts.values()][0]!;
+  // Ambiguous or not-yet-ready new Host must not silently redirect to a legacy
+  // application's unrelated owner (nor to a renderer/debugging interface).
+  if (desktopProcesses.some((item) => item.kind === "host" || item.kind === "main")) return null;
+  const desktopPids = desktopProcesses.filter((entry) => entry.kind === "legacy").map((entry) => entry.pid);
   const ownedPorts: number[] = [];
   for (const pid of desktopPids) {
     const listenerOutput = readListeners(pid);
@@ -542,11 +562,9 @@ export function discoverDeepSeekDesktopHarnessBaseUrl(
  * Resolve the Harness endpoint.
  *
  * DSH Desktop and the `dsh web` CLI are different products on different
- * ports: the Desktop serves 43120 and the CLI serves 3080. Discovery finds the
- * Desktop; the documented default only fits the CLI. When the Desktop app is
- * installed but its port cannot be discovered yet (it may still be starting),
- * prefer the Desktop port over the CLI default so the client does not bind a
- * port that nothing is serving.
+ * ports: legacy Desktop serves 43120, new Desktop uses a dynamic Host port,
+ * and the CLI serves 3080. Never redirect a detected new Desktop to another
+ * owner when its Host is not ready or has ambiguous listeners.
  */
 export function resolveDeepSeekHarnessBaseUrl(
   value = process.env[DEEPSEEK_HARNESS_URL_ENV],
@@ -555,8 +573,17 @@ export function resolveDeepSeekHarnessBaseUrl(
   if (value?.trim()) {
     return normalizeDeepSeekHarnessBaseUrl(value);
   }
-  const discovered = discoverDeepSeekDesktopHarnessBaseUrl(discovery);
+  const processList = (discovery.platform ?? process.platform) === "darwin"
+    ? (discovery.readProcessList ?? readDeepSeekDesktopProcessList)()
+    : "";
+  const discovered = discoverDeepSeekDesktopHarnessBaseUrl({ ...discovery, readProcessList: () => processList });
   if (discovered) return discovered;
+  if (processList.split(/\r?\n/u).some((line) => {
+    const kind = classifyDeepSeekDesktopProcess(line.replace(/^\s*\d+\s+/u, ""));
+    return kind === "main" || kind === "host";
+  })) {
+    throw new Error("DeepSeek Harness 本机接口尚未就绪或无法唯一确定，请稍后重试；未连接其他任务 owner。");
+  }
   return (discovery.appInstalled ?? deepSeekDesktopAppInstalled)()
     ? `http://127.0.0.1:${DESKTOP_DEFAULT_WEB_PORT}`
     : DEFAULT_DEEPSEEK_HARNESS_URL;
@@ -566,7 +593,7 @@ export function resolveDeepSeekHarnessBaseUrl(
 function deepSeekDesktopAppInstalled(): boolean {
   if (process.platform !== "darwin") return false;
   try {
-    return fs.existsSync(DESKTOP_APP_PATH);
+    return fs.existsSync(DESKTOP_APP_PATH) || fs.existsSync(DEEPSEEK_HARNESS_APP_PATH);
   } catch {
     return false;
   }

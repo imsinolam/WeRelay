@@ -84,12 +84,12 @@ curl -fsS http://127.0.0.1:4396/health
 | reasonix | `reasonix` | 按供应方方式安装并完成登录 | `werelay --adapter reasonix` |
 | Pi Agent | `pi` | 安装并在本机配置模型 | `werelay --adapter pi` |
 | WorkBuddy Desktop | `/Applications/WorkBuddy.app` | macOS 安装应用并至少创建一个任务 | `werelay --adapter workbuddy` |
-| DeepSeek Harness | `dsh web` | 配置模型后保持 Harness 网页进程运行 | `werelay --adapter deepseek` |
+| DeepSeek Harness | 桌面端，或 `dsh web` | 保持正在使用的桌面端或网页 owner 运行 | `werelay --adapter deepseek` |
 | OpenCode | `opencode` | 安装后运行 `opencode` 完成模型配置 | `werelay --adapter opencode` |
 
 TClaude、Grok CLI、CodeBuddy、reasonix、WorkBuddy 和 DeepSeek Harness 可能来自组织内部或供应商渠道。WeRelay 不提供这些工具的安装包，也不应在公开文档中猜测其安装命令；请使用工具自身的官方或组织内说明。
 
-“可以列出任务”不自动等于“电脑端实时同步”。Codex 与 WorkBuddy 使用桌面原生 owner；DeepSeek Harness 复用当前 `dsh web` owner；Claude Code、TClaude 使用 WeRelay 连接的可见 CLI owner；OpenCode、Grok、CodeBuddy 与 reasonix 使用电脑界面和远程入口共用的共享服务 owner。完整边界见 [README 的会话一致性矩阵](../../README.md#支持的-agent-与会话一致性)。
+“可以列出任务”不自动等于“电脑端实时同步”。Codex 与 WorkBuddy 使用桌面原生 owner；DeepSeek Harness 复用正在使用的桌面端或显式指定的 `dsh web` owner；Claude Code、TClaude 使用 WeRelay 连接的可见 CLI owner；OpenCode、Grok、CodeBuddy 与 reasonix 使用电脑界面和远程入口共用的共享服务 owner。完整边界见 [README 的会话一致性矩阵](../../README.md#支持的-agent-与会话一致性)。
 
 ## 三、各 Agent 的安装与启动
 
@@ -305,14 +305,20 @@ Pi Desktop 自建的独立桌面会话不是原生 Pi JSONL，会保存在桌面
 
 ### DeepSeek Harness
 
-WeRelay 直接连接已经运行的 `dsh web`，不会再启动一条独立的 headless Harness 会话。先在 Harness 中完成 API 和默认模型配置，再保持网页进程运行：
+桌面用户保持 **DeepSeek Harness**（新版）或 **DSH Desktop**（旧版）运行即可。WeRelay 自动发现桌面 Host 的本机接口；新版端口会动态变化，不要固定填写旧版的 `43120`，也不需要另开 `dsh web`。先在桌面端完成模型配置，然后启动 WeRelay：
+
+```bash
+werelay --adapter deepseek
+```
+
+只有本来就在使用命令行网页 owner 时才使用下面的方式；它不是桌面端连接失败时的替代修复方式：
 
 ```bash
 dsh web
 werelay --adapter deepseek
 ```
 
-微信中发送 `/deepseek` 或 `/dsh` 可切换到 Harness；发送“任务”可列出现有 Harness session。微信输入、审批、补充问题、停止和最终回复都会进入同一个 session，并同步显示在 Harness 网页中。
+微信中发送 `/deepseek` 或 `/dsh` 可切换到 Harness；发送“任务”可列出全终端任务。微信输入、审批、补充问题、停止和最终回复都使用所连接 owner 的同一 session，不创建独立会话。
 
 默认只允许连接本机回环地址。若 Harness 使用了不同端口，可在启动 WeRelay 的环境中设置：
 
@@ -358,7 +364,7 @@ cd /path/to/project
 werelay --idle-start --no-open
 ```
 
-若明确要在启动时连接某个已有 owner，可使用 `werelay --adapter codex` 或 `werelay --adapter deepseek`。DeepSeek Harness 会复用已经运行的 `dsh web`，不需要额外打开 companion 终端。
+若明确要在启动时连接某个已有 owner，可使用 `werelay --adapter codex` 或 `werelay --adapter deepseek`。DeepSeek Harness 会复用已经运行的桌面端或显式指定的 `dsh web`，不需要额外打开 companion 终端。
 
 微信中切换：
 

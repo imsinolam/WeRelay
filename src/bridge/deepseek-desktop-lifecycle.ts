@@ -5,6 +5,7 @@ import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 
 import { writePrivateFileAtomic } from "../utils/private-files.ts";
+import { classifyDeepSeekDesktopProcess, DEEPSEEK_HARNESS_APP_PATH } from "./deepseek-desktop-process.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -18,6 +19,8 @@ type DeepSeekDesktopRecoveryDependencies = {
   platform: NodeJS.Platform;
   appExists(): boolean;
   isRunning(): Promise<boolean>;
+  /** The new Desktop does not use the legacy dsh-desktop settings block. */
+  canRepairLegacySettings?(): boolean;
   readSettings(): string;
   writeSettings(text: string): void;
   launch(): Promise<void>;
@@ -128,7 +131,7 @@ function isDeepSeekDesktopProcessRunning(): boolean {
       stdio: ["ignore", "pipe", "ignore"],
     });
     return output.split(/\r?\n/u).some((line) =>
-      line.trim() === `${DEEPSEEK_DESKTOP_APP_PATH}/Contents/MacOS/DSH Desktop`
+      classifyDeepSeekDesktopProcess(line) !== null
     );
   } catch {
     return false;
@@ -145,7 +148,11 @@ async function waitForDeepSeekDesktopToExit(timeoutMs: number): Promise<boolean>
 }
 
 async function launchDeepSeekDesktop(): Promise<void> {
-  await execFileAsync("/usr/bin/open", ["-b", DEEPSEEK_DESKTOP_BUNDLE_ID]);
+  if (fs.existsSync(DEEPSEEK_HARNESS_APP_PATH)) {
+    await execFileAsync("/usr/bin/open", ["-a", DEEPSEEK_HARNESS_APP_PATH]);
+  } else {
+    await execFileAsync("/usr/bin/open", ["-b", DEEPSEEK_DESKTOP_BUNDLE_ID]);
+  }
 }
 
 async function restartDeepSeekDesktop(): Promise<void> {
@@ -170,8 +177,9 @@ function defaultRecoveryDependencies(): DeepSeekDesktopRecoveryDependencies {
   const settingsPath = path.join(os.homedir(), DEEPSEEK_DESKTOP_SETTINGS_PATH);
   return {
     platform: process.platform,
-    appExists: () => fs.existsSync(DEEPSEEK_DESKTOP_APP_PATH),
+    appExists: () => fs.existsSync(DEEPSEEK_DESKTOP_APP_PATH) || fs.existsSync(DEEPSEEK_HARNESS_APP_PATH),
     isRunning: async () => isDeepSeekDesktopProcessRunning(),
+    canRepairLegacySettings: () => !fs.existsSync(DEEPSEEK_HARNESS_APP_PATH),
     readSettings: () => fs.existsSync(settingsPath)
       ? fs.readFileSync(settingsPath, "utf8")
       : "",
@@ -232,6 +240,7 @@ export async function recoverDeepSeekDesktopHarnessAccess(params: {
   // A stale cookie can also produce 403. Never stop a running owner merely
   // because a user selected its terminal; retry authentication in the client.
   if (!params.allowDesktopApplicationRestart || !protectedHost) return false;
+  if (dependencies.canRepairLegacySettings?.() === false) return false;
   const updated = enableDeepSeekDesktopLoopbackAccessInYaml(dependencies.readSettings());
   if (!updated.changed) return false;
   dependencies.writeSettings(updated.text);

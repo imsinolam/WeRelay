@@ -7,6 +7,25 @@ import {
 } from "../../src/bridge/deepseek-desktop-lifecycle.ts";
 
 describe("DeepSeek Desktop lifecycle", () => {
+  test("never applies legacy settings repair to the new Harness Desktop", async () => {
+    const effects: string[] = [];
+    expect(await recoverDeepSeekDesktopHarnessAccess({
+      error: new Error("HTTP 403"),
+      allowDesktopApplicationLaunch: true,
+      allowDesktopApplicationRestart: true,
+      dependencies: {
+        platform: "darwin",
+        appExists: () => true,
+        isRunning: async () => true,
+        canRepairLegacySettings: () => false,
+        readSettings: () => { effects.push("read"); return ""; },
+        writeSettings: () => { effects.push("write"); },
+        launch: async () => { effects.push("launch"); },
+        restart: async () => { effects.push("restart"); },
+      },
+    })).toBe(false);
+    expect(effects).toEqual([]);
+  });
   test("uses the installed DSH Desktop bundle id", () => {
     expect(DEEPSEEK_DESKTOP_BUNDLE_ID).toBe("ai.deepseek.dsh.desktop");
   });

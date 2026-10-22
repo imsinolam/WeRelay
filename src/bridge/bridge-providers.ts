@@ -396,7 +396,7 @@ export const BRIDGE_PROVIDERS: Record<BridgeProviderId, BridgeProviderDefinition
         port: 3080,
         host: "127.0.0.1",
         label: "Harness 本机服务（dsh web）",
-        hint: "本机 3080 端口没有 dsh web 监听。DSH Desktop 用户不需要它：WeRelay 会自动连接 DSH Desktop 的 43120 端口。只有使用命令行 dsh web 时才需要保持该进程运行，也可用 WERELAY_DEEPSEEK_HARNESS_URL 指定其他回环地址。",
+        hint: "本机 3080 端口没有 dsh web 监听。桌面用户不需要另开它：WeRelay 自动发现 DeepSeek Harness 桌面端的本机动态接口，也兼容旧 DSH Desktop。只有使用命令行 dsh web 时才需保持该进程运行；可用 WERELAY_DEEPSEEK_HARNESS_URL 显式指定回环地址。",
       },
       {
         id: "deepseek-url",
