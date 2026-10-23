@@ -95,6 +95,8 @@ export type BridgeResumeSessionCandidate = {
   title: string;
   lastUpdatedAt: string;
   source?: string;
+  /** Real parent identity, not a title-based guess; internal tasks stay out of user lists. */
+  parentThreadId?: string;
   threadId?: string;
   cwd?: string;
   projectId?: string;
@@ -407,7 +409,9 @@ export interface BridgeAdapter {
     sessionId: string,
     items: BridgeTurnInputItem[],
   ): Promise<BridgeSessionSendResult | void>;
-  listResumeSessions(limit?: number): Promise<BridgeResumeSessionCandidate[]>;
+  listResumeSessions(limit?: number, options?: { includeInternal?: boolean }): Promise<BridgeResumeSessionCandidate[]>;
+  /** Read task origin without selecting/following it or starting an owner. */
+  getSessionNotificationMetadata?(sessionId: string): Pick<BridgeResumeSessionCandidate, "parentThreadId" | "source"> | null;
   resumeSession(sessionId: string): Promise<void>;
   renameSession?(sessionId: string, title: string): Promise<void>;
   followSession?(sessionId: string): Promise<void>;

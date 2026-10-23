@@ -7,6 +7,7 @@ import {
 import type { BridgeResumeSessionCandidate } from "../bridge/bridge-types.ts";
 import { resolveTaskProjectName } from "../bridge/task-list-format.ts";
 import { formatTaskListAdapterLabel, formatTaskListDisplayTitle } from "../bridge/task-list-display.ts";
+import { isInternalTask, retainTaskOrigin } from "../bridge/task-origin.ts";
 
 export type GlobalTaskCandidate = BridgeResumeSessionCandidate & {
   adapter: DaemonAdapterKind;
@@ -15,6 +16,8 @@ export type GlobalTaskCandidate = BridgeResumeSessionCandidate & {
 export type GlobalTaskSnapshot = {
   candidates: GlobalTaskCandidate[];
   numberByIdentity: Map<string, number>;
+  /** Retired origins stay hidden until an explicit fresh snapshot. Numbers are never reused. */
+  hiddenIdentityKeys?: Set<string>;
 };
 
 export type GlobalTaskPage = {
@@ -148,6 +151,7 @@ function keepKnownProjectMetadata(
   candidate: GlobalTaskCandidate,
   previous?: GlobalTaskCandidate,
 ): GlobalTaskCandidate {
+  candidate = retainTaskOrigin(candidate, previous);
   // A lightweight catalog or completion fallback can omit project metadata.
   // Reuse it only for the same adapter/session and only when the new record
   // has no project identity of its own (a changed cwd must not inherit it).
@@ -175,9 +179,10 @@ export function buildGlobalTaskSnapshot(
       unique.set(key, keepKnownProjectMetadata(previous, candidate));
     }
   }
-  const ordered = sortGlobalTaskCandidates([...unique.values()]);
+  const ordered = sortGlobalTaskCandidates([...unique.values()].filter((candidate) => !isInternalTask(candidate)));
   return {
     candidates: ordered,
+    hiddenIdentityKeys: new Set([...unique].filter(([, candidate]) => isInternalTask(candidate)).map(([key]) => key)),
     numberByIdentity: new Map(
       ordered.map((candidate, index) => [
         globalTaskIdentityKey(candidate.adapter, candidate.sessionId),
@@ -195,13 +200,19 @@ export function updateGlobalTaskSnapshot(params: {
   if (params.refresh || !params.current) {
     return buildGlobalTaskSnapshot(params.latestCandidates);
   }
+  const hiddenIdentityKeys = new Set(params.current.hiddenIdentityKeys);
+  for (const candidate of [...params.current.candidates, ...params.latestCandidates]) {
+    if (isInternalTask(candidate)) hiddenIdentityKeys.add(globalTaskIdentityKey(candidate.adapter, candidate.sessionId));
+  }
   const latestByIdentity = new Map(
     params.latestCandidates.map((candidate) => [
       globalTaskIdentityKey(candidate.adapter, candidate.sessionId),
       candidate,
     ]),
   );
-  const retained = params.current.candidates.map((candidate) => (
+  const retained = params.current.candidates.filter((candidate) => !hiddenIdentityKeys.has(
+    globalTaskIdentityKey(candidate.adapter, candidate.sessionId),
+  )).map((candidate) => (
     keepKnownProjectMetadata(
       latestByIdentity.get(globalTaskIdentityKey(candidate.adapter, candidate.sessionId)) ?? candidate,
       candidate,
@@ -212,20 +223,18 @@ export function updateGlobalTaskSnapshot(params: {
   );
   for (const candidate of params.latestCandidates) {
     const key = globalTaskIdentityKey(candidate.adapter, candidate.sessionId);
-    if (!retainedKeys.has(key)) {
+    if (!retainedKeys.has(key) && !hiddenIdentityKeys.has(key)) {
       retained.push(candidate);
       retainedKeys.add(key);
     }
   }
-  return {
-    candidates: retained,
-    numberByIdentity: new Map(
-      retained.map((candidate, index) => [
-        globalTaskIdentityKey(candidate.adapter, candidate.sessionId),
-        index + 1,
-      ]),
-    ),
-  };
+  const numberByIdentity = new Map(params.current.numberByIdentity);
+  let nextNumber = Math.max(0, ...numberByIdentity.values());
+  for (const candidate of retained) {
+    const key = globalTaskIdentityKey(candidate.adapter, candidate.sessionId);
+    if (!numberByIdentity.has(key)) numberByIdentity.set(key, ++nextNumber);
+  }
+  return { candidates: retained, numberByIdentity, hiddenIdentityKeys };
 }
 
 export function paginateGlobalTaskSnapshot(
@@ -253,8 +262,10 @@ export function resolveGlobalTaskCandidate(
   const normalized = target.trim();
   if (!normalized) return null;
   if (/^[1-9]\d*$/.test(normalized)) {
-    const index = Number(normalized);
-    return Number.isSafeInteger(index) ? snapshot.candidates[index - 1] ?? null : null;
+    const number = Number(normalized);
+    return Number.isSafeInteger(number) ? snapshot.candidates.find((candidate) =>
+      snapshot.numberByIdentity.get(globalTaskIdentityKey(candidate.adapter, candidate.sessionId)) === number,
+    ) ?? null : null;
   }
   const identityMatch = normalized.match(/^([a-z][a-z0-9_-]*)\s*[/:：]\s*(.+)$/i);
   if (identityMatch?.[1] && identityMatch[2]) {
@@ -358,7 +369,7 @@ export function isGlobalTaskRunning(
 export function countRunningGlobalTasks(
   candidates: GlobalTaskCandidate[],
 ): number {
-  return candidates.filter(isGlobalTaskRunning).length;
+  return candidates.filter((candidate) => !isInternalTask(candidate) && isGlobalTaskRunning(candidate)).length;
 }
 
 /**

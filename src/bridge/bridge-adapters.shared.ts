@@ -141,7 +141,9 @@ export type CodexSessionMeta = {
   id?: string;
   timestamp?: string;
   cwd?: string;
-  source?: string | { custom?: string };
+  source?: string | { custom?: string; subagent?: unknown };
+  thread_source?: string;
+  parent_thread_id?: string;
   originator?: string;
 };
 

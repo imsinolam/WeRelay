@@ -2728,6 +2728,34 @@ describe("Codex mobile conversation cache", () => {
 });
 
 describe("Codex mobile persistent cache", () => {
+  test("does not restore pre-policy task lists, but keeps conversation history and unsent drafts", () => {
+    const nowMs = 1_800_000_000_000;
+    const state = createPersistentCacheTestState();
+    const storage = createMemoryStorage();
+    const runtime = loadMobilePersistentCacheRuntime({ state, storage, nowMs });
+    const key = runtime.conversationStateKey("codex", "main");
+    state.authenticated = true;
+    state.currentAdapter = "codex";
+    state.taskSnapshots = { codex: { currentThreadId: "main", tasks: [
+      { threadId: "main", title: "主任务", status: "idle" },
+      { threadId: "child", title: "内部评审", status: "idle" },
+    ] } };
+    state.taskSnapshotOrder = ["codex"];
+    state.composerDrafts = { [key]: { text: "尚未发送的主任务草稿" } };
+    state.composerDraftOrder = [key];
+    state.boardTasks = [{ adapter: "codex", threadId: "child", title: "内部评审" }];
+    runtime.persistMobileCacheNow();
+    const oldPayload = JSON.parse(storage.getItem(runtime.storageKey)!);
+    delete oldPayload.taskListPolicyVersion;
+    storage.setItem(runtime.storageKey, JSON.stringify(oldPayload));
+    const restored = createPersistentCacheTestState();
+    const reader = loadMobilePersistentCacheRuntime({ state: restored, storage, nowMs });
+    expect(reader.restorePersistentMobileCache("codex", "main")).toBe(true);
+    expect(restored.tasks).toEqual([]);
+    expect(restored.boardTasks).toEqual([]);
+    expect(restored.boardRecentCompleted).toEqual([]);
+    expect(reader.composerInput.value).toBe("尚未发送的主任务草稿");
+  });
   test("restores the cached task list and selected conversation before live refresh", () => {
     const storage = createMemoryStorage();
     const nowMs = 1_800_000_000_000;
@@ -2735,6 +2763,7 @@ describe("Codex mobile persistent cache", () => {
     const runtime = loadMobilePersistentCacheRuntime({ state, storage, nowMs });
     storage.setItem(runtime.storageKey, JSON.stringify({
       schemaVersion: runtime.schemaVersion,
+      taskListPolicyVersion: 1,
       savedAtMs: nowMs - 2_000,
       currentAdapter: "codex",
       adapters: [

@@ -1609,6 +1609,7 @@ export function formatResumeSessionList(params: {
   startIndex?: number;
   hasPrevious?: boolean;
   hasMore?: boolean;
+  numberBySessionId?: ReadonlyMap<string, number>;
 }): string {
   const {
     adapter,
@@ -1638,7 +1639,8 @@ export function formatResumeSessionList(params: {
         isCurrent,
         currentWorkerStatus,
       );
-      return `${resolvedStartIndex + index + 1}. ${formatTaskProjectLabel(candidate)}${formatTaskListDisplayTitle(candidate.title)}${markers}`;
+      const number = params.numberBySessionId?.get(candidate.sessionId) ?? resolvedStartIndex + index + 1;
+      return `${number}. ${formatTaskProjectLabel(candidate)}${formatTaskListDisplayTitle(candidate.title)}${markers}`;
     }),
     "",
     formatTaskListInstructions(),
@@ -1651,6 +1653,7 @@ export function formatResumeSessionSearchResults(params: {
   currentSessionId?: string;
   currentWorkerStatus?: BridgeAdapterState["status"];
   limit?: number;
+  numberBySessionId?: ReadonlyMap<string, number>;
 }): string {
   const limit = Math.max(1, params.limit ?? CODEX_TASK_LIST_PAGE_SIZE);
   const visibleMatches = params.matches.slice(0, limit);
@@ -1666,7 +1669,8 @@ export function formatResumeSessionSearchResults(params: {
         isCurrent,
         params.currentWorkerStatus,
       );
-      return `${match.index + 1}. ${formatTaskProjectLabel(match.candidate)}${formatTaskListDisplayTitle(match.candidate.title)}${markers}`;
+      const number = params.numberBySessionId?.get(match.candidate.sessionId) ?? match.index + 1;
+      return `${number}. ${formatTaskProjectLabel(match.candidate)}${formatTaskListDisplayTitle(match.candidate.title)}${markers}`;
     }),
     "回复序号进入；补充关键词可缩小范围",
     ...(remaining > 0 ? [`还有 ${remaining} 条，请补充关键词缩小范围。`] : []),

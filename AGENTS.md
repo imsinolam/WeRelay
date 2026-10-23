@@ -155,7 +155,7 @@ Only one integration owner may control a candidate baseline at a time, and only 
 Chinese release notes are the user-facing source of truth. Write them in plain, non-technical Chinese: describe what users can now do, what visible problem was fixed, whether any action is required, and what limitations remain. Keep class names, fields, file paths, commit SHAs, test commands, and implementation details in the technical report or commit body, not in the public change record. Follow `docs/开发协作/多Agent协作规范.md`, `docs/发布/体验部署与正式发布.md`, `docs/发布/对外发布操作手册.md`, and `docs/发布/版本记录/中文版本说明模板.md`.
 
 ## 仅 GitHub 发布边界
-用户明确要求“发布，不要部署”时，不安装、不重启、不修改公网服务、不推进活动运行基线；正式版本仍只能使用已体验验收的候选。未体验的新提交单独登记，不因发布授权自动上线。新版提醒只通知，不自动更新，旧运行端必须先安装提醒能力才会生效。
+用户明确要求“发布，不要部署”时，不安装、不重启、不修改公网服务、不推进活动运行基线；正式版本仍只能使用已体验验收的候选。未体验的新提交单独登记，不因发布授权自动上线。面向已安装用户的 ClawBot 更新检测包含已发布的正式及预发布 Release；提醒本身不安装，只有用户明确回复“更新”才下载对应 tag 源码、构建 tarball 并安装，不自动重启，不从草稿、裸 tag 或 main 分支安装。旧运行端必须先安装此能力才会生效；这不授予开发 Agent 部署或发布权限。
 
 ## Release Process
 - Development completion requires scoped validation, a local commit and registration of the full SHA as pending integration. It does not automatically authorize deployment or wake the release Agent. Only an explicit user request starts a batch deployment, owned by one integration Agent. Report committed-but-not-deployed work clearly; never claim deployment until the same candidate tarball is installed and verified. Documentation-only, test-description or CI-maintenance commits do not restart runtime services when packaged runtime behavior is unchanged.

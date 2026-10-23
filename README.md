@@ -7,15 +7,15 @@
   <img alt="License" src="https://img.shields.io/badge/License-AGPL--3.0-7c3aed?style=for-the-badge&labelColor=1c1917">
 </p>
 
-<p align="center"><img src="docs/images/werelay-wordmark.png" width="420" alt="WeRelay"></p>
+<p align="center"><img src="docs/images/werelay-four-panel-white-paper-boy-v10-handoff-comic.png" width="100%" alt="WeRelay 在电脑开工、手机接力、任务完成后再回到电脑继续工作"></p>
+
+<p align="center"><img src="docs/images/werelay-wordmark.png" width="320" alt="WeRelay"></p>
 
 <p align="center"><img src="docs/images/werelay-relationship.png" width="100%" alt="电脑上的 Agent 通过 WeRelay 双向连接微信 ClawBot 和 WeRelay 任务台；通知与结果送到手机，指令与审批回到原任务。同网任务台直连电脑，外网访问需自建 HTTPS Relay。"></p>
 
 WeRelay 把电脑上的 AI 编程任务延伸到微信 ClawBot、局域网网页和可选的公网网页。对于已经具备“原任务接入”能力的 Agent，远程消息、审批、停止操作和回复都会进入电脑端原来的任务，不会另开隐藏会话。
 
 **电脑 Agent 始终是任务 owner，WeRelay 和远程界面只是入口；但不同 Agent 当前达到的会话一致性级别并不相同，不能把“命令能接入”都写成“桌面端实时同步”。**
-
-<p align="center"><img src="docs/images/werelay-four-panel-white-paper-boy-v10-handoff-comic.png" width="100%" alt="WeRelay 在电脑开工、手机接力、任务完成后再回到电脑继续工作"></p>
 
 ## 它们是什么关系
 

@@ -2,32 +2,24 @@ import fs from "node:fs";
 import path from "node:path";
 import { CHANNEL_DATA_DIR } from "../wechat/channel-config.ts";
 import { writePrivateFileAtomic } from "../utils/private-files.ts";
-import { compareVersions, getCurrentVersion } from "../utils/version-checker.ts";
+import { compareVersions, getCurrentVersion, parseVersion } from "../utils/version-checker.ts";
+import { fetchLatestPublishedRelease, validatePublishedRelease, type PublishedRelease } from "../utils/github-release.ts";
 
-type PublishedRelease = { version: string; url: string };
+type CachedRelease = { version: string; url: string; tagName?: string; prerelease?: boolean };
+export const CLAWBOT_UPDATE_POLICY = 2;
 export type ClawbotUpdateState = {
   checkedAt?: number;
-  latest?: PublishedRelease;
+  latest?: CachedRelease;
   notifiedVersion?: string;
+  notifiedAt?: number;
+  policyVersion?: number;
 };
-const RELEASES = "https://github.com/imsinolam/WeRelay/releases/tag/v";
-const CHECK_MS = 6 * 60 * 60_000;
+const CHECK_MS = 24 * 60 * 60_000;
 const RETRY_MS = 60 * 60_000;
 const SEND_RETRY_MS = 15 * 60_000;
 
-// A tag/main commit can exist before release acceptance. Only announce an
-// actual published stable Release; never fall back to an unfinished branch.
 export async function fetchPublishedRelease(fetchImpl: typeof fetch = globalThis.fetch): Promise<PublishedRelease | null> {
-  const response = await fetchImpl("https://api.github.com/repos/imsinolam/WeRelay/releases/latest", {
-    signal: AbortSignal.timeout(10_000),
-    headers: { Accept: "application/vnd.github+json", "User-Agent": "WeRelay-Update-Notifier" },
-  });
-  if (!response.ok) return null;
-  const data = await response.json() as { tag_name?: unknown; draft?: boolean; prerelease?: boolean };
-  if (!data || data.draft || data.prerelease || typeof data.tag_name !== "string") return null;
-  const version = /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(data.tag_name)
-    ? data.tag_name.replace(/^v/, "") : null;
-  return version ? { version, url: `${RELEASES}${version}` } : null;
+  return fetchLatestPublishedRelease({ fetchImpl });
 }
 
 export class ClawbotUpdateNotifier {
@@ -38,11 +30,11 @@ export class ClawbotUpdateNotifier {
   private sendRetryAt = 0;
   private timer?: ReturnType<typeof setInterval>;
   constructor(private readonly options: {
-    currentVersion: string;
+    currentVersion: string | (() => Promise<string>);
     read: () => ClawbotUpdateState;
     write: (state: ClawbotUpdateState) => void;
     send: (text: string) => Promise<boolean>;
-    fetchRelease?: () => Promise<PublishedRelease | null>;
+    fetchRelease?: () => Promise<CachedRelease | null>;
     now?: () => number;
   }) {}
 
@@ -68,32 +60,32 @@ export class ClawbotUpdateNotifier {
       const now = this.options.now?.() ?? Date.now();
       let state = this.options.read();
       const age = state.checkedAt === undefined ? Infinity : now - state.checkedAt;
-      if ((age < 0 || age >= CHECK_MS) && now >= this.retryAt) {
+      if ((state.policyVersion !== CLAWBOT_UPDATE_POLICY || age < 0 || age >= CHECK_MS) && now >= this.retryAt) {
         this.retryAt = now + RETRY_MS;
-        const latest = await (this.options.fetchRelease ?? fetchPublishedRelease)();
+        const latest = validatePublishedRelease(await (this.options.fetchRelease ?? fetchPublishedRelease)());
         if (this.stopped) return;
         if (latest) {
-          state = { ...state, checkedAt: now, latest };
+          state = { ...state, checkedAt: now, latest, policyVersion: CLAWBOT_UPDATE_POLICY };
           this.options.write(state);
           this.retryAt = 0;
         }
       }
-      const latest = state.latest;
-      const current = this.options.currentVersion;
-      const stableCurrent = /^(\d+\.\d+\.\d+)/.exec(current)?.[1];
-      if (this.stopped || !latest || !stableCurrent ||
-        !/^\d+\.\d+\.\d+$/.test(latest.version) ||
-        latest.url !== `${RELEASES}${latest.version}` ||
+      const latest = validatePublishedRelease(state.latest);
+      const current = typeof this.options.currentVersion === "function"
+        ? await this.options.currentVersion() : this.options.currentVersion;
+      const notifiedAge = state.notifiedAt === undefined ? Infinity : now - state.notifiedAt;
+      if (this.stopped || !latest || !parseVersion(current) ||
         state.notifiedVersion === latest.version ||
-        (compareVersions(latest.version, stableCurrent) <= 0 &&
-          !(latest.version === stableCurrent && current.includes("-"))) ||
+        (notifiedAge >= 0 && notifiedAge < CHECK_MS) ||
+        compareVersions(latest.version, current) <= 0 ||
         (!options.inbound && now < this.sendRetryAt)) return;
       this.sendRetryAt = now + SEND_RETRY_MS;
       const sent = await this.options.send([
-        "WeRelay 有新版本可用", `当前运行：${current}`, `GitHub 最新版：${latest.version}`,
-        "不会自动安装或重启；你可以先查看更新说明，再决定何时更新。", latest.url,
+        "WeRelay 有新版本可用", `当前安装：${current}`,
+        `GitHub 最新发布：${latest.version}${latest.prerelease ? "（预发布）" : ""}`,
+        "回复“更新”自动下载并安装。未经同意不会自动安装，安装后不会自行重启。", latest.url,
       ].join("\n"));
-      if (sent) this.options.write({ ...state, notifiedVersion: latest.version });
+      if (sent) this.options.write({ ...state, notifiedVersion: latest.version, notifiedAt: now });
     } catch {
       // Network, WeChat and storage failures never block input or consume a receipt.
     } finally {
@@ -112,7 +104,7 @@ export async function createClawbotUpdateNotifier(options: {
 }): Promise<ClawbotUpdateNotifier> {
   const file = options.stateFile ?? path.join(CHANNEL_DATA_DIR, "clawbot-update-notification.json");
   return new ClawbotUpdateNotifier({
-    currentVersion: await getCurrentVersion(),
+    currentVersion: getCurrentVersion,
     send: options.send,
     read: () => {
       try { return JSON.parse(fs.readFileSync(file, "utf8")) as ClawbotUpdateState; }

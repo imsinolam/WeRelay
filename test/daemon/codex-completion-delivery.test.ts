@@ -19,6 +19,18 @@ function buildQueue(
   });
 }
 
+test("subtask suppression is persisted without claiming delivery or retaining its answer", () => {
+  const queue = buildQueue();
+  queue.enqueue({ key: "child:turn", threadId: "child", turnId: "turn", texts: ["private child answer"] });
+  expect(queue.discard(["child:turn"], "suppressed")).toHaveLength(1);
+  expect(queue.getPending()).toEqual([]);
+  expect(queue.hasDelivered("child:turn")).toBe(false);
+  expect(JSON.stringify(queue.snapshot())).not.toContain("private child answer");
+  const restored = buildQueue(queue.snapshot());
+  expect(restored.getNotificationStatus("child", "codex")).toMatchObject({ status: "not_delivered", reason: "suppressed" });
+  expect(restored.enqueue({ key: "child:turn", threadId: "child", texts: ["replay"] }).delivery).toBeUndefined();
+});
+
 test("backoff-suppressed completion is persisted and delivered after restart", async () => {
   const snapshots: CodexCompletionDeliveryState[] = [];
   const queue = buildQueue(undefined, snapshots);

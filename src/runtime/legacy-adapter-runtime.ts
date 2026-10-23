@@ -15,6 +15,7 @@ export class LegacyAdapterRuntime implements RuntimeHost {
   readonly getSessionMessagePage: BridgeAdapter["getSessionMessagePage"];
   readonly getSessionProgress: BridgeAdapter["getSessionProgress"];
   readonly getSessionRunSummary: BridgeAdapter["getSessionRunSummary"];
+  readonly getSessionNotificationMetadata: BridgeAdapter["getSessionNotificationMetadata"];
   readonly getNewSessionModelState: BridgeAdapter["getNewSessionModelState"];
   readonly getSessionModelState: BridgeAdapter["getSessionModelState"];
   readonly setSessionModel: BridgeAdapter["setSessionModel"];
@@ -47,6 +48,7 @@ export class LegacyAdapterRuntime implements RuntimeHost {
     this.getSessionMessagePage = adapter.getSessionMessagePage?.bind(adapter);
     this.getSessionProgress = adapter.getSessionProgress?.bind(adapter);
     this.getSessionRunSummary = adapter.getSessionRunSummary?.bind(adapter);
+    this.getSessionNotificationMetadata = adapter.getSessionNotificationMetadata?.bind(adapter);
     this.getNewSessionModelState = adapter.getNewSessionModelState?.bind(adapter);
     this.getSessionModelState = adapter.getSessionModelState?.bind(adapter);
     this.setSessionModel = adapter.setSessionModel?.bind(adapter);
@@ -77,8 +79,8 @@ export class LegacyAdapterRuntime implements RuntimeHost {
     await this.adapter.sendInput(text);
   }
 
-  async listResumeSessions(limit?: number): Promise<BridgeResumeSessionCandidate[]> {
-    return await this.adapter.listResumeSessions(limit);
+  async listResumeSessions(limit?: number, options?: { includeInternal?: boolean }): Promise<BridgeResumeSessionCandidate[]> {
+    return await this.adapter.listResumeSessions(limit, options);
   }
 
   async resumeSession(sessionId: string): Promise<void> {

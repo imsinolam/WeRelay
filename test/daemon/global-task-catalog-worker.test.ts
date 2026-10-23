@@ -12,6 +12,38 @@ class FakeWorker extends EventEmitter {
   async terminate() { this.terminated = true; return 0; }
 }
 
+test("notification metadata is a targeted read in the bounded Codex worker", async () => {
+  const w = new FakeWorker();
+  const catalog = new GlobalTaskCatalogWorker({ workerFactory: () => w as unknown as Worker });
+  try {
+    const result = catalog.loadNotificationMetadata("/fixture", "child");
+    expect(w.requests[0]).toMatchObject({ adapter: "codex", operation: "notificationMetadata", sessionId: "child", limit: 1 });
+    w.emit("message", { id: w.requests[0]!.id, ok: true, metadata: { parentThreadId: "parent" } });
+    expect(await result).toEqual({ parentThreadId: "parent" });
+  } finally { await catalog.close(); }
+});
+
+test("real metadata worker finds an existing child outside the recent task list without an owner", async () => {
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "werelay-child-origin-"));
+  try {
+    fs.mkdirSync(path.join(dir, ".codex", "sessions"), { recursive: true });
+    fs.writeFileSync(path.join(dir, ".codex", "sessions", "rollout-child.jsonl"), JSON.stringify({ type: "session_meta", payload: {
+      id: "child", source: { subagent: { thread_spawn: { parent_thread_id: "parent" } } },
+    } }) + "\n");
+    const source = new URL("../../src/daemon/global-task-catalog-worker.ts", import.meta.url).href;
+    const code = `import {GlobalTaskCatalogWorker} from ${JSON.stringify(source)}; const c=new GlobalTaskCatalogWorker();try{console.log(JSON.stringify(await c.loadNotificationMetadata(${JSON.stringify(dir)},"child")));}finally{await c.close();}`;
+    const { stdout } = await promisify(execFile)("node", ["--experimental-transform-types", "--input-type=module", "-e", code], {
+      env: { ...process.env, HOME: dir, USERPROFILE: dir, CODEX_HOME: dir }, timeout: 8_000,
+    });
+    expect(JSON.parse(stdout.trim())).toEqual({ source: "subagent", parentThreadId: "parent" });
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("completion reads share isolated bounded workers without changing catalog response types", async () => {
   const w = new FakeWorker();
   const catalog = new GlobalTaskCatalogWorker({ workerFactory: () => w as unknown as Worker });

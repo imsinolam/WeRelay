@@ -49,14 +49,14 @@ export type UndeliveredCompletionReceipt = {
   turnId?: string;
   createdAt: string;
   stoppedAt: string;
-  reason: "expired" | "capacity";
+  reason: "expired" | "capacity" | "suppressed";
 };
 
 export type CompletionNotificationStatus = {
   status: "pending" | "delivered" | "not_delivered";
   updatedAt: string;
   turnId?: string;
-  reason?: "expired" | "capacity";
+  reason?: "expired" | "capacity" | "suppressed";
   sentParts?: number;
   totalParts?: number;
 };
@@ -232,7 +232,7 @@ export function normalizeCodexCompletionDeliveryState(
     const stoppedAt = normalizeTimestamp(receipt.stoppedAt);
     if (typeof receipt.key !== "string" || !receipt.key.trim() || !identity.threadId || !identity.createdAt ||
         !stoppedAt || Date.parse(stoppedAt) < cutoff || deliveredKeys.has(receipt.key.trim()) ||
-        (receipt.reason !== "expired" && receipt.reason !== "capacity")) continue;
+        (receipt.reason !== "expired" && receipt.reason !== "capacity" && receipt.reason !== "suppressed")) continue;
     const normalized: UndeliveredCompletionReceipt = {
       ...identity, key: receipt.key.trim(), threadId: identity.threadId,
       createdAt: identity.createdAt, stoppedAt, reason: receipt.reason,
@@ -566,20 +566,20 @@ export class CodexCompletionDeliveryQueue {
   }
 
   /**
-   * 丢弃超过补发窗口的积压通知。
+   * 丢弃超过补发窗口，或被任务来源策略静默的积压通知。
    *
    * 与 acknowledge 不同：这里没有真正送达，所以要留下一条 undelivered
    * 终态凭证，既让状态查询显示“未送达”，也阻止同一 key 的重放事件再次
    * 入队。正在发送中的条目跳过，避免破坏分段发送的进度。
    */
-  discard(keys: string[]): PendingCodexCompletionDelivery[] {
+  discard(keys: string[], reason: "expired" | "suppressed" = "expired"): PendingCodexCompletionDelivery[] {
     const discarded: PendingCodexCompletionDelivery[] = [];
     for (const key of keys) {
       if (this.inFlight.has(key)) continue;
       const delivery = this.pending.get(key);
       if (!delivery) continue;
       this.pending.delete(key);
-      this.rememberExpired(delivery, "expired");
+      this.rememberExpired(delivery, reason);
       discarded.push(clonePending(delivery));
     }
     if (discarded.length > 0) this.persistState();

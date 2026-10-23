@@ -1905,6 +1905,9 @@ export const CODEX_MOBILE_JS = String.raw`
 
   var PERSISTENT_MOBILE_CACHE_STORAGE_NAME = "werelayMobileCacheV1";
   var PERSISTENT_MOBILE_CACHE_SCHEMA_VERSION = 1;
+  // Old lists did not carry origins and may contain internal reviews. Invalidate
+  // only those indexes once, preserving conversation cache and unsent drafts.
+  var PERSISTENT_TASK_LIST_POLICY_VERSION = 1;
   var PERSISTENT_MOBILE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
   var PERSISTENT_MOBILE_CACHE_WRITE_DELAY_MS = 120;
   var MAX_PERSISTENT_TASK_SNAPSHOTS = 8;
@@ -2268,6 +2271,7 @@ export const CODEX_MOBILE_JS = String.raw`
       });
     return {
       schemaVersion: PERSISTENT_MOBILE_CACHE_SCHEMA_VERSION,
+      taskListPolicyVersion: PERSISTENT_TASK_LIST_POLICY_VERSION,
       savedAtMs: Date.now(),
       authenticatedAtMs: state.cachePreviewMode
         ? state.persistentCacheAuthenticatedAtMs
@@ -2357,7 +2361,8 @@ export const CODEX_MOBILE_JS = String.raw`
     state.adapters = Array.isArray(payload.adapters)
       ? payload.adapters.map(sanitizePersistentAdapter).filter(Boolean)
       : [];
-    var taskSnapshotSource = payload.taskSnapshots && typeof payload.taskSnapshots === "object"
+    var taskListsCompatible = payload.taskListPolicyVersion === PERSISTENT_TASK_LIST_POLICY_VERSION;
+    var taskSnapshotSource = taskListsCompatible && payload.taskSnapshots && typeof payload.taskSnapshots === "object"
       ? payload.taskSnapshots
       : Object.create(null);
     var taskSnapshotOrder = Array.isArray(payload.taskSnapshotOrder)
@@ -2415,7 +2420,7 @@ export const CODEX_MOBILE_JS = String.raw`
       state.composerDraftOrder.push(key);
     });
 
-    var taskBoard = payload.taskBoard && typeof payload.taskBoard === "object"
+    var taskBoard = taskListsCompatible && payload.taskBoard && typeof payload.taskBoard === "object"
       ? payload.taskBoard
       : null;
     state.boardTasks = taskBoard && Array.isArray(taskBoard.tasks)

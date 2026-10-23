@@ -9,6 +9,19 @@ const completion = (adapter: "codex" | "workbuddy", sessionId = "same"): Desktop
   finalMessage: { role: "assistant", phase: "final_answer", id: "final", text: "完成", turnId: adapter === "codex" ? "turn" : undefined },
 });
 
+test("passive recovery does not capture subtask completions", async () => {
+  const child = completion("codex", "child");
+  child.candidate.parentThreadId = "parent";
+  const captured: string[] = [];
+  const monitor = new PassiveCompletionMonitor({ now: () => now,
+    read: async (adapter) => adapter === "codex" ? [child, completion(adapter, "parent")] : [],
+    capture: async (item) => { captured.push(item.candidate.sessionId); },
+  });
+  await monitor.poll();
+  expect(captured).toEqual(["parent"]);
+  monitor.stop();
+});
+
 test("idle daemon monitors desktop completions without slots, owners or application launch", async () => {
   const captured: string[] = [];
   const monitor = new PassiveCompletionMonitor({

@@ -42,15 +42,28 @@ werelay-check-update
 
 Windows PowerShell 使用 `Get-Command werelay` 和 `Get-Command werelay-setup`。
 
-## 更新
+## 在微信中更新
 
-进入原来的源码目录，快进到 GitHub 最新 `main`，重新安装依赖并生成新的本地安装包：
+安装了新版更新能力的 WeRelay，会在启动后及运行期间**每 24 小时检查一次** GitHub 已发布的 Release。正式版和标为预发布的 `preview` / `rc` 版本都包括在内；比较完整版本号，不会把 `preview.10` 当成 `preview.2`，也不会自动降级。电脑关机或休眠错过检查时，下次运行会补查；自动提醒每 24 小时最多成功发送一次，同一版本不重复提醒。网络失败会稍后重试，微信上下文失效时等你发来新消息再尝试送达。
+
+- 发送 **“检查更新”**：只查询和显示结果，不安装；手动查询不受自动检查周期限制。
+- 收到提醒后回复 **“更新”** 或 **`/update`**：自动下载对应 Release 的源码归档，在独立临时目录中安装锁定依赖、构建并生成 tarball，再安装这个本地 tarball。预发布会明确标注。
+- 安装前保留原包和命令入口备份；替换或版本校验失败时自动回退。若回退也失败，会明确告知，不声称旧安装仍完好。
+- 安装后**不会自行重启**。可回复 **“重启”**：仅在能确认由已知 macOS launchd 服务托管时退出并由服务恢复；手动启动、Windows 或其他未确认保活的环境会提示在电脑重启。重启期间微信和网页连接会短暂断开。
+- 更新检查、下载和构建在后台进行，不阻塞正常微信任务消息。替换安装仍可能影响随后启动的 WeRelay 入口，请避开关键操作时段；不要把“后台更新”理解为绝无中断风险。
+
+只允许更新**当前正在运行的独立全局安装**。从源码直接启动或使用软链接的开发环境不会被自动覆盖，不会猜测另一份全局安装代替操作。只接受本仓库真正发布的 Release；草稿、只有 tag 的版本和 `main` 分支代码不会触发自动更新。
+
+旧版本若尚不具备微信更新指令，需先按下面的手动方法安装一次。此功能只更新该电脑的 WeRelay，不会顺便部署公网 Relay 或替维护者推送 GitHub。
+
+## 手动更新
+
+从 [GitHub Releases](https://github.com/imsinolam/WeRelay/releases) 选择要安装的正式版或预发布版，下载该 Release 的 Source code 并解压。进入该版本目录后重新安装依赖并打包：
 
 macOS / Linux：
 
 ```bash
 cd /path/to/WeRelay
-git pull --ff-only
 npm ci
 PACKAGE_FILE="$(npm pack --silent)"
 npm install -g "./$PACKAGE_FILE"
@@ -60,7 +73,6 @@ Windows PowerShell：
 
 ```powershell
 Set-Location C:\path\to\WeRelay
-git pull --ff-only
 npm ci
 $packageFile = npm pack --silent
 npm install -g ".\$packageFile"

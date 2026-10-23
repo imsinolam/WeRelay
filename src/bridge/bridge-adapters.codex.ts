@@ -1,4 +1,5 @@
 import { extractCodexCrossTaskMessage } from "./codex-cross-task-message.ts";
+import { isInternalTask, readTaskOriginMetadata, type TaskOriginMetadata } from "./task-origin.ts";
 import fs from "node:fs";
 import { isGeneratedTaskTitle, latestUserMessageText, titleFromLatestMessage } from "./task-title-fallback.ts";
 import os from "node:os";
@@ -92,6 +93,7 @@ type CodexDesktopTurnState = {
 
 type CodexSqliteStatement = {
   all(...params: unknown[]): unknown[];
+  iterate(...params: unknown[]): Iterable<unknown>;
 };
 
 type CodexSqliteDatabase = {
@@ -131,6 +133,8 @@ export type CodexStateDbSessionCatalogOptions = {
   catalogDatabasePath?: string;
   limit?: number;
   inferRuntimeStatuses?: boolean;
+  /** Only the approval observer opts in; never use this for a user-facing list. */
+  includeInternal?: boolean;
 };
 
 type CodexStateCatalogWorkerRequest = {
@@ -2763,6 +2767,8 @@ export async function readCodexStateDbSessionCatalogInProcess(
           : columns.has("created_at")
             ? "created_at * 1000"
             : "0";
+    // Internal reviews must not consume the visible LIMIT. Iterate rather than
+    // materializing every thread in installations with large session histories.
     const rows = database.prepare(`
       SELECT id, rollout_path,
              ${columnOr("created_at", "0")},
@@ -2777,12 +2783,12 @@ export async function readCodexStateDbSessionCatalogInProcess(
              ${columnOr("recency_at_ms", "0")},
              ${columnOr("updated_at_ms", "0")},
              ${columnOr("thread_source", "NULL")},
-             ${columnOr("project_id", "NULL")}
+             ${columnOr("project_id", "NULL")},
+             ${columnOr("parent_thread_id", "NULL")}
       FROM threads
       ${archivedFilter}
       ORDER BY ${recencyOrder} DESC
-      LIMIT ?
-    `).all(limit);
+    `).iterate();
     const localCatalogTitles = await readCodexLocalCatalogTitles(catalogDatabasePath);
     const candidates: BridgeResumeSessionCandidate[] = [];
     const rolloutPathByThreadId = new Map<string, string>();
@@ -2801,6 +2807,13 @@ export async function readCodexStateDbSessionCatalogInProcess(
         : typeof value.source === "string" && value.source.trim()
           ? value.source.trim()
           : undefined;
+      const origin = readTaskOriginMetadata(value);
+      if (!options.includeInternal && isInternalTask(origin)) continue;
+      // Older catalogs may omit parent/source fields; the bounded first rollout
+      // record still distinguishes Guardian's {subagent:{other:...}} shape.
+      const persistedOrigin = rolloutPath
+        ? readTaskOriginMetadata(shared.readCodexSessionMeta(rolloutPath)) : {};
+      if (!options.includeInternal && isInternalTask(persistedOrigin)) continue;
       const projectId = typeof value.project_id === "string" && value.project_id.trim()
         ? value.project_id.trim()
         : undefined;
@@ -2814,11 +2827,14 @@ export async function readCodexStateDbSessionCatalogInProcess(
         title: titleFromLatestMessage(catalogTitle, threadId, recentText),
         lastUpdatedAt: codexCatalogTimestampToIso(value),
         ...(sourceValue ? { source: sourceValue } : {}),
+        ...(isInternalTask(origin) ? origin : {}),
+        ...(isInternalTask(persistedOrigin) ? persistedOrigin : {}),
         ...(cwd ? { cwd } : {}),
         ...(projectId ? { projectId } : {}),
         runtimeStatus: { type: "notLoaded" },
       });
       if (rolloutPath) rolloutPathByThreadId.set(threadId, rolloutPath);
+      if (candidates.length >= limit) break;
     }
     const runtimeStatusByThreadId = new Map<
       string,
@@ -2979,6 +2995,7 @@ export async function readCodexStateDbSessionCatalog(
 export function mapCodexDesktopThreadListResponse(
   response: unknown,
   limit = 10,
+  options: { includeInternal?: boolean } = {},
 ): BridgeResumeSessionCandidate[] {
   if (!isRecord(response)) {
     return [];
@@ -3007,22 +3024,43 @@ export function mapCodexDesktopThreadListResponse(
       const cwd = typeof value.cwd === "string" && value.cwd.trim()
         ? value.cwd.trim()
         : undefined;
-      const source = typeof value.source === "string" && value.source.trim()
-        ? value.source.trim()
-        : undefined;
+      const origin = readTaskOriginMetadata(value);
+      if (!options.includeInternal && isInternalTask(origin)) return null;
 
       return {
         sessionId: threadId,
         threadId,
         title: truncatePreview(name || preview || threadId, 120),
         lastUpdatedAt: codexDesktopTimestampToIso(value.recencyAt ?? value.updatedAt),
-        source,
+        source: origin.source,
+        ...(origin.parentThreadId ? { parentThreadId: origin.parentThreadId } : {}),
         cwd,
         runtimeStatus: mapCodexDesktopThreadRuntimeStatus(value.status),
       };
     })
     .filter((candidate): candidate is BridgeResumeSessionCandidate => Boolean(candidate))
     .slice(0, Math.max(1, limit));
+}
+
+/** Targeted read in the catalog Worker: no desktop IPC, task selection or owner. */
+export async function readCodexSessionNotificationMetadata(threadId: string): Promise<TaskOriginMetadata | null> {
+  // Prefer an indexed identity lookup; scanning every rollout for each old
+  // completion would make task-list recovery unnecessarily expensive.
+  let database: CodexSqliteDatabase | undefined;
+  try {
+    database = await openCodexStateDatabase(codexStateDatabasePath());
+    const row = database.prepare("SELECT * FROM threads WHERE id = ? LIMIT 1").all(threadId)[0];
+    if (isRecord(row)) {
+      const origin = readTaskOriginMetadata(row);
+      if (isInternalTask(origin)) return origin;
+      const metadata = typeof row.rollout_path === "string" ? shared.readCodexSessionMeta(row.rollout_path) : null;
+      return metadata ? { ...origin, ...readTaskOriginMetadata(metadata) } : origin;
+    }
+  } catch { /* Older/no state database: look up the existing rollout without an owner. */ }
+  finally { database?.close(); }
+  const filePath = findCodexDesktopSessionFilesByThreadId([threadId]).get(threadId)?.filePath;
+  const metadata = filePath ? shared.readCodexSessionMeta(filePath) : null;
+  return metadata ? readTaskOriginMetadata(metadata) : null;
 }
 
 
@@ -4215,11 +4253,12 @@ export class CodexPtyAdapter extends AbstractPtyAdapter {
     }
   }
 
-  override async listResumeSessions(limit = 10): Promise<BridgeResumeSessionCandidate[]> {
+  override async listResumeSessions(limit = 10, options: { includeInternal?: boolean } = {}): Promise<BridgeResumeSessionCandidate[]> {
     try {
       const stateCatalog = await readCodexStateDbSessionCatalog({
         limit,
         inferRuntimeStatuses: true,
+        includeInternal: options.includeInternal,
       });
       let candidates: BridgeResumeSessionCandidate[];
       let inferredRuntimeStatuses:
@@ -4252,7 +4291,12 @@ export class CodexPtyAdapter extends AbstractPtyAdapter {
           sortKey: "recency_at",
           sortDirection: "desc",
         });
-        candidates = mapCodexDesktopThreadListResponse(response, limit);
+        candidates = mapCodexDesktopThreadListResponse(response, limit, options);
+        const files = findCodexDesktopSessionFilesByThreadId(candidates.map((candidate) => candidate.sessionId));
+        for (const candidate of candidates) {
+          const file = files.get(candidate.sessionId);
+          if (file) Object.assign(candidate, readTaskOriginMetadata(shared.readCodexSessionMeta(file.filePath)));
+        }
       }
       applyCodexDesktopProjectMetadata(candidates, this.readDesktopGlobalState());
       for (const candidate of candidates) {
@@ -4280,7 +4324,7 @@ export class CodexPtyAdapter extends AbstractPtyAdapter {
           );
         }
       }
-      return candidates;
+      return options.includeInternal ? candidates : candidates.filter((candidate) => !isInternalTask(candidate));
     } catch (error) {
       throw new Error(
         `无法读取 Codex 桌面端任务列表：${describeUnknownError(error)}`,
@@ -4635,6 +4679,12 @@ export class CodexPtyAdapter extends AbstractPtyAdapter {
       this.desktopThreadSessionFilePathById.set(threadId, discovered);
     }
     return discovered;
+  }
+
+  getSessionNotificationMetadata(threadId: string): TaskOriginMetadata | null {
+    const filePath = this.resolveDesktopSessionFilePath(threadId.trim());
+    const metadata = filePath ? shared.readCodexSessionMeta(filePath) : null;
+    return metadata ? readTaskOriginMetadata(metadata) : null;
   }
 
   getSessionContentRevision(threadId: string): string | null {

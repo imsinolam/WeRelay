@@ -6,51 +6,13 @@ import {
   parseVersion,
 } from "../../src/utils/version-checker.ts";
 
-type RouteConfig = {
-  release?: unknown;
-  tags?: unknown;
-  packageJson?: unknown;
-  releaseStatus?: number;
-  tagsStatus?: number;
-  packageStatus?: number;
-};
-
-// 可注入的 fetch mock：按 GitHub 路由返回结果，并记录调用顺序。
-function buildFetchMock(routes: RouteConfig): {
-  fetch: typeof fetch;
-  calls: string[];
-} {
+function buildFetchMock(releases: unknown, apiStatus = 200, feed = "<feed></feed>") {
   const calls: string[] = [];
-  const fetch = (async (url: string): Promise<Response> => {
-    calls.push(url);
-    if (url.includes("/releases/latest")) {
-      const status = routes.releaseStatus ?? 200;
-      const body = routes.release === undefined ? "" : JSON.stringify(routes.release);
-      return new Response(body, {
-        status,
-        headers: { "content-type": "application/json" },
-      });
-    }
-    if (url.includes("/tags?")) {
-      const status = routes.tagsStatus ?? 200;
-      const body = routes.tags === undefined ? "" : JSON.stringify(routes.tags);
-      return new Response(body, {
-        status,
-        headers: { "content-type": "application/json" },
-      });
-    }
-    if (url.includes("raw.githubusercontent.com")) {
-      const status = routes.packageStatus ?? 200;
-      const body = routes.packageJson === undefined
-        ? ""
-        : JSON.stringify(routes.packageJson);
-      return new Response(body, {
-        status,
-        headers: { "content-type": "application/json" },
-      });
-    }
-    return new Response("not found", { status: 404 });
-  }) as typeof fetch;
+  const fetch = (async (input: string | URL | Request) => {
+    const url = String(input); calls.push(url);
+    return url.includes("api.github.com")
+      ? Response.json(releases, { status: apiStatus }) : new Response(feed);
+  }) as typeof globalThis.fetch;
   return { fetch, calls };
 }
 
@@ -67,8 +29,11 @@ describe("parseVersion", () => {
     expect(parseVersion("  2.0.0  ")).toBe("2.0.0");
   });
 
-  test("从预发布标识中提取主版本号", () => {
-    expect(parseVersion("v2.0.0-rc.1")).toBe("2.0.0");
+  test("保留预发布和构建标识，不把不同预览版压成同一版本", () => {
+    expect(parseVersion("v2.0.0-rc.1")).toBe("2.0.0-rc.1");
+    expect(parseVersion("0.3.21-preview.10+build.2")).toBe("0.3.21-preview.10+build.2");
+    expect(parseVersion("anything0.3.21")).toBeNull();
+    expect(parseVersion("0.3.21-preview.01")).toBeNull();
   });
 
   test("无版本号返回 null", () => {
@@ -99,75 +64,44 @@ describe("compareVersions", () => {
   test("主版本号差异优先", () => {
     expect(compareVersions("2.0.0", "1.99.99")).toBeGreaterThan(0);
   });
+
+  test("预发布逐段按语义版本比较，不降级也不忽略数字尾号", () => {
+    expect(compareVersions("0.3.21-preview.10", "0.3.21-preview.2")).toBeGreaterThan(0);
+    expect(compareVersions("0.3.21", "0.3.21-preview.10")).toBeGreaterThan(0);
+    expect(compareVersions("0.3.21-preview.1", "0.3.20")).toBeGreaterThan(0);
+    expect(compareVersions("0.3.20", "0.3.21-preview.1")).toBeLessThan(0);
+    expect(compareVersions("0.3.21+build.2", "0.3.21+build.1")).toBe(0);
+  });
 });
 
 describe("fetchLatestVersion", () => {
-  test("优先读取 GitHub 最新 Release", async () => {
-    const { fetch, calls } = buildFetchMock({
-      release: { tag_name: "v0.4.0" },
-    });
-    const latest = await fetchLatestVersion({ fetchImpl: fetch });
-    expect(latest).toBe("0.4.0");
+  test("CLI 与微信一致读取已发布正式版和预发布版", async () => {
+    const { fetch, calls } = buildFetchMock([
+      { tag_name: "v0.4.0" }, { tag_name: "v0.4.1-preview.2", prerelease: true },
+    ]);
+    expect(await fetchLatestVersion({ fetchImpl: fetch })).toBe("0.4.1-preview.2");
+    expect(calls).toEqual(["https://api.github.com/repos/imsinolam/WeRelay/releases?per_page=100"]);
+  });
+  test("仅有草稿或没有 Release 时不读 tag/main 冒充已发布", async () => {
+    const { fetch, calls } = buildFetchMock([{ tag_name: "v9.0.0", draft: true }]);
+    expect(await fetchLatestVersion({ fetchImpl: fetch })).toBeNull();
     expect(calls).toHaveLength(1);
-    expect(calls[0]).toContain("api.github.com");
-    expect(calls[0]).toContain("/releases/latest");
-    expect(calls.some((url) => url.includes("registry.npmjs.org"))).toBe(false);
   });
-
-  test("没有 Release 时从 GitHub tags 取最高版本", async () => {
-    const { fetch, calls } = buildFetchMock({
-      releaseStatus: 404,
-      tags: [{ name: "0.3.3" }, { name: "v0.3.4" }, { name: "0.2.9" }],
-    });
-    const latest = await fetchLatestVersion({ fetchImpl: fetch });
-    expect(latest).toBe("0.3.4");
-    expect(calls).toHaveLength(2);
-    expect(calls[1]).toContain("/tags?");
+  test("API 限流时使用发布 feed，仍能发现预发布", async () => {
+    const { fetch, calls } = buildFetchMock({}, 403,
+      '<feed><entry><link href="https://github.com/imsinolam/WeRelay/releases/tag/v0.4.1-rc.3"/></entry></feed>');
+    expect(await fetchLatestVersion({ fetchImpl: fetch })).toBe("0.4.1-rc.3");
+    expect(calls[1]).toContain("releases.atom");
   });
-
-  test("没有 Release 和 tag 时读取 GitHub main 的 package.json", async () => {
-    const { fetch, calls } = buildFetchMock({
-      releaseStatus: 404,
-      tags: [],
-      packageJson: { version: "0.3.4" },
-    });
-    const latest = await fetchLatestVersion({ fetchImpl: fetch });
-    expect(latest).toBe("0.3.4");
-    expect(calls).toHaveLength(3);
-    expect(calls[2]).toContain("raw.githubusercontent.com");
+  test("两个发布入口均不可用时返回 null", async () => {
+    const { fetch } = buildFetchMock({}, 500, "not xml");
+    expect(await fetchLatestVersion({ fetchImpl: fetch })).toBeNull();
   });
-
-  test("无效 Release 会继续尝试 tags", async () => {
-    const { fetch } = buildFetchMock({
-      release: { tag_name: "not-a-version" },
-      tags: [{ name: "v0.3.5" }],
-    });
-    const latest = await fetchLatestVersion({ fetchImpl: fetch });
-    expect(latest).toBe("0.3.5");
-  });
-
-  test("GitHub 三个公开版本入口都失败时返回 null", async () => {
-    const { fetch } = buildFetchMock({
-      releaseStatus: 500,
-      tagsStatus: 503,
-      packageStatus: 404,
-    });
-    const latest = await fetchLatestVersion({ fetchImpl: fetch });
-    expect(latest).toBeNull();
-  });
-
   test("请求超时返回 null 且不挂起", async () => {
-    const fetch = (async (
-      _url: string,
-      init?: RequestInit,
-    ): Promise<Response> => {
-      return new Promise((_resolve, reject) => {
-        init?.signal?.addEventListener("abort", () => {
-          reject(new DOMException("The operation was aborted.", "AbortError"));
-        });
-      });
-    }) as typeof fetch;
-    const latest = await fetchLatestVersion({ fetchImpl: fetch, timeoutMs: 20 });
-    expect(latest).toBeNull();
+    const fetch = (async (_url: unknown, init?: RequestInit): Promise<Response> =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+      })) as typeof globalThis.fetch;
+    expect(await fetchLatestVersion({ fetchImpl: fetch, timeoutMs: 20 })).toBeNull();
   });
 });

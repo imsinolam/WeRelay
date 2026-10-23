@@ -31,6 +31,8 @@ import {
 import { BridgeController } from "../bridge/bridge-controller.ts";
 import { prepareFinalReplyDelivery } from "./final-reply-delivery.ts";
 import { PassiveCompletionMonitor, type DesktopCompletion } from "./passive-completion-monitor.ts";
+import { shouldPushTaskNotification } from "./subtask-notification-policy.ts";
+import { isInternalTask, retainTaskOrigin, type TaskOriginMetadata } from "../bridge/task-origin.ts";
 import { DaemonLivenessMonitor } from "./daemon-liveness.ts";
 import { OutboundRecoveryScheduler } from "./outbound-recovery-scheduler.ts";
 import {
@@ -156,6 +158,8 @@ import {
   BoundedTtlSet,
 } from "../utils/bounded-ttl-cache.ts";
 import { ClawbotUpdateNotifier, createClawbotUpdateNotifier } from "./clawbot-update-notifier.ts";
+import { ClawbotUpdateController } from "./clawbot-update-controller.ts";
+import { canRestartClawbotService } from "./clawbot-update-restart.ts";
 import { getCurrentVersion } from "../utils/version-checker.ts";
 import { MobileConversationRevisionStore } from "./mobile-conversation-revisions.ts";
 import { ensureWechatCredentials } from "../wechat/setup.ts";
@@ -325,12 +329,12 @@ export function resolveDaemonTaskListSnapshot(params: {
     );
     return {
       candidates: params.current.candidates.map(
-        (candidate) => latestByThreadId.get(candidate.sessionId) ?? candidate,
-      ),
+        (candidate) => retainTaskOrigin(latestByThreadId.get(candidate.sessionId) ?? candidate, candidate),
+      ).filter((candidate) => !isInternalTask(candidate)),
       numberByThreadId: params.current.numberByThreadId,
     };
   }
-  const candidates = [...params.latestCandidates];
+  const candidates = params.latestCandidates.filter((candidate) => !isInternalTask(candidate));
   return {
     candidates,
     numberByThreadId: new Map(
@@ -354,7 +358,7 @@ export function resolveDaemonTaskTargetedMessage(params: {
   if (!Number.isSafeInteger(index)) {
     return null;
   }
-  const candidate = params.snapshot.candidates[index - 1];
+  const candidate = params.snapshot.candidates.find((item) => params.snapshot!.numberByThreadId.get(item.sessionId) === index);
   if (!candidate) {
     return null;
   }
@@ -1050,7 +1054,11 @@ export function formatDaemonWechatHelp(adapter?: DaemonAdapterKind): string {
   return formatClawBotWechatHelp(
     adapter,
     adapter ? formatMobileAdapterLabel(adapter) : undefined,
-  );
+  ).replace("帮助：/h 或 /help", [
+    "WeRelay 版本：检查更新；回复“更新”或 /update 安装（包含预发布）",
+    "更新生效：回复“重启”（需后台服务保活；会短暂断开）",
+    "帮助：/h 或 /help",
+  ].join("\n"));
 }
 
 export function resolveDaemonWechatCommand(params: {
@@ -1096,7 +1104,9 @@ export function resolveDaemonBareNumericReply(params: {
       ? resolveGlobalTaskCandidate(params.globalSnapshot, number)
       : null
     : params.adapterSnapshot
-      ? resolveResumeSessionCandidate(params.adapterSnapshot.candidates, number)
+      ? params.adapterSnapshot.candidates.find((candidate) =>
+          params.adapterSnapshot!.numberByThreadId.get(candidate.sessionId) === Number(number),
+        )
       : null;
   return candidate
     ? { type: "resume", target: number }
@@ -3086,6 +3096,7 @@ export class WeRelayDaemon {
     return isStrictApprovalModeEnabled();
   }
   private backlogNoticeSent = false;
+  private readonly completionNotificationOriginCache = new BoundedTtlMap<string, boolean>({ maxSize: 1024, ttlMs: 60_000 });
   private activeAdapter: DaemonAdapterKind | null = null;
   takenOverAdapter?: DaemonAdapterKind;
   private textSendChain = Promise.resolve();
@@ -3095,6 +3106,7 @@ export class WeRelayDaemon {
   private debugAckEnabled = process.env[DEBUG_ACK_ENV] === "1";
   private cachedBuildVersion: string | null = null;
   private updateNotifier?: ClawbotUpdateNotifier;
+  private updateController?: ClawbotUpdateController;
   private shutdownPromise: Promise<void> | null = null;
   private ipcServer: net.Server | null = null;
   private endpointToken = "";
@@ -3578,11 +3590,20 @@ export class WeRelayDaemon {
     this.scheduleWorkBuddyApprovalObserver();
     this.livenessMonitor.start();
     // Never await GitHub or a WeChat notification before beginning inbound polling.
+    this.updateController = new ClawbotUpdateController({
+      send: (text) => this.shutdownPromise ? Promise.resolve(false)
+        : this.queueWechatMessage(this.authorizedUserId, text, "notice"),
+      // Only a known launchd service may rely on automatic relaunch. An
+      // interactive/manual daemon must not exit and strand the WeChat user.
+      canRestart: () => canRestartClawbotService(),
+      restart: () => { setTimeout(() => { void this.shutdown().finally(() => process.exit(0)); }, 0); },
+      log: appendDaemonLog,
+    });
     this.updateNotifier = await createClawbotUpdateNotifier({
       send: (text) => this.shutdownPromise ? Promise.resolve(false)
         : this.queueWechatMessage(this.authorizedUserId, text, "notice"),
     });
-    if (this.shutdownPromise) this.updateNotifier.stop();
+    if (this.shutdownPromise) { this.updateNotifier.stop(); this.updateController.stop(); }
     else this.updateNotifier.start();
 
     while (!this.shutdownPromise) {
@@ -3705,6 +3726,9 @@ export class WeRelayDaemon {
   private async cleanup(): Promise<void> {
     appendDaemonLog("shutdown_started");
     this.updateNotifier?.stop();
+    this.updateController?.stop();
+    // An install already replacing files must finish verification/rollback.
+    await this.updateController?.waitForIdle();
     this.outboundRecoveryScheduler.stop();
     clearTimeout(this.workBuddyObserverTimer);
     this.passiveCompletionMonitor.stop();
@@ -4300,6 +4324,7 @@ export class WeRelayDaemon {
           const threadId = event.threadId ?? this.getSlotThreadId(slot) ?? "unknown-thread";
           const prefix = (text: string) => this.prefixSlotMessage(slot, text, threadId, false);
           this.trackWechatForwardTask((async () => {
+            if (!await this.shouldPushCompletionForTask(slot.adapter, threadId)) return;
             const images = await this.collectFinalReplyImages(slot, {
               threadId, turnId: event.turnId, rawText: event.text,
             }).catch(() => []);
@@ -4441,12 +4466,14 @@ export class WeRelayDaemon {
             threadId,
             ...(pending.turnId ? { turnId: pending.turnId } : {}),
             ...(pending.requestId ? { requestId: pending.requestId } : {}),
-            text: this.prefixSlotMessageWithMobileLink(
+            text: this.prefixSlotMessage(
               slot,
               formatApprovalMessage(pending, adapterState, {
                 allowTaskAutoApprove: true,
               }),
               threadId,
+              true,
+              false,
             ),
             commandPreview: pending.commandPreview,
           });
@@ -4468,13 +4495,17 @@ export class WeRelayDaemon {
           appendDaemonLog(
             `user_input_required: adapter=${slot.adapter} questions=${pending.questions.length}`,
           );
+          const threadId = event.threadId ?? pending.threadId;
+          const text = this.prefixSlotMessage(
+            slot,
+            formatUserInputRequestMessage(pending, adapterState),
+            threadId,
+            true,
+            false,
+          );
           const sent = await this.queueWechatMessage(
             this.authorizedUserId,
-            this.prefixSlotMessageWithMobileLink(
-              slot,
-              formatUserInputRequestMessage(pending, adapterState),
-              event.threadId ?? pending.threadId,
-            ),
+            threadId ? await this.formatActionableTaskNotificationText({ adapter: slot.adapter, threadId, text }) : text,
             "user_input_required",
           );
           if (sent) {
@@ -4763,6 +4794,9 @@ export class WeRelayDaemon {
       await this.handleClawbotBacklogPushRequest(message);
       return;
     }
+    // Only explicit whole-word consent starts an update. The controller claims
+    // the command synchronously; downloads/builds never block inbound polling.
+    if (this.updateController?.handle(message.text)) return;
     // Debug acknowledgement toggle: `/debug` or `调试` flips it for this
     // process so silence can be diagnosed without editing the environment.
     if (/^\s*(?:\/debug|调试)\s*$/iu.test(message.text)) {
@@ -5538,6 +5572,7 @@ export class WeRelayDaemon {
               startIndex: pageStart,
               hasPrevious: pageStart > 0,
               hasMore: candidates.length > pageStart + pageSize,
+              numberBySessionId: snapshot.numberByThreadId,
             }),
           );
           appendDaemonLog(
@@ -5549,7 +5584,9 @@ export class WeRelayDaemon {
         const searchMatches = numericTarget === null
           ? searchResumeSessionCandidates(candidates, command.target)
           : [];
-        const candidate = resolveResumeSessionCandidate(candidates, command.target);
+        const candidate = numericTarget !== null
+          ? candidates.find((item) => snapshot.numberByThreadId.get(item.sessionId) === numericTarget) ?? null
+          : resolveResumeSessionCandidate(candidates, command.target);
         if (!candidate) {
           activeSlot.awaitingBareTaskSelection = true;
           await this.queueWechatTaskListMessage(
@@ -5560,6 +5597,7 @@ export class WeRelayDaemon {
                   matches: searchMatches,
                   currentSessionId,
                   currentWorkerStatus: runtimeState.status,
+                  numberBySessionId: snapshot.numberByThreadId,
                 })
               : `没有找到“${command.target}”相关任务。\n可换个关键词，或发送“任务”查看最近任务。`,
           );
@@ -5730,7 +5768,7 @@ export class WeRelayDaemon {
             const created = candidates.find((candidate) => candidate.sessionId === threadId);
             if (created && activeSlot.taskListSnapshot &&
                 !activeSlot.taskListSnapshot.numberByThreadId.has(threadId)) {
-              const nextNumber = activeSlot.taskListSnapshot.candidates.length + 1;
+              const nextNumber = Math.max(0, ...activeSlot.taskListSnapshot.numberByThreadId.values()) + 1;
               activeSlot.taskListSnapshot.candidates.push(created);
               activeSlot.taskListSnapshot.numberByThreadId.set(threadId, nextNumber);
               activeSlot.taskNumberByThreadId.set(threadId, nextNumber);
@@ -6366,6 +6404,7 @@ export class WeRelayDaemon {
   private async captureDesktopCompletion(item: DesktopCompletion, key: string): Promise<void> {
     if (this.shutdownPromise || this.codexCompletionDeliveries.hasDelivered(key)) return;
     const { adapter, candidate, summary, finalMessage } = item;
+    if (!await this.shouldPushCompletionForTask(adapter, candidate.sessionId, candidate)) return;
     const threadId = candidate.sessionId;
     const completedAt = new Date(summary.completedAtMs!).toISOString();
     const title = normalizeDaemonTaskDisplayTitle(candidate.title, `${formatDaemonAdapterLabel(adapter)} 任务`);
@@ -6415,9 +6454,9 @@ export class WeRelayDaemon {
     }
     this.codexTaskMonitorRunning = true;
     try {
-      const candidates = await this.getCodexTaskCandidates(slot, {
-        forceRefresh: true,
-      });
+      // This observer also follows internal children to receive their real
+      // approval events. Its unfiltered catalog must never populate list caches.
+      const candidates = await slot.runtime.listResumeSessions(100, { includeInternal: true });
       const nowMs = Date.now();
       for (const candidate of candidates) {
         if (
@@ -6440,6 +6479,7 @@ export class WeRelayDaemon {
             );
           }
         }
+        if (isInternalTask(candidate)) continue;
         const previous = this.codexTaskObservations.get(candidate.sessionId) ?? null;
         const observed = observeCodexTask(previous, candidate, nowMs);
         const runningNow = observed.observation.status === "running" ||
@@ -6843,7 +6883,7 @@ export class WeRelayDaemon {
       throw error;
     }
     const selectedThreadId = this.getSlotThreadId(slot);
-    return candidates.map((candidate) => {
+    return candidates.filter((candidate) => !isInternalTask(candidate)).map((candidate) => {
       const status = this.resolveMobileTaskStatus(
         slot,
         candidate.sessionId,
@@ -6967,7 +7007,11 @@ export class WeRelayDaemon {
         adapterLabel: adapterLabels.get(adapter) ?? formatDaemonAdapterLabel(adapter),
         tasks: grouped.get(adapter) ?? [],
       })),
-      recentCompletions: this.stateStore.getRecentTaskCompletions(),
+      // Use the same classified catalog for the recent strip. Old persisted
+      // completions have no origin fields and must not resurrect hidden children.
+      recentCompletions: this.stateStore.getRecentTaskCompletions().filter((completion) =>
+        candidates.some((candidate) => candidate.adapter === completion.adapter && candidate.sessionId === completion.threadId),
+      ),
     });
   }
 
@@ -6991,6 +7035,7 @@ export class WeRelayDaemon {
     ) ?? this.globalTaskListSnapshot?.candidates.find(
       (candidate) => candidate.adapter === slot.adapter && candidate.sessionId === params.threadId,
     );
+    if (!await this.shouldPushCompletionForTask(slot.adapter, params.threadId, knownTask)) return;
     let title = params.title?.trim() || "";
     if (!title) {
       title = knownTask?.title ?? (
@@ -8146,6 +8191,11 @@ export class WeRelayDaemon {
       );
     }
 
+    if (!await this.shouldPushCompletionForTask(slot.adapter, params.threadId, candidate)) {
+      this.clearCodexFinalReplyCache(params.threadId, params.turnId);
+      return;
+    }
+
     let runSummary: BridgeSessionRunSummary | null = null;
     if (slot.runtime.getSessionRunSummary) {
       try {
@@ -8735,6 +8785,13 @@ export class WeRelayDaemon {
       if (!adapterSet.has(completion.adapter)) continue;
       const identity = `${completion.adapter}\u0000${completion.threadId}`;
       if (identities.has(identity)) continue;
+      try {
+        if (!await this.shouldPushCompletionForTask(completion.adapter, completion.threadId)) continue;
+      } catch {
+        // A failed optional historical fallback cannot make the live list fail,
+        // nor is it evidence that an unclassified internal record is visible.
+        continue;
+      }
       candidates.push({
         adapter: completion.adapter,
         sessionId: completion.threadId,
@@ -8968,6 +9025,7 @@ export class WeRelayDaemon {
     slot: DaemonSlot,
     candidates: BridgeResumeSessionCandidate[],
   ): BridgeResumeSessionCandidate[] {
+    candidates = candidates.filter((candidate) => !isInternalTask(candidate));
     slot.taskCandidatesCache = candidates;
     slot.taskCandidatesCachedAtMs = Date.now();
     return candidates;
@@ -9020,11 +9078,12 @@ export class WeRelayDaemon {
     text: string,
     threadId?: string,
     updateReplyTarget = true,
+    includeInTaskList = true,
   ): string {
     if (!threadId) {
       return text.trim();
     }
-    const remembered = this.rememberWechatTaskTarget(slot, threadId, undefined, updateReplyTarget);
+    const remembered = this.rememberWechatTaskTarget(slot, threadId, undefined, updateReplyTarget, includeInTaskList);
     return formatDaemonTaskScopedMessage({
       adapter: slot.adapter,
       text,
@@ -9038,6 +9097,8 @@ export class WeRelayDaemon {
   private formatNumberedDeliveryText(
     delivery: { adapter?: string; threadId: string; title?: string },
     text: string,
+    origin?: TaskOriginMetadata,
+    includeInTaskList = true,
   ): string {
     if (!isDaemonAdapterKind(delivery.adapter ?? "codex")) return text;
     const adapter = (delivery.adapter ?? "codex") as DaemonAdapterKind;
@@ -9054,7 +9115,8 @@ export class WeRelayDaemon {
     const remembered = this.rememberWechatCandidate({
       adapter, sessionId: delivery.threadId, threadId: delivery.threadId, title,
       lastUpdatedAt: known?.lastUpdatedAt ?? nowIso(),
-    }, false);
+      ...origin,
+    }, false, includeInTaskList);
     // Only replace a recognized routing heading, never arbitrary bracketed
     // answer content. Preserve inline status text such as “已完成，用时…”.
     const replace = match && (numbered || terminalPrefixed || match[1] === title || match[1] === delivery.title);
@@ -9071,6 +9133,7 @@ export class WeRelayDaemon {
     threadId: string,
     taskTitle?: string,
     updateReplyTarget = true,
+    includeInTaskList = true,
   ): { candidate: GlobalTaskCandidate; taskNumber: number } {
     const identity = globalTaskIdentityKey(slot.adapter, threadId);
     const existingGlobalCandidate = this.globalTaskListSnapshot?.candidates.find(
@@ -9096,24 +9159,31 @@ export class WeRelayDaemon {
         existingGlobalCandidate?.lastUpdatedAt ??
         nowIso(),
     };
-    return this.rememberWechatCandidate(candidate, updateReplyTarget);
+    return this.rememberWechatCandidate(candidate, updateReplyTarget, includeInTaskList);
   }
 
   private rememberWechatCandidate(
     candidate: GlobalTaskCandidate,
     updateReplyTarget: boolean,
+    includeInTaskList = true,
   ): { candidate: GlobalTaskCandidate; taskNumber: number } {
     const identity = globalTaskIdentityKey(candidate.adapter, candidate.sessionId);
-    this.globalTaskListSnapshot = updateGlobalTaskSnapshot({
+    if (includeInTaskList) this.globalTaskListSnapshot = updateGlobalTaskSnapshot({
       current: this.globalTaskListSnapshot,
       latestCandidates: [candidate],
       refresh: false,
     });
+    this.globalTaskListSnapshot ??= buildGlobalTaskSnapshot([]);
     const rememberedCandidate = this.globalTaskListSnapshot.candidates.find(
       (item) => globalTaskIdentityKey(item.adapter, item.sessionId) === identity,
     ) ?? candidate;
-    const taskNumber = this.globalTaskListSnapshot.numberByIdentity.get(identity) ??
-      this.globalTaskListSnapshot.candidates.length;
+    let taskNumber = this.globalTaskListSnapshot.numberByIdentity.get(identity);
+    if (taskNumber === undefined) {
+      // Internal approvals may still need a routing heading. Reserve a number
+      // without putting that internal task back into the user's task list.
+      taskNumber = Math.max(0, ...this.globalTaskListSnapshot.numberByIdentity.values()) + 1;
+      this.globalTaskListSnapshot.numberByIdentity.set(identity, taskNumber);
+    }
     if (updateReplyTarget) {
     this.latestWechatTaskTarget = rememberedCandidate;
     this.stateStore.setLatestWechatTaskTarget({
@@ -9541,9 +9611,9 @@ export class WeRelayDaemon {
     if (this.notificationPolicy) return this.deliverApprovalWithScreenPolicy(key, senderId);
     return this.approvalNotificationDeliveries.deliver(
       key,
-      (delivery) => this.queueWechatMessage(
+      async (delivery) => this.queueWechatMessage(
         senderId,
-        this.formatNumberedDeliveryText(delivery, delivery.text),
+        await this.formatActionableTaskNotificationText(delivery),
         "approval_required",
       ),
     );
@@ -9555,7 +9625,7 @@ export class WeRelayDaemon {
       return { status: "pending" as const };
     }
     const result = await this.approvalNotificationDeliveries.deliver(key,
-      (delivery) => this.queueWechatMessage(senderId, this.formatNumberedDeliveryText(delivery, delivery.text), "approval_required"));
+      async (delivery) => this.queueWechatMessage(senderId, await this.formatActionableTaskNotificationText(delivery), "approval_required"));
     if (result.status === "delivered") this.notificationPolicy.sent();
     return result;
   }
@@ -9602,10 +9672,85 @@ export class WeRelayDaemon {
     ) || Boolean(slot.runtime.getState().pendingApproval);
   }
 
-  private deliverCodexCompletionNotification(
+  private async shouldPushCompletionForTask(
+    adapter: DaemonAdapterKind,
+    threadId: string,
+    candidate?: BridgeResumeSessionCandidate,
+  ): Promise<boolean> {
+    const slot = this.slots.get(adapter);
+    const candidates = [candidate,
+      ...(slot?.taskCandidatesCache ?? []),
+      ...(slot?.taskListSnapshot?.candidates ?? []),
+      ...(this.globalTaskListSnapshot?.candidates.filter((item) => item.adapter === adapter) ?? []),
+    ];
+    if (candidates.some((item) => item?.sessionId === threadId && !shouldPushTaskNotification("completion", item))) return false;
+    const identity = `${adapter}\0${threadId}`;
+    if (this.globalTaskListSnapshot?.hiddenIdentityKeys?.has(identity)) return false;
+    const cached = this.completionNotificationOriginCache.get(identity);
+    if (cached !== undefined) return cached;
+    // Do not select/follow the task or create an owner to classify it. Targeted
+    // rollout metadata also covers children outside the latest 100 tasks and
+    // persisted pending notifications after a daemon restart with no slot.
+    const metadata = adapter === "codex"
+      ? await this.globalTaskCatalogWorker.loadNotificationMetadata(this.cwd, threadId)
+      : slot?.runtime.getSessionNotificationMetadata?.(threadId);
+    const pushable = shouldPushTaskNotification("completion", metadata);
+    if (metadata) this.completionNotificationOriginCache.set(identity, pushable);
+    return pushable;
+  }
+
+  private async formatActionableTaskNotificationText(delivery: { adapter: DaemonAdapterKind; threadId: string; text: string }): Promise<string> {
+    // Approvals/input requests are never blocked by the completion policy. Read origin only
+    // to avoid putting an internal review into the normal task picker while
+    // assigning its actionable heading/link. A failed read still sends it.
+    try {
+      const origin = delivery.adapter === "codex"
+        ? await this.globalTaskCatalogWorker.loadNotificationMetadata(this.cwd, delivery.threadId)
+        : this.slots.get(delivery.adapter)?.runtime.getSessionNotificationMetadata?.(delivery.threadId);
+      return this.formatNumberedDeliveryText(delivery, delivery.text, origin ?? undefined,
+        delivery.adapter !== "codex" || Boolean(origin));
+    } catch {
+      return this.formatNumberedDeliveryText(delivery, delivery.text, undefined, false);
+    }
+  }
+
+  private async pendingPushableCompletions(): Promise<PendingCodexCompletionDelivery[]> {
+    const pushable: PendingCodexCompletionDelivery[] = [];
+    const deadline = Date.now() + 2_000;
+    for (const delivery of this.codexCompletionDeliveries.getPending()) {
+      // Do not let origin reads for a large old backlog monopolize recovery.
+      // Unclassified leftovers remain pending for the next bounded pass.
+      if (Date.now() >= deadline || this.shutdownPromise) break;
+      const adapter = delivery.adapter ?? "codex";
+      if (!isDaemonAdapterKind(adapter)) continue;
+      try {
+        if (await this.shouldPushCompletionForTask(adapter, delivery.threadId)) {
+          pushable.push(delivery);
+        } else {
+          this.codexCompletionDeliveries.discard([delivery.key], "suppressed");
+          this.clearCodexFinalReplyCache(delivery.threadId, delivery.turnId);
+        }
+      } catch (error) {
+        // Keep unclassified payload pending, never send on a failed read.
+        appendDaemonLog(`completion_origin_read_error: adapter=${adapter} thread=${delivery.threadId} error=${truncatePreview(error instanceof Error ? error.message : String(error), 200)}`);
+      }
+    }
+    return pushable;
+  }
+
+  private async deliverCodexCompletionNotification(
     notificationKey: string,
     senderId: string,
   ): Promise<CodexCompletionDeliveryResult> {
+    const delivery = this.codexCompletionDeliveries.getPending().find((item) => item.key === notificationKey);
+    if (delivery) {
+      const adapter = delivery.adapter ?? "codex";
+      if (isDaemonAdapterKind(adapter) && !await this.shouldPushCompletionForTask(adapter, delivery.threadId)) {
+        this.codexCompletionDeliveries.discard([notificationKey], "suppressed");
+        this.clearCodexFinalReplyCache(delivery.threadId, delivery.turnId);
+        return { status: "missing", sentCount: 0, totalCount: 0 };
+      }
+    }
     return this.deliverCompletionWithScreenPolicy(notificationKey, senderId);
   }
 
@@ -9714,7 +9859,7 @@ export class WeRelayDaemon {
     message: InboundWechatMessage,
   ): Promise<void> {
     const plan = planClawbotBacklogDelivery(
-      this.codexCompletionDeliveries.getPending(),
+      await this.pendingPushableCompletions(),
       Date.now(),
     );
     if (plan.discard.length > 0) {
@@ -9821,13 +9966,13 @@ export class WeRelayDaemon {
   }
 
   private async pendingBacklogCompletions(): Promise<PendingCodexCompletionDelivery[]> {
-    return this.codexCompletionDeliveries.getPending();
+    return this.pendingPushableCompletions();
   }
 
   private async retryPendingCodexCompletionNotifications(
     senderId: string,
   ): Promise<void> {
-    const pending = this.codexCompletionDeliveries.getPending();
+    const pending = await this.pendingPushableCompletions();
     if (pending.length === 0) return;
     const plan = planClawbotBacklogDelivery(pending, Date.now());
 
@@ -9912,7 +10057,7 @@ export class WeRelayDaemon {
       const pending = await this.isApprovalNotificationStillPending(delivery);
       if (pending === false) { this.approvalNotificationDeliveries.cancel(delivery.key); continue; }
       if (pending === null) continue;
-      const numberedText = this.formatNumberedDeliveryText(delivery, delivery.text);
+      const numberedText = await this.formatActionableTaskNotificationText(delivery);
       const heading = numberedText.split("\n")[0]!.slice(0, 120);
       const url = delivery.text.split(/\r?\n/).find((line) => /^https?:\/\//.test(line.trim()));
       const block = url ? `${heading}\n待审批，请打开任务确认\n${url}`
@@ -9921,12 +10066,13 @@ export class WeRelayDaemon {
     }
     // 汇总路径同样只覆盖 3 分钟内完成的通知识。屏幕解锁时的汇总如果也把
     // 较早的积压塞进来，就等于绕过了“先询问再补发”的规则。
+    const pendingCompletions = await this.pendingPushableCompletions();
     const digestPlan = planClawbotBacklogDelivery(
-      this.codexCompletionDeliveries.getPending(),
+      pendingCompletions,
       Date.now(),
     );
     const digestKeys = new Set(digestPlan.autoPush.map((delivery) => delivery.key));
-    for (const delivery of this.codexCompletionDeliveries.getPending()) {
+    for (const delivery of pendingCompletions) {
       if (!digestKeys.has(delivery.key)) continue;
       const heading = this.formatNumberedDeliveryText(delivery, delivery.texts[0] ?? "").split("\n")[0]!.slice(0, 120);
       const url = delivery.url ?? delivery.texts.flatMap((text) => text.split(/\r?\n/)).find((line) => /^https?:\/\//.test(line.trim()));

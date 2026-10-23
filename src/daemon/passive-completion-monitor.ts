@@ -2,6 +2,7 @@ import type { BridgeResumeSessionCandidate, BridgeSessionMessage, BridgeSessionR
 import { BoundedTtlSet } from "../utils/bounded-ttl-cache.ts";
 import { CODEX_COMPLETION_DELIVERABLE_WINDOW_MS } from "./codex-completion-delivery.ts";
 import { finalReplyDeliveryKey } from "./final-reply-delivery.ts";
+import { shouldPushTaskNotification } from "./subtask-notification-policy.ts";
 
 export type DesktopCompletion = {
   adapter: "codex" | "workbuddy";
@@ -52,6 +53,7 @@ export class PassiveCompletionMonitor {
           for (const item of completions) {
             if (this.stopped) break;
             const { summary, finalMessage, candidate } = item;
+            if (!shouldPushTaskNotification("completion", candidate)) continue;
             const now = this.options.now?.() ?? Date.now();
             if (item.adapter !== adapter || summary.status !== "completed" ||
                 !Number.isFinite(summary.completedAtMs) || summary.completedAtMs! > now ||

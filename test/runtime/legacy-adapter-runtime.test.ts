@@ -33,6 +33,7 @@ describe("LegacyAdapterRuntime optional capabilities", () => {
     const runtime = new LegacyAdapterRuntime(buildAdapter());
 
     expect(runtime.getSessionMessages).toBeUndefined();
+    expect(runtime.getSessionNotificationMetadata).toBeUndefined();
     expect(runtime.getSessionMessageMedia).toBeUndefined();
     expect(runtime.sendInputToSession).toBeUndefined();
     expect(runtime.getQueuedTaskInputs).toBeUndefined();
@@ -48,6 +49,11 @@ describe("LegacyAdapterRuntime optional capabilities", () => {
 
   test("forwards optional session and queue methods to the wrapped adapter", async () => {
     const adapter = buildAdapter({
+      getSessionNotificationMetadata(sessionId) {
+        expect(this).toBe(adapter);
+        expect(sessionId).toBe("session-1");
+        return { parentThreadId: "parent" };
+      },
       async getSessionMessages(sessionId) {
         return [{ role: "assistant", text: `reply:${sessionId}` }];
       },
@@ -128,6 +134,8 @@ describe("LegacyAdapterRuntime optional capabilities", () => {
       },
     });
     const runtime = new LegacyAdapterRuntime(adapter);
+
+    expect(runtime.getSessionNotificationMetadata?.("session-1")).toEqual({ parentThreadId: "parent" });
 
     expect(await runtime.getSessionMessages?.("session-1")).toEqual([
       { role: "assistant", text: "reply:session-1" },

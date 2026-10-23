@@ -10,13 +10,15 @@ type CatalogRequest = {
   adapter: DaemonAdapterKind;
   cwd: string;
   limit: number;
-  operation?: "completions";
+  operation?: "completions" | "notificationMetadata";
+  sessionId?: string;
 };
 type CatalogResponse = {
   id: number;
   ok: boolean;
   candidates?: BridgeResumeSessionCandidate[];
   completions?: DesktopCompletion[];
+  metadata?: Pick<BridgeResumeSessionCandidate, "source" | "parentThreadId"> | null;
   error?: string;
 };
 
@@ -27,6 +29,13 @@ type CatalogResponse = {
 if (!isMainThread && parentPort) {
   parentPort.on("message", async (request: CatalogRequest) => {
     try {
+      if (request.operation === "notificationMetadata") {
+        if (request.adapter !== "codex" || !request.sessionId) throw new Error("不支持这个任务元数据来源。");
+        const metadata = await (await import("../bridge/bridge-adapters.codex.ts"))
+          .readCodexSessionNotificationMetadata(request.sessionId);
+        parentPort!.postMessage({ id: request.id, ok: true, metadata } satisfies CatalogResponse);
+        return;
+      }
       if (request.operation === "completions") {
         if (request.adapter !== "codex" && request.adapter !== "workbuddy") throw new Error("不支持这个桌面完成记录来源。");
         const completions = await (await import("./desktop-completion-catalog.ts"))
@@ -136,7 +145,11 @@ export class GlobalTaskCatalogWorker {
     return (await this.request(adapter, cwd, limit, "completions")).completions ?? [];
   }
 
-  private async request(adapter: DaemonAdapterKind, cwd: string, limit: number, operation?: "completions"): Promise<CatalogResponse> {
+  async loadNotificationMetadata(cwd: string, sessionId: string): Promise<Pick<BridgeResumeSessionCandidate, "source" | "parentThreadId"> | null> {
+    return (await this.request("codex", cwd, 1, "notificationMetadata", sessionId)).metadata ?? null;
+  }
+
+  private async request(adapter: DaemonAdapterKind, cwd: string, limit: number, operation?: CatalogRequest["operation"], sessionId?: string): Promise<CatalogResponse> {
     if (this.closed) throw new Error("任务目录后台读取已停止。");
     if (this.pending.size >= 32) throw new Error("任务目录读取繁忙，请稍后重试。");
     const worker = this.getWorker(adapter);
@@ -148,7 +161,7 @@ export class GlobalTaskCatalogWorker {
       worker.ref();
       this.pending.set(id, { resolve, reject, timer, adapter });
       try {
-        worker.postMessage({ id, adapter, cwd, limit, ...(operation ? { operation } : {}) } satisfies CatalogRequest);
+        worker.postMessage({ id, adapter, cwd, limit, ...(operation ? { operation } : {}), ...(sessionId ? { sessionId } : {}) } satisfies CatalogRequest);
       } catch (error) {
         this.pending.delete(id);
         clearTimeout(timer);

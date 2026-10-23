@@ -26,7 +26,7 @@ async function main(): Promise<void> {
       `  - A proxy is required but not configured (set HTTP_PROXY/HTTPS_PROXY and NODE_USE_ENV_PROXY=1)`,
     );
     console.error(
-      `  - The GitHub API or raw content service is temporarily unavailable`,
+      `  - The GitHub Releases API and release feed are temporarily unavailable`,
     );
     console.error(`\nCheck GitHub manually:`);
     console.error(
@@ -48,7 +48,8 @@ async function main(): Promise<void> {
   console.log(`Current version: v${versionInfo.current}\n`);
 
   console.log(`Update instructions:`);
-  console.log(`   Pull the latest GitHub source, run npm ci,`);
+  console.log(`   In ClawBot, reply 更新 to install the published release (including previews).`);
+  console.log(`   Or download that release tag's source, run npm ci,`);
   console.log(`   then install the local tarball produced by npm pack.\n`);
 
   console.log(`For more information:`);
