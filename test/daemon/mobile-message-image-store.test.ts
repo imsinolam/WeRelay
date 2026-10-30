@@ -71,6 +71,17 @@ describe("MobileMessageImageStore", () => {
         turnId: "turn-1",
         images: [{ source: "local", path: originalPath, alt: "审批截图.jpg" }],
       }]);
+      const wrapped = "图片：png1\n这种连续审批应该怎么做\n[image]\n</image>";
+      expect(store.enrich([
+        { role: "user", text: wrapped, turnId: "turn-1" },
+        { role: "user", text: "这种连续审批应该怎么做", turnId: "different-turn" },
+      ], { adapter: "codex", threadId: "thread-1" }).map(message => message.images)).toEqual([
+        [{ source: "local", path: originalPath, alt: "审批截图.jpg" }], undefined,
+      ]);
+      expect(store.enrich([
+        { role: "user", text: "另一个引导消息", turnId: "turn-1" },
+        { role: "user", text: wrapped },
+      ], { adapter: "codex", threadId: "thread-1", requireTurnMatch: true }).map(message => message.images)).toEqual([undefined, undefined]);
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });
     }

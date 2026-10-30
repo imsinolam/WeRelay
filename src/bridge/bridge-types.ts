@@ -165,6 +165,7 @@ export type BridgeTurnInputItem =
 
 export type BridgeQueuedTaskInput = {
   id: string;
+  clientId?: string;
   text: string;
   imageCount: number;
   createdAtMs?: number;
@@ -397,6 +398,18 @@ export type BridgeEvent =
       timestamp: string;
     };
 
+export type BridgeSessionComposerDraft = {
+  supported: boolean;
+  draft: { text: string; revision: string } | null;
+  unavailableReason?: string;
+};
+
+export type BridgeSessionSendOptions = {
+  /** Only consume/submit the exact native draft observed by the web composer. */
+  composerDraftRevision?: string;
+  clientId?: string;
+};
+
 export interface BridgeAdapter {
   setEventSink(sink: (event: BridgeEvent) => void): void;
   start(): Promise<void>;
@@ -404,11 +417,15 @@ export interface BridgeAdapter {
   sendInputToSession?(
     sessionId: string,
     text: string,
+    options?: BridgeSessionSendOptions,
   ): Promise<BridgeSessionSendResult | void>;
   sendInputItemsToSession?(
     sessionId: string,
     items: BridgeTurnInputItem[],
+    options?: BridgeSessionSendOptions,
   ): Promise<BridgeSessionSendResult | void>;
+  /** Read the exact native editor without selecting a task or starting an owner. */
+  getSessionComposerDraft?(sessionId: string): Promise<BridgeSessionComposerDraft>;
   listResumeSessions(limit?: number, options?: { includeInternal?: boolean }): Promise<BridgeResumeSessionCandidate[]>;
   /** Read task origin without selecting/following it or starting an owner. */
   getSessionNotificationMetadata?(sessionId: string): Pick<BridgeResumeSessionCandidate, "parentThreadId" | "source"> | null;

@@ -60,9 +60,9 @@ describe("global task catalog runtime signals", () => {
       pageSize: 10,
     });
     expect(inferredStatuses).toBe(true);
-    expect(text).toContain("正在执行的任务 · 处理中 🟢");
+    expect(text).toContain("正在执行的任务 · 运行中 🟢");
     expect(text).toContain("已完成的任务");
-    expect(text).not.toContain("已完成的任务 · 处理中 🟢");
+    expect(text).not.toContain("已完成的任务 · 运行中 🟢");
   });
 
   test("lightweight Codex directory includes real desktop project names", async () => {

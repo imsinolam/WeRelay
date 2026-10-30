@@ -1,3 +1,4 @@
+import { serveMobileAppBundle } from "./mobile-app-bundle.ts";
 import { parseMobileNewTaskSettings, type MobileNewTaskSettings } from "./mobile-new-task-settings.ts";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -45,16 +46,8 @@ import {
 } from "./codex-mobile-web.ts";
 
 const WE_RELAY_ASSET_VERSION_PLACEHOLDER = "__WE_RELAY_ASSET_VERSION__";
-export const CODEX_MOBILE_ASSET_VERSION = crypto.createHash("sha256")
-  .update(CODEX_MOBILE_CSS)
-  .update("\0")
-  .update(CODEX_MOBILE_JS)
-  .update("\0")
-  .update(SESSION_ORGANIZER_HTML)
-  .update(SESSION_ORGANIZER_CSS)
-  .update(SESSION_ORGANIZER_JS)
-  .digest("hex")
-  .slice(0, 12);
+import { CODEX_MOBILE_ASSET_VERSION } from "./mobile-asset-version.ts";
+export { CODEX_MOBILE_ASSET_VERSION } from "./mobile-asset-version.ts";
 
 export type CodexMobileTaskShortTarget = import("../relay/relay-task-short-code.ts").WeRelayTaskShortTarget;
 
@@ -207,6 +200,7 @@ export type CodexMobileAdapterSwitchResult = {
 
 export type CodexMobileQueuedMessage = {
   id: string;
+  clientId?: string;
   text: string;
   imageCount: number;
   createdAtMs?: number;
@@ -226,6 +220,7 @@ export type CodexMobileMessageInput = {
   retry?: boolean;
   createTaskSourceThreadId?: string;
   newTaskSettings?: MobileNewTaskSettings;
+  composerDraftRevision?: string;
 };
 
 export type CodexMobileSendResult = {
@@ -365,6 +360,7 @@ export function createCodexMobileTranscriptRevision(
     })),
     queuedMessages: transcript.queuedMessages.map((message) => ({
       id: message.id,
+      clientId: message.clientId ?? "",
       text: message.text,
       imageCount: message.imageCount,
       createdAtMs: message.createdAtMs ?? 0,
@@ -478,6 +474,10 @@ export type StartCodexMobileServerOptions = {
     threadId: string,
     adapter?: string,
   ) => Promise<BridgeSessionPermissionState>;
+  readTaskComposerDraft?: (
+    threadId: string,
+    adapter?: string,
+  ) => Promise<import("../bridge/bridge-types.ts").BridgeSessionComposerDraft>;
   setTaskPermission?: (
     threadId: string,
     permission: string,
@@ -1294,6 +1294,10 @@ function createRequestHandler(
         );
         return;
       }
+      if (method === "GET" && url.pathname === "/app-bundle") {
+        serveMobileAppBundle(response);
+        return;
+      }
       if (method === "GET" && url.pathname === "/app-version") {
         sendJson(response, 200, { version: CODEX_MOBILE_ASSET_VERSION });
         return;
@@ -1841,6 +1845,20 @@ function createRequestHandler(
         return;
       }
 
+      const composerDraftRoute = url.pathname.match(/^\/api\/tasks\/([^/]+)\/composer-draft$/);
+      if (composerDraftRoute?.[1] && method === "GET") {
+        const threadId = decodeURIComponent(composerDraftRoute[1]);
+        if (!threadId.trim() || threadId.length > 200 || threadId.startsWith("local-new-")) {
+          throw new HttpError(400, "草稿任务标识无效。");
+        }
+        // Deliberately not a prewarm/cache endpoint: this is unsent private input.
+        const draft = options.readTaskComposerDraft
+          ? await options.readTaskComposerDraft(threadId, requestedAdapter)
+          : { supported: false, draft: null };
+        sendJson(response, 200, { threadId, ...draft }, { "cache-control": "no-store" });
+        return;
+      }
+
       const modelRoute = url.pathname.match(/^\/api\/tasks\/([^/]+)\/model$/);
       if (modelRoute?.[1] && (method === "GET" || method === "PUT")) {
         const tasks = await options.listTasks(requestedAdapter);
@@ -2074,6 +2092,10 @@ function createRequestHandler(
           if (Array.from(text).length > 20_000) {
             throw new HttpError(413, "消息不能超过 20000 个字符。");
           }
+          if (body.composerDraftRevision !== undefined &&
+            (typeof body.composerDraftRevision !== "string" || !/^[A-Za-z0-9._~-]{1,160}$/.test(body.composerDraftRevision))) {
+            throw new HttpError(400, "草稿版本无效，请重新打开任务。");
+          }
           let newTaskSettings: MobileNewTaskSettings | undefined;
           try {
             newTaskSettings = parseMobileNewTaskSettings(body.newTaskSettings);
@@ -2087,6 +2109,7 @@ function createRequestHandler(
               threadId,
               {
                 clientId,
+                ...(body.composerDraftRevision ? { composerDraftRevision: body.composerDraftRevision as string } : {}),
                 ...(newTaskSettings ? { newTaskSettings } : {}),
                 text,
                 images,

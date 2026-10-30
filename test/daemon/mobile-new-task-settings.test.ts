@@ -1,12 +1,12 @@
 import { expect, test } from "bun:test";
-import { CODEX_MOBILE_JS } from "../../src/daemon/codex-mobile-web.ts";
+import { CODEX_MOBILE_APP_JS } from "../../src/daemon/codex-mobile-web.ts";
 import { applyMobileNewTaskSettings, parseMobileNewTaskSettings } from "../../src/daemon/mobile-new-task-settings.ts";
 
 function loadDraftModelRuntime(api: (path: string) => Promise<unknown>, schedule = setTimeout) {
   const state: any = { currentThreadId: "local-new-draft", currentAdapter: "codex", taskModels: {}, modelRequestId: 0 };
   const task: any = { threadId: state.currentThreadId, localCreationState: "ready" };
-  const start = CODEX_MOBILE_JS.indexOf("  async function loadCurrentTaskModel(");
-  const end = CODEX_MOBILE_JS.indexOf("  async function loadCurrentTaskPermission(", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  async function loadCurrentTaskModel(");
+  const end = CODEX_MOBILE_APP_JS.indexOf("  async function loadCurrentTaskPermission(", start);
   const load = new Function("state", "api", "task", "setTimeout", `
     function currentTask() { return task; }
     function taskNeedsCreation() { return true; }
@@ -14,7 +14,7 @@ function loadDraftModelRuntime(api: (path: string) => Promise<unknown>, schedule
     function renderModelControl() {}
     function adapterApiPath(path) { return path; }
     function applyDraftModelSelection(payload) { return payload; }
-    ${CODEX_MOBILE_JS.slice(start, end)}
+    ${CODEX_MOBILE_APP_JS.slice(start, end)}
     return loadCurrentTaskModel;
   `)(state, api, task, schedule);
   return { state, task, load };
@@ -45,9 +45,9 @@ test("new task settings are applied in order and require confirmation before fir
 });
 
 function draftSelector() {
-  const start = CODEX_MOBILE_JS.indexOf("  function applyDraftModelSelection(");
-  const end = CODEX_MOBILE_JS.indexOf("  function saveDraftModelSelection(", start);
-  return new Function(CODEX_MOBILE_JS.slice(start,end)+";return applyDraftModelSelection;")();
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function applyDraftModelSelection(");
+  const end = CODEX_MOBILE_APP_JS.indexOf("  function saveDraftModelSelection(", start);
+  return new Function(CODEX_MOBILE_APP_JS.slice(start,end)+";return applyDraftModelSelection;")();
 }
 
 test("draft reasoning choices follow the selected model instead of the old model", () => {
@@ -66,13 +66,13 @@ test("draft choices stay local and survive state refresh without updating anothe
   const task: any = {threadId:"local-new-draft"};
   const state: any = {taskModels:{draft:{canChange:true,currentModel:"a",options:[{id:"b",reasoningEffortOptions:[{id:"high"}]}]} }};
   let saves = 0;
-  const start = CODEX_MOBILE_JS.indexOf("  function applyDraftModelSelection(");
-  const end = CODEX_MOBILE_JS.indexOf("  async function loadCurrentTaskModel(",start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function applyDraftModelSelection(");
+  const end = CODEX_MOBILE_APP_JS.indexOf("  async function loadCurrentTaskModel(",start);
   const save = new Function("state","task","rememberLocalTaskDraft",`
     function taskNeedsCreation(){return true;} function currentTask(){return task;} function currentTaskModelState(){return state.taskModels.draft;}
     function currentTaskModelKey(){return 'draft';} function saveCurrentConversationSnapshot(){}
     function closeModelMenu(){} function closeSessionMenu(){} function renderModelControl(){}
-    ${CODEX_MOBILE_JS.slice(start,end)};return saveDraftModelSelection;
+    ${CODEX_MOBILE_APP_JS.slice(start,end)};return saveDraftModelSelection;
   `)(state,task,()=>{saves++;});
   save({model:"b"});save({reasoningEffort:"high"});
   expect(task.newTaskSettings).toEqual({model:"b",reasoningEffort:"high"});
@@ -87,9 +87,9 @@ test("catalog failures settle into a retryable error instead of perpetual loadin
 });
 
 test("entering a local draft starts settings loads before the early return", () => {
-  const start = CODEX_MOBILE_JS.indexOf("  async function selectTask(");
-  const end = CODEX_MOBILE_JS.indexOf("  function ", start+30);
-  const source = CODEX_MOBILE_JS.slice(start,end);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  async function selectTask(");
+  const end = CODEX_MOBILE_APP_JS.indexOf("  function ", start+30);
+  const source = CODEX_MOBILE_APP_JS.slice(start,end);
   expect(source).toContain(`if (isTemporaryTask(currentTask())) {
       void loadCurrentTaskModel(false);
       void loadCurrentTaskPermission(false);
@@ -108,9 +108,9 @@ test("a failed settings confirmation prevents task input from being dispatched",
 });
 
 test("accepted drafts can read their creation receipt and refresh real-task settings", () => {
-  const start = CODEX_MOBILE_JS.indexOf("  async function loadMessages(");
-  const end = CODEX_MOBILE_JS.indexOf("  async function refreshMessagesIfChanged(",start);
-  const source = CODEX_MOBILE_JS.slice(start,end);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  async function loadMessages(");
+  const end = CODEX_MOBILE_APP_JS.indexOf("  async function refreshMessagesIfChanged(",start);
+  const source = CODEX_MOBILE_APP_JS.slice(start,end);
   expect(source).toContain("taskNeedsCreation(currentTask()) && !state.pendingMessages.some");
   expect(source).toContain("message.threadId === state.currentThreadId && message.serverAcknowledged");
   expect(source).toContain(`finishLocalTaskDraft(payload.resolvedThreadId);

@@ -135,16 +135,38 @@ async function readPiSessionIndex(root: string): Promise<Array<{ file: string; c
 }
 
 export async function listPiSessions(options: { root?: string; limit?: number } = {}): Promise<BridgeResumeSessionCandidate[]> {
-  const index = await readPiSessionIndex(options.root ?? piSessionRoot());
+  const root = path.resolve(options.root ?? piSessionRoot());
+  const index = await readPiSessionIndex(root);
   const unique = new Map<string, BridgeResumeSessionCandidate>();
   for (const { candidate } of index) if (!unique.has(candidate.sessionId)) unique.set(candidate.sessionId, candidate);
   const owners = discoverPiOwners();
-  return [...unique.values()].map((candidate) => {
-    const matching = owners.filter((owner) => owner.sessionId === candidate.sessionId);
-    const owner = matching.length === 1 ? matching[0] : undefined;
-    return owner?.status ? { ...candidate, runtimeStatus: owner.status === "busy"
-      ? { type: "active" as const, activeFlags: [] } : { type: "idle" as const } } : candidate;
-  })
+  for (const owner of owners) {
+    // Keep the exact unique-owner rule used by sending. A missing JSONL is
+    // normal before the first persisted user message, not an absent task.
+    if (!owner.status || owners.filter((entry) => entry.sessionId === owner.sessionId).length !== 1) continue;
+    const candidate = unique.get(owner.sessionId);
+    if (!candidate) {
+      // A configured catalog root is a real boundary: do not import every
+      // running Pi from another profile merely because its file is absent here.
+      if (!owner.sessionFile) continue;
+      const relative = path.relative(root, owner.sessionFile);
+      if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) continue;
+    }
+    const activityAtMs = Math.max(owner.startedAtMs ?? 0, owner.completedAtMs ?? 0);
+    const lastUpdatedAt = candidate
+      ? new Date(Math.max(Date.parse(candidate.lastUpdatedAt), activityAtMs)).toISOString()
+      : new Date(activityAtMs || owner.advertisedAtMs!).toISOString();
+    unique.set(owner.sessionId, {
+      ...(candidate ?? {
+        sessionId: owner.sessionId, threadId: owner.sessionId, title: "Pi 新任务",
+        cwd: owner.cwd, projectId: owner.cwd, projectName: path.basename(owner.cwd),
+      }),
+      lastUpdatedAt,
+      runtimeStatus: owner.status === "busy" ? { type: "active", activeFlags: [] } : { type: "idle" },
+    });
+  }
+  return [...unique.values()]
+    .sort((a, b) => b.lastUpdatedAt.localeCompare(a.lastUpdatedAt) || a.sessionId.localeCompare(b.sessionId))
     .slice(0, Math.max(0, Math.min(options.limit ?? 100, 500)));
 }
 

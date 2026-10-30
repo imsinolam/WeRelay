@@ -1,11 +1,15 @@
+import { chatUI, ChatElement } from "./helpers/chat-components.ts";
+import { CODEX_MOBILE_APP_JS } from "../../src/daemon/codex-mobile-web.ts";
 import { expect, test } from "bun:test";
 import { CODEX_MOBILE_JS, CODEX_MOBILE_CSS } from "../../src/daemon/codex-mobile-web.ts";
 import { createCodexMobileTranscriptRevision } from "../../src/daemon/codex-mobile-server.ts";
 
 function helpers(state: Record<string, unknown>) {
-  const start = CODEX_MOBILE_JS.indexOf("  function messageNodeBaseKey");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function renderResponsePendingIndicator", start);
-  return new Function("state", "document", `
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function messageNodeBaseKey");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function renderResponsePendingIndicator", start);
+  const document = { createElement: () => new ChatElement() };
+  const messageBubble = chatUI().createMessageBubble({ document });
+  return new Function("state", "document", "messageBubble", `
     function escapeHtml(text) { return String(text).replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c])); }
     function renderMarkdown(text) { return escapeHtml(text); }
     function renderMessageImages() { return ''; }
@@ -15,9 +19,9 @@ function helpers(state: Record<string, unknown>) {
     function formatClockTime(ms) { return String(ms); }
     function currentAdapterName() { return 'Codex'; }
     function bindMessageImageActions() {}
-    ${CODEX_MOBILE_JS.slice(start, end)}
+    ${CODEX_MOBILE_APP_JS.slice(start, end)}
     return { renderMessageRow, resolveMessageFooter, getMessageNode, messageNodeKey };
-  `)(state, { createElement: () => ({querySelector: () => null}) });
+  `)(state, document, messageBubble);
 }
 const message = { role: "task" as const, id: "handoff", text: "已确认候选。", turnId: "turn", createdAtMs: 1000,
   sourceTask: {adapter: "codex", sessionId: "source-task"} };
@@ -50,9 +54,9 @@ test("source identity survives message cache and different source messages do no
 });
 
 test("persistent conversation cache preserves source identity without retaining arbitrary metadata", () => {
-  const start = CODEX_MOBILE_JS.indexOf("  function sanitizePersistentMessage(");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function sanitizePersistentMessages", start);
-  const sanitize = new Function(`${CODEX_MOBILE_JS.slice(start, end)}; return sanitizePersistentMessage;`)();
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function sanitizePersistentMessage(");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function sanitizePersistentMessages", start);
+  const sanitize = new Function(`${CODEX_MOBILE_APP_JS.slice(start, end)}; return sanitizePersistentMessage;`)();
   const cached = sanitize({...message, sourceTask: {...message.sourceTask, privateField: "do not retain"}});
   expect(cached.sourceTask).toEqual(message.sourceTask);
   expect(cached.role).toBe("task");
@@ -63,9 +67,9 @@ test("persistent conversation cache preserves source identity without retaining 
 });
 
 test("a turn triggered by a task message puts new progress after that message", () => {
-  const start = CODEX_MOBILE_JS.indexOf("  function runHeaderInsertIndex");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function isVisibleConversationMessage", start);
-  const insert = new Function(`${CODEX_MOBILE_JS.slice(start, end)}; return runHeaderInsertIndex;`)();
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function runHeaderInsertIndex");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function isVisibleConversationMessage", start);
+  const insert = new Function(`${CODEX_MOBILE_APP_JS.slice(start, end)}; return runHeaderInsertIndex;`)();
   const messages = [{role: "user", text: "earlier", turnId: "old"}, {role: "assistant", text: "done", turnId: "old"}, message];
   expect(insert(messages, {turnId: "turn", status: "running"})).toBe(3);
 });

@@ -7,6 +7,7 @@ import type {
 } from "../bridge/bridge-types.ts";
 import { ensureWorkspaceChannelDir } from "../wechat/channel-config.ts";
 import { writePrivateFileAtomic } from "../utils/private-files.ts";
+import { normalizeMobileMessageText } from "./mobile-message-text.ts";
 
 const MOBILE_MESSAGE_IMAGE_STORE_VERSION = 1;
 const MOBILE_MESSAGE_IMAGE_STORE_LIMIT = 500;
@@ -36,7 +37,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function normalizeMessageText(text: string): string {
-  return text
+  return normalizeMobileMessageText(text, true)
     .replace(/```wechat-attachments[ \t]*\n[\s\S]*?\n```/gi, "")
     .replace(/!\[[^\]]*\]\(\s*(?:<[^>]+>|[^\s)]+)(?:\s+["'][^"']*["'])?\s*\)/g, "")
     .replace(/<image\b[^>]*>/gi, "")
@@ -160,7 +161,7 @@ export class MobileMessageImageStore {
 
   enrich(
     messages: BridgeSessionMessage[],
-    options: { adapter: string; threadId: string },
+    options: { adapter: string; threadId: string; requireTurnMatch?: boolean },
   ): BridgeSessionMessage[] {
     const scoped = this.read().records.filter((record) =>
       record.adapter === options.adapter && record.threadId === options.threadId
@@ -176,15 +177,17 @@ export class MobileMessageImageStore {
       let recordIndex = -1;
       if (message.turnId) {
         for (let index = scoped.length - 1; index >= 0; index -= 1) {
-          if (!used.has(index) && scoped[index]?.turnId === message.turnId) {
+          if (!used.has(index) && scoped[index]?.turnId === message.turnId &&
+              normalizeMessageText(scoped[index]!.text) === normalizedText) {
             recordIndex = index;
             break;
           }
         }
       }
-      if (recordIndex < 0) {
+      if (recordIndex < 0 && !options.requireTurnMatch) {
         for (let index = scoped.length - 1; index >= 0; index -= 1) {
           if (used.has(index)) continue;
+          if (message.turnId && scoped[index]!.turnId && message.turnId !== scoped[index]!.turnId) continue;
           const candidateText = normalizeMessageText(scoped[index]!.text);
           if (
             normalizedText === candidateText ||

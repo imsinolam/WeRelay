@@ -1,3 +1,4 @@
+import { serveMobileAppBundle } from "../daemon/mobile-app-bundle.ts";
 import crypto from "node:crypto";
 import { attachRelayWebSocketServer } from "./relay-websocket-server.ts";
 import http, {
@@ -965,6 +966,10 @@ export async function startWeRelayRelayServer(
           MOBILE_JS_ASSET,
           MOBILE_ASSET_SECURITY_HEADERS,
         );
+        return;
+      }
+      if (method === "GET" && url.pathname === "/app-bundle") {
+        serveMobileAppBundle(response);
         return;
       }
       if (method === "GET" && url.pathname === "/app-version") {

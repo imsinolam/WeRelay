@@ -115,7 +115,7 @@ test("mobile failure notification registers the original task and adds its reply
     reconcileFailedMobileMessages: async () => {}, listMobileTasks: async () => [{ threadId: "same", title: "Pi task" }] });
   try {
     await daemon.deliverMobileMessageFailureNotifications();
-    expect(sent[0]).toStartWith("[任务 2 · Pi · Pi task] 网页消息多次提交仍失败");
+    expect(sent[0]).toStartWith("[任务 2 · Pi · Pi task] 网页消息未能提交");
     expect(sent[0]).toContain("内容：continue");
   } finally { fs.rmSync(directory, { recursive: true, force: true }); }
 });

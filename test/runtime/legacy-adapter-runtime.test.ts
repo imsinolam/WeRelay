@@ -198,3 +198,22 @@ test("binds task-scoped pending questions to their original adapter owner", () =
   expect(runtime.getPendingTaskUserInput?.("task")?.threadId).toBe("task");
   expect(runtime.getPendingTaskUserInput?.("other")).toBeNull();
 });
+
+
+test("forwards optional native draft read and versioned send to the same adapter with this binding", async () => {
+  expect(new LegacyAdapterRuntime(buildAdapter()).getSessionComposerDraft).toBeUndefined();
+  const adapter = buildAdapter({
+    async getSessionComposerDraft(id) {
+      expect(this).toBe(adapter); expect(id).toBe("task");
+      return { supported: true, draft: { text: "  native\n", revision: "rev" } };
+    },
+    async sendInputToSession(id, text, options) {
+      expect(this).toBe(adapter); expect(id).toBe("task"); expect(text).toBe("edited");
+      expect(options).toEqual({ composerDraftRevision: "rev", clientId: "once" });
+      return { queued: false };
+    },
+  });
+  const runtime = new LegacyAdapterRuntime(adapter);
+  expect((await runtime.getSessionComposerDraft!("task")).draft?.text).toBe("  native\n");
+  await runtime.sendInputToSession!("task", "edited", { composerDraftRevision: "rev", clientId: "once" });
+});

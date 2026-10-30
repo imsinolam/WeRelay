@@ -106,40 +106,31 @@ describe("documentation structure", () => {
     expect(docsIndex).toContain("开发协作/多Agent协作规范.md");
   });
 
-  test("documents the two-stage experience and public release boundary", () => {
-    const flow = fs.readFileSync(
-      path.join(root, "docs/发布/体验部署与正式发布.md"),
-      "utf8",
-    );
-    const publishing = fs.readFileSync(
-      path.join(root, "docs/发布/对外发布操作手册.md"),
-      "utf8",
-    );
-    const collaboration = fs.readFileSync(
-      path.join(root, "docs/开发协作/多Agent协作规范.md"),
-      "utf8",
-    );
+  test("documents one immutable version across deployment and GitHub publication", () => {
+    const flow = fs.readFileSync(path.join(root, "docs/发布/体验部署与正式发布.md"), "utf8");
+    const publishing = fs.readFileSync(path.join(root, "docs/发布/对外发布操作手册.md"), "utf8");
+    const collaboration = fs.readFileSync(path.join(root, "docs/开发协作/多Agent协作规范.md"), "utf8");
     const agents = fs.readFileSync(path.join(root, "AGENTS.md"), "utf8");
     const docsIndex = fs.readFileSync(path.join(root, "docs/README.md"), "utf8");
 
-    expect(flow).toContain("体验部署不是 GitHub 正式发布");
-    expect(flow).toContain("开发完成必须验证并提交");
+    expect(flow).toContain("所有新版本统一使用 `0.x.x`，只递增最后一位");
+    expect(flow).toContain("0.3.22 → 0.3.23 → 0.3.24");
+    expect(flow).toContain("末位可以超过 9");
+    expect(flow).toContain("版本已打包、部署或上传后不得覆盖为不同内容");
+    expect(flow).toContain("仅把同一包公开到 GitHub 时不再次改号、不重新打包");
+    expect(flow).toContain("开发 Agent 实现、验证并提交");
     expect(flow).toContain("等待用户明确的集中部署指令");
     expect(flow).toContain("不能并发覆盖服务器");
-    expect(flow).not.toContain("运行代码完成提交后默认进入体验部署");
     expect(flow).toContain("已提交但尚未部署");
-    expect(flow).toContain("只有用户明确要求“发布 GitHub 新版本”");
-    expect(flow).toContain("正式发布只能基于已经完成体验验收的候选基线");
-    expect(flow).toContain("新提交不得未经体验直接加入正式版本");
-    expect(flow).toContain("维护者 Mac 禁止直接向 GitHub push");
-    expect(collaboration).toContain("体验整合 Agent");
-    expect(collaboration).toContain("正式发布 Agent");
-    expect(agents).toContain("experience integration Agent");
+    expect(flow).toContain("真实 Agent 与 ClawBot 的收发、审批和最终回复回推由用户部署后自行验收");
+    expect(flow).toContain("不单独阻止用户已经明确授权的 GitHub 发布");
+    expect(flow).toContain("GitHub 失败不回退 Mac 直推，不强推，不降低分支保护");
+    expect(flow).not.toContain("体验候选使用预发布版本");
+    expect(flow).not.toContain("必须先确认目标文件树已经完成体验验收");
+    expect(collaboration).toContain("不再生成 preview/rc");
     expect(agents).toContain("Only an explicit user request starts a batch deployment");
-    expect(agents).not.toContain("The user does not need to repeat a deployment instruction");
-    expect(flow).toContain("开发 Agent 在完成验证、提交与登记待整合状态后即可交付");
-    expect(agents).toContain("public release Agent");
-    expect(publishing).toContain("本文只用于执行两阶段流程的第二阶段");
+    expect(agents).toContain("do not create new preview/rc versions");
+    expect(publishing).toContain("使用同一版本、同一源码和唯一 tarball");
     expect(docsIndex).toContain("发布/体验部署与正式发布.md");
   });
 

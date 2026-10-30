@@ -3,6 +3,9 @@
 ## 当前工作基线（先检查，再修改）
 本地目录名仍可能是 `DeskRelay`；本地 `main` 是现行 WeRelay 源码整合线，但不等于已部署并验活的运行基线。旧 DeskRelay 主线已归档，不能作为开发起点。开发前在目标 worktree 根目录运行 `npm run baseline:check -- --active`；若旧工作树没有此命令，不要以“缺少脚本”为理由继续修改，先在现行 WeRelay worktree 中确认 `refs/werelay/active-baseline` 指向已部署候选，再从该提交新建工作树移植旧补丁。此引用由唯一体验整合负责人在候选**成功部署并验活后**更新，不由普通开发 Agent 自行推进。本机共享 Git `pre-commit` 守卫会拒绝旧历史或旧产品身份的提交；不要用 `--no-verify` 规避。旧工作树只供只读审查与提取补丁，不直接作为新功能起点。
 
+## 统一版本规则（2026-10-30）
+所有新版本统一用 `0.x.x`，只递增最后一位（如 `0.3.22 → 0.3.23`），不再创建 preview/rc 或“转正式”版本。每版对应已提交源码与唯一 tarball，同版本禁止覆盖不同内容。部署与 GitHub 公开仍分别授权，但使用同一版本、同一产物；开发只提交，发布 Agent 负责整合、部署与公开，不增设中间角色。真实 Agent/ClawBot 验活由用户自行完成，不能冒称通过，也不额外阻止用户已授权的公开。详见 `docs/发布/体验部署与正式发布.md`。
+
 ## 当前交付边界（2026-09-13）
 开发完成必须验证、创建提交并登记完整 SHA；没有提交只能报告“未完成交付”。开发提交不自动部署，用户明确要求统一部署后，发布负责人同时盘点本机与开发服务器的提交、逐项恢复已完成但漏提交的工作，记录纳入或暂缓理由，不能静默排除。体验部署不等于 GitHub 正式发布。
 
@@ -145,23 +148,22 @@ WeRelay may be edited by multiple Agents at the same time. Every ordinary develo
 
 Before modifying any file, every Agent must first check the repository up to the latest state and record the baseline SHA; repeat that check whenever the task, branch, or worktree changes. This repository has no GitHub remote configured — GitHub writes happen only on the dedicated publishing server — so "latest state" means the newest local branches, worktrees, and commits, not `git fetch`. If the baseline branch has moved, rebase or reopen the worktree onto the new baseline before editing rather than continuing from a stale one. See `docs/开发协作/多Agent协作规范.md` for the exact commands.
 
-The delivery flow has two separate ownership stages:
+Development and release are the only two roles. A development Agent validates, commits and registers its full SHA as pending; it never deploys automatically. Only an explicit user request starts a batch deployment or GitHub publication, serialized by one release Agent.
 
-1. An **experience integration Agent** starts a batch only after the user explicitly requests deployment. A runtime-changing commit is registered as pending, not deployed automatically. The development Agent must hand off its SHA to the single active integration owner; if no owner exists, the current Agent may take the role only with user deployment authorization and after a full repository inventory. Integration and deployment are serialized, so ordinary Agents must never deploy their own branches concurrently or overwrite a newer candidate. The integration Agent runs the complete gates, creates a traceable preview version and tarball, installs that same artifact locally and on the public Relay, and performs real acceptance checks. It must not push GitHub, create a public tag, or call the candidate a formal release.
-2. A **public release Agent** may act only after the user explicitly asks to publish a GitHub version. It may publish only the last candidate baseline that completed experience acceptance. Newly discovered commits must not be silently included; they require a new candidate deployment and observation period first. GitHub fetch, public commit, candidate-branch CI, fast-forward `main`, tag, and remote verification still run on the configured publishing server, with no local-push fallback.
+The release Agent inventories all worktrees, branches, dirty files and candidate commits, integrates explicit SHAs in an isolated worktree, reruns validation after conflicts, and never packages an uncommitted shared tree. Use one plain `0.x.x` version for source, tarball, local installation, Relay and GitHub. Increment only the last number for every new artifact; do not create new preview/rc versions or overwrite an allocated version with different content. Deployment and GitHub publication remain separately authorized operations, not separate version lines. Historical prerelease support stays read-only for compatibility.
 
-Only one integration owner may control a candidate baseline at a time, and only one public release Agent may control a formal version at a time. Either role must inventory every worktree, branch, dirty file, and candidate commit, integrate by explicit SHA in an isolated worktree, rerun validation after conflicts, and never deploy or publish an uncommitted shared working tree.
+GitHub writes, fetch, public commits, candidate-branch CI, fast-forward main, tags and remote verification run only on the publishing server. No Mac push fallback. Real Agent/ClawBot acceptance belongs to the user; report pending honestly without inventing a separate wait before an explicitly authorized publication.
 
 Chinese release notes are the user-facing source of truth. Write them in plain, non-technical Chinese: describe what users can now do, what visible problem was fixed, whether any action is required, and what limitations remain. Keep class names, fields, file paths, commit SHAs, test commands, and implementation details in the technical report or commit body, not in the public change record. Follow `docs/开发协作/多Agent协作规范.md`, `docs/发布/体验部署与正式发布.md`, `docs/发布/对外发布操作手册.md`, and `docs/发布/版本记录/中文版本说明模板.md`.
 
 ## 仅 GitHub 发布边界
-用户明确要求“发布，不要部署”时，不安装、不重启、不修改公网服务、不推进活动运行基线；正式版本仍只能使用已体验验收的候选。未体验的新提交单独登记，不因发布授权自动上线。面向已安装用户的 ClawBot 更新检测包含已发布的正式及预发布 Release；提醒本身不安装，只有用户明确回复“更新”才下载对应 tag 源码、构建 tarball 并安装，不自动重启，不从草稿、裸 tag 或 main 分支安装。旧运行端必须先安装此能力才会生效；这不授予开发 Agent 部署或发布权限。
+用户明确要求“发布，不要部署”时，不安装、不重启、不修改公网服务、不推进活动运行基线；公开版本必须有完整审查和门禁证据，用户体验状态单独如实记录。发布授权不自动包含部署。面向已安装用户的 ClawBot 更新检测包含已发布的正式及预发布 Release；提醒本身不安装，只有用户明确回复“更新”才下载对应 tag 源码、构建 tarball 并安装，不自动重启，不从草稿、裸 tag 或 main 分支安装。旧运行端必须先安装此能力才会生效；这不授予开发 Agent 部署或发布权限。
 
 ## Release Process
 - Development completion requires scoped validation, a local commit and registration of the full SHA as pending integration. It does not automatically authorize deployment or wake the release Agent. Only an explicit user request starts a batch deployment, owned by one integration Agent. Report committed-but-not-deployed work clearly; never claim deployment until the same candidate tarball is installed and verified. Documentation-only, test-description or CI-maintenance commits do not restart runtime services when packaged runtime behavior is unchanged.
-- Experience deployment is not a GitHub formal release. Use a traceable preview version such as `0.3.5-preview.20260826.1`, record the candidate SHA and tarball SHA-256, deploy the same tarball locally and to the public Relay, retain a rollback artifact, and start observation from the last successful deployment.
+- Deployment is not GitHub publication. Both use the same plain `0.x.x` version and immutable tarball; record source SHA and tarball SHA-256, retain a rollback artifact, and report actual installed and published states separately.
 - If any source or packaged content changes during observation, create a new commit, rerun the complete gates, rebuild and redeploy a new candidate, and restart the observation baseline. Rolling back a service must not delete or rewrite Git history.
-- Only an explicit user instruction to publish a GitHub version starts the public release stage. A formal release must be based on the last experience-approved candidate; new Agent commits default to the next candidate and cannot bypass experience acceptance.
+- Only an explicit user instruction to publish a GitHub version authorizes public writes. Review all completed commits, run full gates and disclose pending user experience. A combined publish-and-deploy request may complete both operations with one artifact; it does not require a separately numbered preview.
 - Keep README focused on product relationships and the shortest successful setup; move command matrices and advanced configuration into `docs/`.
 - Add one release note for the current public baseline instead of rewriting historical release notes to pretend they used the new name.
 - For the public repository, export a privacy-checked snapshot and create a clean Git history; do not push this private development history directly.
@@ -196,6 +198,7 @@ Missing WeChat replies usually reduce to one of these questions: did the active 
 Prefer surgical fixes backed by focused tests. Avoid broad rewrites of adapter flow, transport state, or release docs unless the user explicitly asks for a larger redesign.
 
 ## Agent Experience Records
+- **部署后 Agent 与 ClawBot 的真实验活由用户自行完成（2026-10-28）。** 部署 Agent 只做质量门禁、安装及服务／版本／网页只读 API／设备在线等基础检查，不再自动发验活消息、操作真实审批、切换恢复任务或重启 Agent 应用；报告“已部署，体验由用户验收”，保留实际异常，不能把待用户确认写成通过或失败。用户另行明确要求专项验活时才执行；历史专用任务不等于持续授权。已验收活动基线仍须用户反馈；公开操作按当次明确授权与完整门禁处理，详见 `docs/发布/体验部署与正式发布.md`。
 - **开发提交不等于部署：开发完成须验证、提交并登记，只有用户明确要求集中部署后才实际安装和验活。** 用户明确指出其他 Agent 提交后并不会自然让服务器运行新版本；commit 只是交付物，负责当前任务的 Agent 仍必须实际完成整合、安装和验活，做不到时要明确报告“已提交但尚未部署”，否则会让用户误以为线上已经更新。
 - **具备多客户端后端的 CLI Agent 应直接共享一个长期 owner，不能让远程端和电脑 TUI 各自启动独立 ACP。** Grok 已验证可用工作区级 `agent leader` 同时承载 ACP 客户端和可见 TUI；共享 socket、稳定 sessionId 和关闭时清理 owner，才能让手机消息实时出现在电脑终端并避免会话分叉。
 - **对外说明“支持某个 Agent”时必须分别标明原任务继续、电脑端可见和已打开界面实时同步，不能把能读取历史、启动命令或加载 ACP 会话统称为完整支持。** 这些能力对应不同的数据 owner 和同步强度；混写会让用户误以为手机消息一定进入当前桌面窗口，掩盖真实 owner 边界，并重新制造对话分叉风险。

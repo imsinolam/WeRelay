@@ -16,10 +16,11 @@ test("terminal and aggregate task lists use the same grouped instructions", () =
   expect(formatGlobalTaskList({ snapshot, startIndex: 0, pageSize: 10 }).endsWith("\n\n" + footer)).toBe(true);
 });
 
-test("documents custom list sizes and how to resume paused notifications", () => {
-  expect(footer).toContain("[任务20条]");
-  expect(footer).toContain("[任务数20]");
-  expect(footer).toContain("[列表20]");
+test("keeps the guide concise without advertising custom sizes and explains paused notifications", () => {
+  expect(footer).not.toContain("[任务20条]");
+  expect(footer).not.toContain("[任务数20]");
+  expect(footer).not.toContain("[列表20]");
+  expect(footer).toContain("[下一页] 再看 15 条，可带数量如[下一页20]");
   expect(footer).not.toContain("5 的倍数");
   expect(footer).toContain("长时间未向 ClawBot 发消息时，任务通知会暂停。");
   expect(footer).toContain("发送任意消息即可恢复。");

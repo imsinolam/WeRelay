@@ -71,7 +71,7 @@ try {
   const sshArgs = [
     "-i", identity,
     "-o", "BatchMode=yes",
-    "-o", "StrictHostKeyChecking=accept-new",
+    "-o", "StrictHostKeyChecking=yes",
   ];
   run("scp", [...sshArgs, archivePath, `${server}:${remoteArchive}`], { cwd: root });
   const encodedMessage = Buffer.from(options.message, "utf8").toString("base64url");

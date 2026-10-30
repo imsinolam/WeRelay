@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { splitTaskListMessages } from "../../src/bridge/task-list-instructions.ts";
+import { CODEX_TASK_LIST_PAGE_SIZE, resolveCodexTaskListPageNavigation } from "../../src/bridge/bridge-utils.ts";
 
 import {
   activateGlobalTaskCandidate,
@@ -30,6 +31,25 @@ function candidate(
 }
 
 describe("global task index", () => {
+  test("defaults to fifteen globally and preserves root numbers when filtering or paging", () => {
+    const snapshot = buildGlobalTaskSnapshot(Array.from({ length: 40 }, (_, index) => candidate(
+      index % 2 ? "codex" : "pi", `task-${index}`, `任务${index}`,
+      new Date(Date.parse("2026-10-27T00:00:00Z") - index * 1000).toISOString(),
+    )));
+    const pageSize = resolveDefaultGlobalTaskPageSize({ basePageSize: CODEX_TASK_LIST_PAGE_SIZE,
+      maxPageSize: 100, runningCount: 1 });
+    const first = paginateGlobalTaskSnapshot(snapshot, { startIndex: 0, pageSize });
+    expect(first.candidates).toHaveLength(15);
+    const next = resolveCodexTaskListPageNavigation({ direction: "next", current: first, history: [] });
+    expect(paginateGlobalTaskSnapshot(snapshot, next.current).candidates[0]?.sessionId).toBe("task-15");
+    const filtered = paginateGlobalTaskSnapshot(snapshot, { adapter: "pi", startIndex: 0, pageSize });
+    expect(filtered.candidates).toHaveLength(15);
+    expect(formatGlobalTaskList({ snapshot, adapter: "pi", startIndex: 0, pageSize }))
+      .toContain("29、[Pi]");
+    expect(resolveGlobalTaskTargetedMessage({ snapshot, text: "29：继续" })?.candidate.sessionId)
+      .toBe("task-28");
+    expect(paginateGlobalTaskSnapshot(snapshot, { startIndex: 0, pageSize: 20 }).candidates).toHaveLength(20);
+  });
   test("separates task blocks with one blank line and does not indent titles", () => {
     const first = candidate("codex", "c1", "这是一个会在微信窄屏上自动折行的较长标题", "2026-09-24T12:00:00Z");
     first.projectName = "wechat_canvas";
@@ -254,7 +274,7 @@ describe("global task index", () => {
       pageSize: 10,
     });
 
-    expect(output).toContain("1、[Codex]\n正在执行的任务 · 处理中 🟢");
+    expect(output).toContain("1、[Codex]\n正在执行的任务 · 运行中 🟢");
   });
 
 
@@ -546,7 +566,7 @@ describe("global task catalog cache", () => {
       }), startIndex: 0, pageSize: 10,
     });
     expect(output).toContain("Old");
-    expect(output).not.toContain("处理中");
+    expect(output).not.toContain("运行中 🟢");
     expect(old.runtimeStatus.type).toBe("active");
     const latest = candidate("codex", "new", "New", "2026-09-12T13:00:00Z");
     expect(await cache.load("codex", async () => [latest])).toEqual([latest]);
@@ -705,13 +725,13 @@ describe("running task count and default page size", () => {
 
   test("grows the default page size to the running count rounded up to a multiple of five", () => {
     const size = (runningCount: number) => resolveDefaultGlobalTaskPageSize({
-      basePageSize: 10,
+      basePageSize: CODEX_TASK_LIST_PAGE_SIZE,
       maxPageSize: 100,
       runningCount,
     });
 
-    expect(size(0)).toBe(10);
-    expect(size(10)).toBe(10);
+    expect(size(0)).toBe(15);
+    expect(size(10)).toBe(15);
     expect(size(11)).toBe(15);
     expect(size(13)).toBe(15);
     expect(size(15)).toBe(15);

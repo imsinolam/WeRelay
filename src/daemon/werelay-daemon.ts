@@ -286,6 +286,7 @@ import {
   resolveGlobalTaskTargetedMessage,
   searchGlobalTaskCandidates,
   selectRunningGlobalTaskAdapters,
+  sortGlobalTaskCandidates,
   updateGlobalTaskSnapshot,
   type GlobalTaskCandidate,
   type GlobalTaskSnapshot,
@@ -705,6 +706,7 @@ const STARTUP_COMPLETION_DRAIN_TIMEOUT_MS = 15_000;
 const DEBUG_ACK_ENV = "WERELAY_DEBUG_ACK";
 const WECHAT_SEND_RETRY_BASE_MS = 750;
 const CODEX_TASK_MONITOR_INTERVAL_MS = 2_000;
+const CODEX_TASK_MONITOR_MAX_RETRY_MS = 60_000;
 const CODEX_TASK_CANDIDATE_CACHE_MAX_AGE_MS = 3_000;
 // Relay 预热在缓存超过 5 秒时刷新 task-board，移动网页每 8 秒轮询一次。
 // 目录缓存取 6 秒，使一次预热刷新只触发一次真实扫描，同时新建或重命名
@@ -742,6 +744,11 @@ const SWITCH_ADAPTER_TASK_LIST_READY_POLL_MS = 250;
 const CODEX_DEFERRED_DRAIN_RETRY_BASE_MS = 1_000;
 const CODEX_DEFERRED_DRAIN_RETRY_MAX_MS = 30_000;
 const DAEMON_ADAPTERS: DaemonAdapterKind[] = [...DAEMON_PROVIDER_IDS];
+
+export function codexTaskMonitorRetryDelayMs(consecutiveFailures: number): number {
+  if (consecutiveFailures <= 0) return CODEX_TASK_MONITOR_INTERVAL_MS;
+  return Math.min(CODEX_TASK_MONITOR_MAX_RETRY_MS, CODEX_TASK_MONITOR_INTERVAL_MS * 2 ** Math.min(consecutiveFailures, 5));
+}
 
 export function sortAdaptersByRecentMessageActivity(
   adapters: readonly DaemonAdapterKind[],
@@ -922,10 +929,10 @@ export function parseDaemonCliArgs(argv: string[]): DaemonCliOptions {
     if (arg === "--help" || arg === "-h") {
       process.stdout.write(
         [
-          "Usage: werelay [--cwd <path>] [--adapter <codex|claude|tclaude|grok|codebuddy|reasonix|pi|workbuddy|deepseek|opencode>] [--profile <name-or-path>] [--idle-start] [--no-open] [--open-desktop-apps]",
+          "Usage: werelay [--cwd <path>] [--adapter <codex|claude|tclaude|grok|codebuddy|reasonix|pi|pi-desktop|workbuddy|deepseek|opencode>] [--profile <name-or-path>] [--idle-start] [--no-open] [--open-desktop-apps]",
           "",
           "Keeps one WeChat connection alive and switches between supported agents from WeChat.",
-          "Send /codex, /claude, /tclaude, /grok, /codebuddy, /reasonix, /pi, /workbuddy, /deepseek, or /opencode in WeChat to switch the active agent.",
+          "Send /codex, /claude, /tclaude, /grok, /codebuddy, /reasonix, /pi, /pi-d, /workbuddy, /deepseek, or /opencode in WeChat to switch the active agent.",
           "",
         ].join("\n"),
       );
@@ -1029,6 +1036,9 @@ export function parseDaemonSwitchCommand(
       case "/pi":
       case "/pi agent":
         return "pi";
+      case "/pi d":
+      case "/pi desktop":
+        return "pi-desktop";
       case "/workbuddy":
       case "/workbuddy desktop":
         return "workbuddy";
@@ -1135,7 +1145,7 @@ export function isDesktopOwnerSlotReady(params: {
   status: BridgeWorkerStatus;
   sessionId?: string;
 }): boolean {
-  if (params.adapter === "workbuddy") {
+  if (params.adapter === "workbuddy" || params.adapter === "pi-desktop") {
     return params.status !== "stopped" && params.status !== "error";
   }
   return Boolean(params.sessionId);
@@ -1166,7 +1176,7 @@ export function resolveDaemonSessionStartMode(params: {
   if (params.adapter === "codex") {
     return "restore";
   }
-  if (params.adapter === "workbuddy" || params.adapter === "deepseek") {
+  if (params.adapter === "workbuddy" || params.adapter === "pi-desktop" || params.adapter === "deepseek") {
     return "restore";
   }
   if (params.slotCreated) {
@@ -1701,7 +1711,7 @@ function formatInboundMessagePreview(message: InboundWechatMessage): string {
 function formatNoActiveAdapterMessage(): string {
   return [
     "尚未选择终端。",
-    "发送 /codex、/claude、/tclaude、/grok、/codebuddy、/reasonix、/pi、/workbuddy、/deepseek 或 /opencode。",
+    "发送 /codex、/claude、/tclaude、/grok、/codebuddy、/reasonix、/pi、/pi-d、/workbuddy、/deepseek 或 /opencode。",
   ].join("\n");
 }
 
@@ -1818,8 +1828,10 @@ export function detectOpenMobileAdaptersFromProcessList(
     if (processLineHasCommand(line, "reasonix") || /--adapter\s+reasonix(?:\s|$)/i.test(line)) {
       open.add("reasonix");
     }
-    if (processLineHasCommand(line, "pi") || /--adapter\s+pi(?:\s|$)/i.test(line) ||
-        /PI-Desktop(?: Local)?\.app\/Contents\/MacOS\/PI-Desktop(?:\s|$)/i.test(line)) {
+    if (/PI-Desktop(?: Local)?\.app\/Contents\/MacOS\/PI-Desktop(?:\s|$)/i.test(line)) {
+      open.add("pi-desktop");
+    }
+    if (processLineHasCommand(line, "pi") || /--adapter\s+pi(?:\s|$)/i.test(line)) {
       open.add("pi");
     }
     if (/(?:^|[\s/\\])dsh(?:\.exe)?\s+web(?:\s|$)/i.test(line) || /--adapter\s+deepseek(?:\s|$)/i.test(line)) {
@@ -3119,6 +3131,7 @@ export class WeRelayDaemon {
   private mobileRemoteGeneration = 0;
   private codexTaskMonitorTimer: ReturnType<typeof setTimeout> | null = null;
   private codexTaskMonitorRunning = false;
+  private codexTaskMonitorFailures = 0;
   private mobileMessageOutboxTimer: ReturnType<typeof setTimeout> | null = null;
   private mobileMessageOutboxRunning = false;
   private readonly failedMobileMessageSweep = new FailedMobileMessageSweep();
@@ -3407,6 +3420,13 @@ export class WeRelayDaemon {
           return runtime.getNewSessionModelState ? await runtime.getNewSessionModelState()
             : { options: [], canChange: false, unavailableReason: "当前终端不支持预选新任务模型。" };
         },
+        readTaskComposerDraft: async (threadId, adapter) => {
+          const slot = this.slots.get(this.resolveMobileAdapter(adapter));
+          if (!slot?.runtime.getSessionComposerDraft) return { supported: false, draft: null };
+          const result = await slot.runtime.getSessionComposerDraft(threadId);
+          const submission = result.draft && this.mobileMessageOutbox.hasComposerDraftSubmission(slot.adapter, threadId, result.draft.revision);
+          return submission ? { supported: true, draft: null } : result;
+        },
         readTaskModel: (threadId, adapter) =>
           this.readMobileTaskModel(threadId, adapter),
         setTaskModel: (threadId, model, adapter) =>
@@ -3533,7 +3553,7 @@ export class WeRelayDaemon {
     let consecutivePollFailures = 0;
     log("WeRelay daemon is ready.");
     log(`Working directory: ${this.cwd}`);
-    log("Switch from WeChat with /codex, /claude, /tclaude, /grok, /codebuddy, /reasonix, /pi, /workbuddy, /deepseek, or /opencode.");
+    log("Switch from WeChat with /codex, /claude, /tclaude, /grok, /codebuddy, /reasonix, /pi, /pi-d, /workbuddy, /deepseek, or /opencode.");
     appendDaemonLog(`started: cwd=${this.cwd}`);
 
     const activeSlot = this.getActiveSlot();
@@ -5574,6 +5594,7 @@ export class WeRelayDaemon {
               hasMore: candidates.length > pageStart + pageSize,
               numberBySessionId: snapshot.numberByThreadId,
             }),
+            pageCandidates.map((candidate) => ({ ...candidate, adapter: activeSlot.adapter })),
           );
           appendDaemonLog(
             `wechat_task_list_processed: adapter=${activeSlot.adapter} duration_ms=${Date.now() - commandStartedAtMs} candidates=${pageCandidates.length} source=${reusedSnapshot ? "snapshot" : "cache_or_refresh"}`,
@@ -5589,6 +5610,7 @@ export class WeRelayDaemon {
           : resolveResumeSessionCandidate(candidates, command.target);
         if (!candidate) {
           activeSlot.awaitingBareTaskSelection = true;
+          const visibleMatches = searchMatches.slice(0, CODEX_TASK_LIST_PAGE_SIZE);
           await this.queueWechatTaskListMessage(
             message.senderId,
             searchMatches.length > 1
@@ -5600,6 +5622,9 @@ export class WeRelayDaemon {
                   numberBySessionId: snapshot.numberByThreadId,
                 })
               : `没有找到“${command.target}”相关任务。\n可换个关键词，或发送“任务”查看最近任务。`,
+            searchMatches.length > 1
+              ? visibleMatches.map(({ candidate }) => ({ ...candidate, adapter: activeSlot.adapter }))
+              : [],
           );
           return;
         }
@@ -6457,6 +6482,7 @@ export class WeRelayDaemon {
       // This observer also follows internal children to receive their real
       // approval events. Its unfiltered catalog must never populate list caches.
       const candidates = await slot.runtime.listResumeSessions(100, { includeInternal: true });
+      this.codexTaskMonitorFailures = 0;
       const nowMs = Date.now();
       for (const candidate of candidates) {
         if (
@@ -6584,6 +6610,7 @@ export class WeRelayDaemon {
         }));
       }
     } catch (error) {
+      this.codexTaskMonitorFailures = (this.codexTaskMonitorFailures || 0) + 1;
       appendDaemonLog(
         `codex_task_monitor_error: error=${truncatePreview(error instanceof Error ? error.message : String(error), 400)}`,
       );
@@ -6597,7 +6624,7 @@ export class WeRelayDaemon {
           if (nextSlot) {
             void this.runCodexTaskMonitor(nextSlot);
           }
-        }, CODEX_TASK_MONITOR_INTERVAL_MS);
+        }, codexTaskMonitorRetryDelayMs(this.codexTaskMonitorFailures || 0));
         this.codexTaskMonitorTimer.unref?.();
       }
     }
@@ -6668,7 +6695,7 @@ export class WeRelayDaemon {
       }
       const nowMs = Date.now();
       const order = sortAdaptersByRecentMessageActivity(
-        DAEMON_ADAPTERS,
+        mergeAdapterUsageOrder(this.mobileAdapterUsageOrder, DAEMON_ADAPTERS),
         this.stateStore.getAdapterMessageActivities(),
         nowMs,
       );
@@ -6724,9 +6751,10 @@ export class WeRelayDaemon {
       await this.listGlobalTaskCandidates(adapters);
     const runningAdapterIds = collectRunningMobileAdapterIds(globalCandidates);
     this.scheduleMobileAdapterUsageOrderRefresh();
-    const orderedAdapters = mergeAdapterUsageOrder(
-      this.mobileAdapterUsageOrder,
-      DAEMON_ADAPTERS,
+    const orderedAdapters = sortAdaptersByRecentMessageActivity(
+      mergeAdapterUsageOrder(this.mobileAdapterUsageOrder, DAEMON_ADAPTERS),
+      this.stateStore.getAdapterMessageActivities(),
+      Date.now(),
     );
     return {
       ...(this.activeAdapter ? { activeAdapter: this.activeAdapter } : {}),
@@ -7416,7 +7444,8 @@ export class WeRelayDaemon {
     });
     const queuedMessages = slot.runtime.getQueuedTaskInputs?.(activeThreadId);
     // Older pages also provide valid execution evidence for retained failures.
-    this.mobileMessageOutbox.reconcileFailedExecution(slot.adapter, {threadId: activeThreadId}, [], enrichedMessages);
+    this.mobileMessageOutbox.reconcileFailedExecution(slot.adapter, {threadId: activeThreadId}, [],
+      this.mobileMessageImageStore.enrich(visibleMessages, {adapter: slot.adapter, threadId: activeThreadId, requireTurnMatch: true}));
     // Older native pages can confirm a consumed queue entry too; no extra read or subscription.
     this.mobileMessageOutbox.reconcile(slot.adapter, requestedThreadId, {
       messages: enrichedMessages,
@@ -7743,6 +7772,9 @@ export class WeRelayDaemon {
     if (!input.text.trim() && !input.images.length) {
       throw new Error("未找到可重试的原消息，请重新添加文字或图片。");
     }
+    if (input.composerDraftRevision && this.mobileMessageOutbox.hasComposerDraftSubmission(resolvedAdapter, activeThreadId, input.composerDraftRevision)) {
+      throw new Error("这份电脑端草稿已在网页提交，未重复发送；请查看原消息进度。");
+    }
     const images = this.persistMobileImages(input);
     const accepted = this.mobileMessageOutbox.accept({
       clientId: input.clientId,
@@ -7754,6 +7786,7 @@ export class WeRelayDaemon {
         : {}),
       ...(input.newTaskSettings && !resolvedThreadId ? { newTaskSettings: input.newTaskSettings } : {}),
       text: input.text,
+      ...(input.composerDraftRevision ? { composerDraftRevision: input.composerDraftRevision } : {}),
       images,
       ...(input.createdAtMs ? { createdAtMs: input.createdAtMs } : {}),
     });
@@ -7867,13 +7900,7 @@ export class WeRelayDaemon {
       const retryAction = await prepareMobileMessageRetry({
         outbox: this.mobileMessageOutbox,
         entry,
-        readMessages: async () => {
-          const runtime = this.getMobileSlot(entry.adapter).runtime;
-          if (!runtime.getSessionMessagePage) throw new Error("无法核对原任务的消息回执");
-          return (await runtime.getSessionMessagePage(entry.threadId, {
-            limit: 100, lightweight: true, historyOnly: true,
-          })).messages;
-        },
+        readMessages: () => this.readMobileMessageReceipts(entry.adapter, entry.threadId),
       });
       if (retryAction === "received") return;
       if (retryAction === "check") {
@@ -7913,6 +7940,8 @@ export class WeRelayDaemon {
         this.mobileMessageOutbox.markNewTaskSettingsApplied(entry.adapter, entry.threadId, entry.clientId);
       }
       const result = await this.dispatchPersistedMobileMessage(entry);
+      const settled = this.mobileMessageOutbox.get(entry.adapter, entry.threadId, entry.clientId);
+      if (settled?.status === "delivered" || settled?.status === "cancelled") return;
       if (result?.queued) {
         this.mobileMessageOutbox.markQueued(
           entry.adapter,
@@ -7948,6 +7977,7 @@ export class WeRelayDaemon {
         entry.threadId,
         entry.clientId,
       );
+      if (current?.status === "queued" || current?.status === "delivered" || current?.status === "cancelled") return;
       const attempts = current?.attempts ?? entry.attempts;
       if (isMobileMessageDeliveryUncertain(current ?? entry) || isMobileMessageDeliveryUncertain({...entry, lastError: errorText})) {
         const nowMs = Date.now();
@@ -8036,6 +8066,7 @@ export class WeRelayDaemon {
       threadId,
       entry.text,
       imagePaths,
+      { clientId: entry.clientId, ...(entry.composerDraftRevision ? { composerDraftRevision: entry.composerDraftRevision } : {}) },
     );
     this.mobileCreatedTaskKeys.delete(createdTaskKey);
     if (!result?.duplicate && imagePaths.length > 0) {
@@ -8053,20 +8084,27 @@ export class WeRelayDaemon {
     return result;
   }
 
+  /** Same receipt normalization online and in background; never starts an owner. */
+  private async readMobileMessageReceipts(adapter: string, threadId: string): Promise<BridgeSessionMessage[]> {
+    const slot = this.getMobileSlot(adapter);
+    const runtime = slot.runtime;
+    const messages = runtime.getSessionMessagePage
+      ? (await runtime.getSessionMessagePage(threadId, {limit: 100, lightweight: true, historyOnly: true})).messages
+      : (await runtime.getSessionMessages?.(threadId) ?? []).slice(-100);
+    const visible = messages.flatMap(message => {
+      const sanitized = sanitizeDaemonVisibleSessionMessage(slot.adapter, message);
+      return sanitized ? [sanitized] : [];
+    });
+    // Text similarity alone must not manufacture attachment acceptance evidence.
+    return this.mobileMessageImageStore.enrich(visible, {adapter, threadId, requireTurnMatch: true});
+  }
+
   private reconcileFailedMobileMessages(adapter: string): Promise<void> {
     return this.failedMobileMessageSweep.run({
       adapter,
       outbox: this.mobileMessageOutbox,
       listTasks: () => this.listMobileTasks(adapter),
-      readMessages: async (threadId) => {
-        const slot = this.getMobileSlot(adapter);
-        if (slot.runtime.getSessionMessagePage) {
-          return (await slot.runtime.getSessionMessagePage(threadId, {
-            limit: 100, lightweight: true, historyOnly: true,
-          })).messages;
-        }
-        return (await slot.runtime.getSessionMessages?.(threadId) ?? []).slice(-100);
-      },
+      readMessages: (threadId) => this.readMobileMessageReceipts(adapter, threadId),
     });
   }
 
@@ -8077,13 +8115,7 @@ export class WeRelayDaemon {
         await prepareMobileMessageRetry({
           outbox: this.mobileMessageOutbox,
           entry,
-          readMessages: async () => {
-            const runtime = this.getMobileSlot(adapter).runtime;
-            if (!runtime.getSessionMessagePage) return [];
-            return (await runtime.getSessionMessagePage(entry.threadId, {
-              limit: 100, lightweight: true, historyOnly: true,
-            })).messages;
-          },
+          readMessages: () => this.readMobileMessageReceipts(adapter, entry.threadId),
         });
       } else {
         await this.reconcileFailedMobileMessages(adapter);
@@ -8931,15 +8963,17 @@ export class WeRelayDaemon {
       });
       this.globalTaskListPosition = { startIndex: pageStart, pageSize: effectivePageSize };
       this.globalTaskListHistory = command.taskListHistory ?? [];
+      const pageCandidates = paginateGlobalTaskSnapshot(snapshot, {
+        adapter: this.globalTaskAdapterFilter, startIndex: pageStart, pageSize: effectivePageSize,
+      }).candidates;
       const activeSlot = this.getActiveSlot();
       if (activeSlot) {
-        activeSlot.awaitingBareTaskSelection = paginateGlobalTaskSnapshot(snapshot, {
-          adapter: this.globalTaskAdapterFilter, startIndex: pageStart, pageSize: effectivePageSize,
-        }).candidates.length > 0;
+        activeSlot.awaitingBareTaskSelection = pageCandidates.length > 0;
       }
       await this.queueWechatTaskListMessage(
         message.senderId,
         formatGlobalTaskList({ snapshot, adapter: this.globalTaskAdapterFilter, startIndex: pageStart, pageSize: effectivePageSize }),
+        pageCandidates,
       );
       appendDaemonLog(
         `wechat_global_task_list_processed: adapters=${[...new Set(snapshot.candidates.map((candidate) => candidate.adapter))].join(",") || "none"} candidates=${snapshot.candidates.length} page_start=${pageStart} page_size=${effectivePageSize}`,
@@ -8949,6 +8983,7 @@ export class WeRelayDaemon {
     const candidate = resolveGlobalTaskCandidate(snapshot, command.target);
     if (!candidate) {
       const matches = searchGlobalTaskCandidates(snapshot, command.target);
+      const visibleMatches = matches.slice(0, CODEX_TASK_LIST_MAX_PAGE_SIZE);
       const activeSlot = this.getActiveSlot();
       if (activeSlot) {
         activeSlot.awaitingBareTaskSelection = true;
@@ -8958,10 +8993,11 @@ export class WeRelayDaemon {
         matches.length > 1
           ? formatGlobalTaskSearchResults({
               snapshot,
-              matches: matches.slice(0, CODEX_TASK_LIST_MAX_PAGE_SIZE),
+              matches: visibleMatches,
               target: command.target,
             })
           : `没有找到“${command.target}”相关任务。\n可换个关键词，或发送“任务”查看最近任务。`,
+        matches.length > 1 ? visibleMatches : [],
       );
       return;
     }
@@ -9457,12 +9493,16 @@ export class WeRelayDaemon {
     threadId: string,
     text: string,
     imagePaths: string[],
+    sendOptions?: import("../bridge/bridge-types.ts").BridgeSessionSendOptions,
   ): Promise<BridgeSessionSendResult | void> {
     if (!slot.runtime.sendInputToSession) {
       throw new Error("当前应用连接暂不支持向指定任务发送消息。");
     }
     if (imagePaths.length > 0 && !slot.runtime.sendInputItemsToSession) {
       throw new Error("当前应用连接暂不支持发送图片。");
+    }
+    if (sendOptions?.composerDraftRevision && !slot.runtime.getSessionComposerDraft) {
+      throw new Error("当前终端不支持电脑端草稿校验，本条未发送。");
     }
     const trimmedText = text.trim();
     const inputPreview = trimmedText || `图片 ${imagePaths.length} 张`;
@@ -9484,9 +9524,9 @@ export class WeRelayDaemon {
             type: "localImage" as const,
             path: imagePath,
           })),
-        ]);
+        ], sendOptions);
       } else {
-        result = await slot.runtime.sendInputToSession(threadId, text);
+        result = await slot.runtime.sendInputToSession(threadId, text, sendOptions);
       }
       if (result?.turnId) {
         activeTask.turnId = result.turnId;
@@ -10133,8 +10173,22 @@ export class WeRelayDaemon {
     });
   }
 
-  private async queueWechatTaskListMessage(senderId: string, text: string): Promise<number> {
-    const parts = splitTaskListMessages(text).flatMap((part) => splitWechatTextIntoChunks(part));
+  private async queueWechatTaskListMessage(
+    senderId: string,
+    text: string,
+    candidates: GlobalTaskCandidate[] = [],
+  ): Promise<number> {
+    const messages = splitTaskListMessages(text);
+    // The stable numbering snapshot may no longer be in recency order. Pick
+    // from the actual visible page without reordering it or activating a task.
+    const latestTask = sortGlobalTaskCandidates(candidates)[0];
+    if (latestTask && messages[0]) {
+      messages[0] = appendCodexMobileTaskLink(
+        messages[0],
+        this.codexMobileServer?.buildTaskUrl(latestTask.sessionId, latestTask.adapter),
+      );
+    }
+    const parts = messages.flatMap((part) => splitWechatTextIntoChunks(part));
     const sentCount = await this.queueWechatMessages(senderId, parts);
     appendDaemonLog(`wechat_task_list_delivery: sent=${sentCount} total=${parts.length} complete=${sentCount === parts.length}`);
     if (sentCount === parts.length && parts.length > 0) {

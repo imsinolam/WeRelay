@@ -1,3 +1,8 @@
+import { CHAT_COMPOSER_JS } from "../../src/web/chat-components/composer.ts";
+import { SOLVING_ORB_JS } from "../../src/web/chat-components/solving-orb.ts";
+import { composerHarness } from "./helpers/chat-components.ts";
+import { CHAT_COMPONENTS_JS } from "../../src/web/chat-components/index.ts";
+import { CODEX_MOBILE_APP_JS } from "../../src/daemon/codex-mobile-web.ts";
 import { afterEach, describe, expect, test } from "bun:test";
 import fs from "node:fs";
 import http from "node:http";
@@ -5,6 +10,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { CodexMobileAuthStore } from "../../src/daemon/codex-mobile-auth.ts";
+import { normalizeMobileMessageText } from "../../src/daemon/mobile-message-text.ts";
 import {
   CODEX_MOBILE_CSS,
   CODEX_MOBILE_HTML,
@@ -132,6 +138,9 @@ describe("mobile cache freshness", () => {
         status: "completed" as const,
       })),
     })).not.toBe(revision);
+    const queued = {id: "native", text: "下一步", imageCount: 0};
+    expect(createCodexMobileTranscriptRevision({...transcript, queuedMessages: [queued]}))
+      .not.toBe(createCodexMobileTranscriptRevision({...transcript, queuedMessages: [{...queued, clientId: "web-client"}]}));
   });
 
   test("validates cached content with a tiny revision request before loading messages", () => {
@@ -384,13 +393,29 @@ describe("mobile message delivery stages", () => {
 });
 
 describe("mobile terminal switcher status", () => {
+  test("task-board cards and the running lane use the same running label", () => {
+    const start = CODEX_MOBILE_APP_JS.indexOf("  function taskBoardStatusLabel");
+    const end = CODEX_MOBILE_APP_JS.indexOf("\n  function updateTaskBoardControls", start);
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+    const source = CODEX_MOBILE_APP_JS.slice(start, end);
+    const label = new Function(`${source}\nreturn taskBoardStatusLabel;`)();
+    expect(label({ status: "running" })).toBe("运行中");
+    expect(label({ status: "approval" })).toBe("待审批");
+    const laneStart = CODEX_MOBILE_APP_JS.indexOf("  function renderActiveTaskBoard");
+    const laneEnd = CODEX_MOBILE_APP_JS.indexOf("    var lanes =", laneStart);
+    expect(laneStart).toBeGreaterThan(0);
+    expect(laneEnd).toBeGreaterThan(laneStart);
+    const lanes = new Function(`${CODEX_MOBILE_APP_JS.slice(laneStart, laneEnd)}\nreturn laneDefinitions;\n}\nreturn renderActiveTaskBoard;`)()();
+    expect(lanes.find((lane: { id: string }) => lane.id === "running").title).toBe("运行中");
+  });
   test("hides normal lifecycle states and keeps only attention states", () => {
     const label = loadMobileAdapterStateLabel();
 
     expect(label("open")).toBe("");
     expect(label("idle")).toBe("");
     expect(label("stopped")).toBe("");
-    expect(label("busy")).toBe("处理中");
+    expect(label("busy")).toBe("运行中");
     expect(label("awaiting_approval")).toBe("待审批");
     expect(label("awaiting_input")).toBe("待输入");
     expect(label("starting")).toBe("启动中");
@@ -411,9 +436,9 @@ describe("mobile terminal switcher status", () => {
     expect(CODEX_MOBILE_JS).toContain('deepseek: "DeepSeek Harness"');
     expect(CODEX_MOBILE_JS).toContain('runningDot.hidden = adapter.status !== "busy";');
     expect(CODEX_MOBILE_JS).toContain("syncCurrentAdapterStatusFromTasks();");
-    const loadTasksStart = CODEX_MOBILE_JS.indexOf("  async function loadTasks");
-    const loadTasksEnd = CODEX_MOBILE_JS.indexOf("\n  function syncComposerInset", loadTasksStart);
-    const loadTasksBlock = CODEX_MOBILE_JS.slice(loadTasksStart, loadTasksEnd);
+    const loadTasksStart = CODEX_MOBILE_APP_JS.indexOf("  async function loadTasks");
+    const loadTasksEnd = CODEX_MOBILE_APP_JS.indexOf("\n  function syncComposerInset", loadTasksStart);
+    const loadTasksBlock = CODEX_MOBILE_APP_JS.slice(loadTasksStart, loadTasksEnd);
     expect(loadTasksBlock.indexOf("syncCurrentAdapterStatusFromTasks();"))
       .toBeGreaterThan(loadTasksBlock.indexOf("state.tasks.push(previousCurrentTask)"));
   });
@@ -442,7 +467,7 @@ describe("mobile terminal switcher status", () => {
 describe("mobile reasoning effort selection", () => {
   test("leaves the control unselected when the session does not report an effort", () => {
     expect(CODEX_MOBILE_JS).toContain('"\\u8DDF\\u968F\\u4F1A\\u8BDD"');
-    expect(CODEX_MOBILE_JS).toContain("selected: option.id === currentEffort");
+    expect(CODEX_MOBILE_JS).toContain("value: currentEffort");
   });
 });
 
@@ -612,9 +637,9 @@ describe("mobile boot connection states", () => {
 
     // setup() 必须优先取计算后的 CSS 尺寸，属性只作兜底。
     expect(CODEX_MOBILE_JS).toContain("window.getComputedStyle(bootOrb).width");
-    const setup = CODEX_MOBILE_JS.slice(
-      CODEX_MOBILE_JS.indexOf("    function setup() {"),
-      CODEX_MOBILE_JS.indexOf("      if (reduced) {", CODEX_MOBILE_JS.indexOf("    function setup() {")),
+    const setup = CODEX_MOBILE_APP_JS.slice(
+      CODEX_MOBILE_APP_JS.indexOf("    function setup() {"),
+      CODEX_MOBILE_APP_JS.indexOf("      if (reduced) {", CODEX_MOBILE_APP_JS.indexOf("    function setup() {")),
     );
     expect(setup).toContain("size = cssSize || Number(bootOrb.getAttribute(\"width\")) || 56");
     expect(setup).toContain("bootOrb.width = Math.round(size * dpr)");
@@ -686,9 +711,9 @@ describe("mobile boot connection states", () => {
       return hit;
     };
 
-    const resolver = CODEX_MOBILE_JS.slice(
-      CODEX_MOBILE_JS.indexOf("  function resolveBootConnectionState"),
-      CODEX_MOBILE_JS.indexOf("\n  function bootReadyStatus"),
+    const resolver = CODEX_MOBILE_APP_JS.slice(
+      CODEX_MOBILE_APP_JS.indexOf("  function resolveBootConnectionState"),
+      CODEX_MOBILE_APP_JS.indexOf("\n  function bootReadyStatus"),
     );
     const decode = (text: string) => text.replace(/\\u([0-9A-Fa-f]{4})/g, (_m, hex) =>
       String.fromCharCode(Number.parseInt(hex, 16)));
@@ -807,8 +832,8 @@ describe("mobile boot connection states", () => {
 
   test("lands on the newest user message when entering a task", () => {
     // 历史页与实时页都保持同一个入口锚点，而不是按旧 scrollTop 或强制到底部。
-    const selectTask = CODEX_MOBILE_JS.slice(
-      CODEX_MOBILE_JS.indexOf("  async function selectTask"),
+    const selectTask = CODEX_MOBILE_APP_JS.slice(
+      CODEX_MOBILE_APP_JS.indexOf("  async function selectTask"),
     );
     expect(selectTask).toContain("beginConversationEntryFocus(state.currentAdapter, threadId)");
     expect(selectTask).toContain("await loadMessages(true, true, false);");
@@ -852,15 +877,15 @@ describe("mobile fetch resilience", () => {
   });
 
   test("keeps offline loading quiet and only updates persistent connection feedback", () => {
-    const loadTasksStart = CODEX_MOBILE_JS.indexOf("  async function loadTasks");
-    const loadTasksEnd = CODEX_MOBILE_JS.indexOf("\n  function syncComposerInset", loadTasksStart);
-    const loadTasksBlock = CODEX_MOBILE_JS.slice(loadTasksStart, loadTasksEnd);
-    const loadMessagesStart = CODEX_MOBILE_JS.indexOf("  async function loadMessages");
-    const loadMessagesEnd = CODEX_MOBILE_JS.indexOf(
+    const loadTasksStart = CODEX_MOBILE_APP_JS.indexOf("  async function loadTasks");
+    const loadTasksEnd = CODEX_MOBILE_APP_JS.indexOf("\n  function syncComposerInset", loadTasksStart);
+    const loadTasksBlock = CODEX_MOBILE_APP_JS.slice(loadTasksStart, loadTasksEnd);
+    const loadMessagesStart = CODEX_MOBILE_APP_JS.indexOf("  async function loadMessages");
+    const loadMessagesEnd = CODEX_MOBILE_APP_JS.indexOf(
       "\n  async function refreshMessagesIfChanged",
       loadMessagesStart,
     );
-    const loadMessagesBlock = CODEX_MOBILE_JS.slice(loadMessagesStart, loadMessagesEnd);
+    const loadMessagesBlock = CODEX_MOBILE_APP_JS.slice(loadMessagesStart, loadMessagesEnd);
 
     expect(loadTasksBlock).toContain("isMobileConnectionUnavailable(error)");
     expect(loadTasksBlock).toContain('"waiting-computer"');
@@ -869,9 +894,9 @@ describe("mobile fetch resilience", () => {
     );
     expect(loadMessagesBlock).toContain("if (isMobileConnectionUnavailable(error)) {");
     expect(loadMessagesBlock).toContain("showToast(error.message");
-    const showToastStart = CODEX_MOBILE_JS.indexOf("  function showToast");
-    const showToastEnd = CODEX_MOBILE_JS.indexOf("\n  function setCacheSyncState", showToastStart);
-    const showToastBlock = CODEX_MOBILE_JS.slice(showToastStart, showToastEnd);
+    const showToastStart = CODEX_MOBILE_APP_JS.indexOf("  function showToast");
+    const showToastEnd = CODEX_MOBILE_APP_JS.indexOf("\n  function setCacheSyncState", showToastStart);
+    const showToastBlock = CODEX_MOBILE_APP_JS.slice(showToastStart, showToastEnd);
     expect(showToastBlock).toContain(
       "if (isMobileConnectionUnavailableMessage(text))",
     );
@@ -925,7 +950,7 @@ describe("mobile fetch resilience", () => {
 
   test("keeps transient background refresh failures quiet and retries POST acceptance with one stable id", () => {
     expect(CODEX_MOBILE_JS).toContain(
-      "if (isMobileConnectionUnavailable(error) && !initial && state.tasks.length)",
+      "if (isMobileConnectionUnavailable(error) && state.tasks.length)",
     );
     expect(CODEX_MOBILE_JS).toContain("if (isMobileConnectionUnavailable(error)) {");
     expect(CODEX_MOBILE_JS).toContain("clientId: pending.clientId");
@@ -961,9 +986,9 @@ describe("mobile message refresh coordination", () => {
   });
 
   test("queues a trailing refresh instead of dropping a send-triggered refresh", () => {
-    const start = CODEX_MOBILE_JS.indexOf("  async function loadMessages");
-    const end = CODEX_MOBILE_JS.indexOf("\n  async function refreshMessagesIfChanged", start);
-    const block = CODEX_MOBILE_JS.slice(start, end);
+    const start = CODEX_MOBILE_APP_JS.indexOf("  async function loadMessages");
+    const end = CODEX_MOBILE_APP_JS.indexOf("\n  async function refreshMessagesIfChanged", start);
+    const block = CODEX_MOBILE_APP_JS.slice(start, end);
     expect(block).toContain("state.trailingMessageRefresh = mergeMessageRefreshRequest");
     expect(block).toContain("void loadMessages(");
     expect(block).not.toContain("if (state.loadingMessages) return null;");
@@ -1281,23 +1306,23 @@ function createAuthStore(password?: string): CodexMobileAuthStore {
 }
 
 test("mobile composer accepts a message while the desktop is switching models", () => {
-  const start = CODEX_MOBILE_JS.indexOf('  composerForm.addEventListener("submit"');
-  const end = CODEX_MOBILE_JS.indexOf('  authForm.addEventListener("submit"', start);
-  const submit = CODEX_MOBILE_JS.slice(start, end);
+  const start = CODEX_MOBILE_APP_JS.indexOf('  async function submitComposer(');
+  const end = CODEX_MOBILE_APP_JS.indexOf('  authForm.addEventListener("submit"', start);
+  const submit = CODEX_MOBILE_APP_JS.slice(start, end);
   expect(submit).not.toContain("if (state.modelChanging || state.reasoningChanging)");
   expect(submit).toContain("pending.requiredTaskSettings =");
   expect(submit.indexOf("pending.requiredTaskSettings ="))
     .toBeLessThan(submit.indexOf("composerInput.value = \"\""));
-  const sendStart = CODEX_MOBILE_JS.indexOf("  async function submitPendingMessage(pending)");
-  const sendEnd = CODEX_MOBILE_JS.indexOf("  function beginOptimisticRunIfNeeded", sendStart);
-  const send = CODEX_MOBILE_JS.slice(sendStart, sendEnd);
+  const sendStart = CODEX_MOBILE_APP_JS.indexOf("  async function submitPendingMessage(pending)");
+  const sendEnd = CODEX_MOBILE_APP_JS.indexOf("  function beginOptimisticRunIfNeeded", sendStart);
+  const send = CODEX_MOBILE_APP_JS.slice(sendStart, sendEnd);
   expect(send.indexOf("await confirmPendingTaskSettings("))
     .toBeLessThan(send.indexOf('"/messages"'));
 });
 
 test("pending message waits for its original model choice and never sends after a rejected switch", async () => {
-  const start = CODEX_MOBILE_JS.indexOf("  async function confirmPendingTaskSettings(");
-  const end = CODEX_MOBILE_JS.indexOf("  async function submitPendingMessage(pending)", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  async function confirmPendingTaskSettings(");
+  const end = CODEX_MOBILE_APP_JS.indexOf("  async function submitPendingMessage(pending)", start);
   expect(start).toBeGreaterThan(-1);
   expect(end).toBeGreaterThan(start);
   let resolveSwitch!: (value: unknown) => void;
@@ -1313,7 +1338,7 @@ test("pending message waits for its original model choice and never sends after 
     },
   };
   const confirm = new Function("state", "api", "adapterApiPath", "persistMobileCacheNow",
-    `${CODEX_MOBILE_JS.slice(start, end)}\nreturn confirmPendingTaskSettings;`)(
+    `${CODEX_MOBILE_APP_JS.slice(start, end)}\nreturn confirmPendingTaskSettings;`)(
       state,
       async (path: string) => { calls.push(path); return { currentModel: ownerModel }; },
       (path: string) => path,
@@ -1339,12 +1364,12 @@ test("pending message waits for its original model choice and never sends after 
 });
 
 test("restored pending messages recheck the chosen model before delivery", async () => {
-  const start = CODEX_MOBILE_JS.indexOf("  async function confirmPendingTaskSettings(");
-  const end = CODEX_MOBILE_JS.indexOf("  async function submitPendingMessage(pending)", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  async function confirmPendingTaskSettings(");
+  const end = CODEX_MOBILE_APP_JS.indexOf("  async function submitPendingMessage(pending)", start);
   const calls: Array<{ path: string; method: string }> = [];
   let currentModel = "gpt-6-luna";
   const confirm = new Function("state", "api", "adapterApiPath", "persistMobileCacheNow",
-    `${CODEX_MOBILE_JS.slice(start, end)}\nreturn confirmPendingTaskSettings;`)(
+    `${CODEX_MOBILE_APP_JS.slice(start, end)}\nreturn confirmPendingTaskSettings;`)(
       { taskSettingSync: null },
       async (path: string, options?: { method?: string }) => {
         calls.push({ path, method: options?.method || "GET" });
@@ -1367,12 +1392,12 @@ test("restored pending messages recheck the chosen model before delivery", async
 });
 
 test("mobile model and reasoning requests cannot overtake each other", () => {
-  const modelStart = CODEX_MOBILE_JS.indexOf("  async function selectCurrentTaskModel(model)");
-  const reasoningStart = CODEX_MOBILE_JS.indexOf("  async function selectCurrentTaskReasoningEffort(reasoningEffort)");
-  const modelSelection = CODEX_MOBILE_JS.slice(modelStart, reasoningStart);
-  const reasoningSelection = CODEX_MOBILE_JS.slice(
+  const modelStart = CODEX_MOBILE_APP_JS.indexOf("  async function selectCurrentTaskModel(model)");
+  const reasoningStart = CODEX_MOBILE_APP_JS.indexOf("  async function selectCurrentTaskReasoningEffort(reasoningEffort)");
+  const modelSelection = CODEX_MOBILE_APP_JS.slice(modelStart, reasoningStart);
+  const reasoningSelection = CODEX_MOBILE_APP_JS.slice(
     reasoningStart,
-    CODEX_MOBILE_JS.indexOf("  function resetTaskStateForAdapterSwitch()", reasoningStart),
+    CODEX_MOBILE_APP_JS.indexOf("  function resetTaskStateForAdapterSwitch()", reasoningStart),
   );
   expect(modelSelection.indexOf("if (state.reasoningChanging)"))
     .toBeLessThan(modelSelection.indexOf("method: \"PUT\""));
@@ -1383,10 +1408,10 @@ test("mobile model and reasoning requests cannot overtake each other", () => {
 function loadMobileFetchJson(
   fetchImpl: (...args: unknown[]) => Promise<unknown>,
 ): (path: string, options?: Record<string, unknown>) => Promise<unknown> {
-  const start = CODEX_MOBILE_JS.indexOf("  function isMobileFetchNetworkError");
-  const end = CODEX_MOBILE_JS.indexOf("\n  async function checkForAppUpdate", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function isMobileFetchNetworkError");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  async function checkForAppUpdate", start);
   if (start < 0 || end < 0) throw new Error("Mobile fetchJson source not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   return new Function("fetch", "setTimeout", "document", `${source}
 return fetchJson;`)(
     fetchImpl,
@@ -1402,10 +1427,10 @@ function loadMobileFetchResilienceHelpers(): {
   shouldRetry: (error: unknown, method: string, attempt: number) => boolean;
   normalize: (error: unknown) => Error & { network?: boolean };
 } {
-  const start = CODEX_MOBILE_JS.indexOf("  function isMobileFetchNetworkError");
-  const end = CODEX_MOBILE_JS.indexOf("\n  async function fetchJson", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function isMobileFetchNetworkError");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  async function fetchJson", start);
   if (start < 0 || end < 0) throw new Error("Mobile fetch resilience helpers not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   return new Function(`${source}
 return {
   isNetworkError: isMobileFetchNetworkError,
@@ -1425,10 +1450,10 @@ function loadMobileVisibleRunSummaryResolver(): (
   nowMs: number,
   progressItems: Array<{ id?: string; turnId?: string; status?: string; text?: string; createdAtMs?: number }>,
 ) => { turnId?: string; status?: string } | null {
-  const start = CODEX_MOBILE_JS.indexOf("  function isTaskActivelyRunning");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function shouldUseStopComposerAction", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function isTaskActivelyRunning");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function shouldUseStopComposerAction", start);
   if (start < 0 || end < 0) throw new Error("Mobile visible run summary resolver not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   return new Function(`${source}\nreturn resolveVisibleRunSummary;`)() as ReturnType<
     typeof loadMobileVisibleRunSummaryResolver
   >;
@@ -1441,10 +1466,10 @@ function loadMobileQueueDecision(): (
   pendingApproval: { requestId?: string } | null,
   waitingForTaskCreation: boolean,
 ) => boolean {
-  const start = CODEX_MOBILE_JS.indexOf("  function shouldQueueComposerSubmission");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function resolveMessageFooter", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function shouldQueueComposerSubmission");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function resolveMessageFooter", start);
   if (start < 0 || end < 0) throw new Error("Mobile queue decision not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   return new Function(`${source}\nreturn shouldQueueComposerSubmission;`)() as ReturnType<
     typeof loadMobileQueueDecision
   >;
@@ -1454,10 +1479,10 @@ function loadMobileTaskCreationSources(): {
   project: (tasks: Array<Record<string, unknown>>, currentThreadId?: string) => Record<string, unknown> | null;
   recent: (tasks: Array<Record<string, unknown>>) => Record<string, unknown> | null;
 } {
-  const start = CODEX_MOBILE_JS.indexOf("  function projectTaskCreationSource");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function conversationStateKey", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function projectTaskCreationSource");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function conversationStateKey", start);
   if (start < 0 || end < 0) throw new Error("Mobile task creation sources not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   return new Function(
     `${source}\nreturn { project: projectTaskCreationSource, recent: recentTaskCreationSource };`,
   )() as ReturnType<typeof loadMobileTaskCreationSources>;
@@ -1468,21 +1493,21 @@ function loadMobilePendingConfirmationGuard(): {
   isAwaiting: (pending: Record<string, unknown> | null) => boolean;
   sinceMs: (pending: Record<string, unknown>) => number;
 } {
-  const start = CODEX_MOBILE_JS.indexOf("  var PENDING_CONFIRMATION_TIMEOUT_MS");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function reconcilePendingQueueState", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  var PENDING_CONFIRMATION_TIMEOUT_MS");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function reconcilePendingQueueState", start);
   if (start < 0 || end < 0) throw new Error("Mobile pending confirmation guard not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   return new Function(
     `${source}\nreturn { timeoutMs: PENDING_CONFIRMATION_TIMEOUT_MS, isAwaiting: isAwaitingNativeConfirmation, sinceMs: pendingConfirmationSinceMs };`,
   )() as ReturnType<typeof loadMobilePendingConfirmationGuard>;
 }
 
 function loadMobileMarkdownRenderer(): (markdown: string, foldPrefix?: string) => string {
-  const start = CODEX_MOBILE_JS.indexOf("  function escapeHtml");
-  const end = CODEX_MOBILE_JS.indexOf("\n  async function fetchJson", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function escapeHtml");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  async function fetchJson", start);
   if (start < 0 || end < 0) throw new Error("Mobile markdown renderer not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
-  return new Function(`${source}\nreturn renderMarkdown;`)() as (markdown: string) => string;
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
+  return new Function(`${CHAT_COMPONENTS_JS}\nvar chatText = WeRelayChatUI.createText({resolveLink(target) { var local = isLocalPreviewTarget(target); return {href: local ? "/preview/open?target=" + encodeURIComponent(target) : target, localPreview:local}; }});\n${source}\nreturn renderMarkdown;`)() as (markdown: string) => string;
 }
 
 function loadMobileMessageFooter(): (
@@ -1491,14 +1516,14 @@ function loadMobileMessageFooter(): (
   isSegmentEnd: boolean,
   nowMs: number,
 ) => { model: string; time: string } {
-  const start = CODEX_MOBILE_JS.indexOf("  function formatClockTime");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function renderMessageRow", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function formatClockTime");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function renderMessageRow", start);
   if (start < 0 || end < 0) throw new Error("Mobile message footer not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   // 该区段可能包含引用浏览器全局的启动页代码；补最小桩以保持隔离。
   const windowStub = { matchMedia: undefined, devicePixelRatio: 1 };
   const documentStub = { addEventListener: () => undefined };
-  return new Function("window", "document", `${source}\nreturn resolveMessageFooter;`)(
+  return new Function("window", "document", `${CHAT_COMPONENTS_JS}\n${source}\nreturn resolveMessageFooter;`)(
     windowStub,
     documentStub,
   ) as ReturnType<typeof loadMobileMessageFooter>;
@@ -1510,10 +1535,10 @@ function loadMobileMessageRefreshMerger(): (
   historyOnly: boolean,
   forceFullPage: boolean,
 ) => { forceBottom: boolean; historyOnly: boolean; forceFullPage: boolean } {
-  const start = CODEX_MOBILE_JS.indexOf("  function mergeMessageRefreshRequest");
-  const end = CODEX_MOBILE_JS.indexOf("\n  async function loadMessages", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function mergeMessageRefreshRequest");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  async function loadMessages", start);
   if (start < 0 || end < 0) throw new Error("Mobile refresh merger not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   return new Function(`${source}
 return mergeMessageRefreshRequest;`)() as ReturnType<
     typeof loadMobileMessageRefreshMerger
@@ -1527,10 +1552,10 @@ function loadMobileDocumentTitleUpdater(params: {
   };
   adapterName?: string;
 }): () => string {
-  const start = CODEX_MOBILE_JS.indexOf("  function updateDocumentTitle");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function isAdapterCapabilityError", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function updateDocumentTitle");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function isAdapterCapabilityError", start);
   if (start < 0 || end < 0) throw new Error("Mobile document-title updater not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   const document = { title: "" };
   const update = new Function("document", "currentTask", "currentAdapterName", `
 ${source}
@@ -1547,10 +1572,10 @@ return updateDocumentTitle;
 }
 
 function loadMobileAdapterStateLabel(): (status: string) => string {
-  const start = CODEX_MOBILE_JS.indexOf("  function adapterStateLabel");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function renderAdapterMenu", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function adapterStateLabel");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function renderAdapterMenu", start);
   if (start < 0 || end < 0) throw new Error("Mobile adapter-state label helper not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   return new Function(`${source}\nreturn adapterStateLabel;`)() as (status: string) => string;
 }
 
@@ -1559,10 +1584,10 @@ function loadMobileAdapterTaskStatusSync(state: {
   adapters: Array<{ id: string; status: string }>;
   tasks: Array<{ status: string }>;
 }): () => void {
-  const start = CODEX_MOBILE_JS.indexOf("  function syncCurrentAdapterStatusFromTasks");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function renderAdapterMenu", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function syncCurrentAdapterStatusFromTasks");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function renderAdapterMenu", start);
   if (start < 0 || end < 0) throw new Error("Mobile adapter-task status sync not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   return new Function("state", "currentAdapterEntry", `
 ${source}
 return syncCurrentAdapterStatusFromTasks;
@@ -1576,10 +1601,10 @@ function loadMobileBootConnectionStateResolver(): (
   health: { ok?: boolean; deviceOnline?: boolean } | null,
   waitedMs?: number,
 ) => { mode: "relay" | "direct"; ready: boolean; label: string; detail: string } {
-  const start = CODEX_MOBILE_JS.indexOf("  function resolveBootConnectionState");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function bootReadyStatus", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function resolveBootConnectionState");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function bootReadyStatus", start);
   if (start < 0 || end < 0) throw new Error("Mobile boot connection resolver not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   return new Function(`${source}\nreturn resolveBootConnectionState;`)() as ReturnType<
     typeof loadMobileBootConnectionStateResolver
   >;
@@ -1589,10 +1614,10 @@ function loadMobileBootStatusSetter(): (
   label: string,
   detail?: string,
 ) => { label: string; detail: string; detailHidden: boolean } {
-  const start = CODEX_MOBILE_JS.indexOf("  function setBootStatus");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function resolveBootConnectionState", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function setBootStatus");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function resolveBootConnectionState", start);
   if (start < 0 || end < 0) throw new Error("Mobile boot status setter not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   const bootStatusText = { textContent: "" };
   const bootDetail = { textContent: "", hidden: false };
   return new Function(
@@ -1615,10 +1640,7 @@ function loadMobileBootOrbFrame(): (
   t: number,
   dark: boolean,
 ) => Array<{ x: number; y: number; z: number; r: number; gray: number }> {
-  const start = CODEX_MOBILE_JS.indexOf("  var BOOT_ORB_PRESET");
-  const end = CODEX_MOBILE_JS.indexOf("\n  var bootOrbAnimation", start);
-  if (start < 0 || end < 0) throw new Error("Mobile boot orb frame not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = SOLVING_ORB_JS;
   // 用一个只记录填充色的假 canvas context 捕获几何，避免依赖真实渲染。
   return new Function(`
 ${source}
@@ -1648,10 +1670,10 @@ function loadMobileOptimisticRunStarter(params: {
   };
   visibleSummary: { status: string } | null;
 }): (pending: { optimisticRun: boolean }) => void {
-  const start = CODEX_MOBILE_JS.indexOf("  function beginOptimisticRunIfNeeded");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function retryPendingMessage", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function beginOptimisticRunIfNeeded");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function retryPendingMessage", start);
   if (start < 0 || end < 0) throw new Error("Mobile optimistic-run starter not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   return new Function("state", "visibleSummary", `
 function currentVisibleRunSummary() { return visibleSummary; }
 ${source}
@@ -1663,10 +1685,10 @@ function loadMobileOptimisticProgressFilter(): (
   progressItems: Array<{ id: string; turnId?: string }>,
   optimisticTurnId: string | null,
 ) => Array<{ id: string; turnId?: string }> {
-  const start = CODEX_MOBILE_JS.indexOf("  function filterProgressItemsForOptimisticTurn");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function resolveVisibleRunSummary", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function filterProgressItemsForOptimisticTurn");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function resolveVisibleRunSummary", start);
   if (start < 0 || end < 0) throw new Error("Mobile optimistic-progress filter not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   return new Function(`${source}\nreturn filterProgressItemsForOptimisticTurn;`)() as ReturnType<
     typeof loadMobileOptimisticProgressFilter
   >;
@@ -1676,10 +1698,10 @@ function loadMobileEffectiveRunSummary(
   localRunSummary: { turnId?: string; status: string; startedAtMs?: number } | null,
   runSummary: { turnId?: string; status: string; completedAtMs?: number } | null,
 ): { turnId?: string; status: string } | null {
-  const start = CODEX_MOBILE_JS.indexOf("  function effectiveRunSummary");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function isTaskActivelyRunning", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function effectiveRunSummary");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function isTaskActivelyRunning", start);
   if (start < 0 || end < 0) throw new Error("Mobile effective run summary not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   return new Function(
     "state",
     `${source}\nreturn effectiveRunSummary();`,
@@ -1693,10 +1715,10 @@ function loadMobileRunSummaryResolver(): (
   nowMs: number,
   progressItems?: Array<{ turnId?: string; status?: string; createdAtMs?: number }>,
 ) => { turnId?: string; status: string; startedAtMs?: number; durationMs?: number } | null {
-  const start = CODEX_MOBILE_JS.indexOf("  function isTaskActivelyRunning");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function runDurationMs", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function isTaskActivelyRunning");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function runDurationMs", start);
   if (start < 0 || end < 0) throw new Error("Mobile run summary resolver not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   return new Function(`${source}\nreturn resolveVisibleRunSummary;`)() as ReturnType<
     typeof loadMobileRunSummaryResolver
   >;
@@ -1709,10 +1731,10 @@ function loadMobileComposerQueueDecision(): (
   pendingApproval: unknown,
   waitingForTaskCreation: boolean,
 ) => boolean {
-  const start = CODEX_MOBILE_JS.indexOf("  function shouldQueueComposerSubmission");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function updateHeader", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function shouldQueueComposerSubmission");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function updateHeader", start);
   if (start < 0 || end < 0) throw new Error("Mobile composer queue decision not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   return new Function(
     "isTaskActivelyRunning",
     `${source}\nreturn shouldQueueComposerSubmission;`,
@@ -1731,10 +1753,10 @@ function loadMobileRunHeaderLabel(): (
   },
   stopping?: boolean,
 ) => string {
-  const start = CODEX_MOBILE_JS.indexOf("  function formatRunDuration");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function renderRunHeader", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function formatRunDuration");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function renderRunHeader", start);
   if (start < 0 || end < 0) throw new Error("Mobile run-header label not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   const state = { pendingApproval: null };
   return new Function("state", `${source}\nreturn runHeaderLabel;`)(state) as ReturnType<
     typeof loadMobileRunHeaderLabel
@@ -1756,10 +1778,10 @@ function loadMobileRunSummaryUpdater(params: {
   task: { status: string } | null,
   messages?: Array<{ role: string; turnId?: string }>,
 ) => void {
-  const start = CODEX_MOBILE_JS.indexOf("  function updateRunSummary");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function normalizeMessagePage", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function updateRunSummary");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function normalizeMessagePage", start);
   if (start < 0 || end < 0) throw new Error("Mobile run-summary updater not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   return new Function("state", "isTaskActivelyRunning", "runDurationMs", `${source}\nreturn updateRunSummary;`)(
     params.state,
     (task: { status: string } | null) => Boolean(task && ["running", "approval", "input"].includes(task.status)),
@@ -1772,10 +1794,10 @@ function loadMobileComposerActionPredicate(): (
   summary: { status: string } | null,
   hasContent: boolean,
 ) => boolean {
-  const start = CODEX_MOBILE_JS.indexOf("  function isTaskActivelyRunning");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function runDurationMs", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function isTaskActivelyRunning");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function runDurationMs", start);
   if (start < 0 || end < 0) throw new Error("Mobile composer action helper not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   return new Function(`${source}\nreturn shouldUseStopComposerAction;`)() as ReturnType<
     typeof loadMobileComposerActionPredicate
   >;
@@ -1786,10 +1808,10 @@ function loadMobileComposerActionState(): (input: {
   stopRequested: boolean;
   sending: boolean;
 }) => "send" | "pending" | "running" | "stopping" {
-  const start = CODEX_MOBILE_JS.indexOf("  function composerActionState");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function runDurationMs", start);
+  const start = CHAT_COMPOSER_JS.indexOf("  function composerActionState");
+  const end = CHAT_COMPOSER_JS.indexOf("\n  function updateAction", start);
   if (start < 0 || end < 0) throw new Error("Mobile composer action state helper not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = CHAT_COMPOSER_JS.slice(start, end);
   return new Function(`${source}\nreturn composerActionState;`)() as ReturnType<
     typeof loadMobileComposerActionState
   >;
@@ -1835,10 +1857,10 @@ function loadMobileTaskSidebarHelpers(): {
     canCreateInProject?: boolean;
   }>(tasks: T[], currentThreadId: string) => T | null;
 } {
-  const start = CODEX_MOBILE_JS.indexOf("  var PROJECT_TASK_BATCH_SIZE");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function readSetupToken", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  var PROJECT_TASK_BATCH_SIZE");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function readSetupToken", start);
   if (start < 0 || end < 0) throw new Error("Mobile task sidebar helpers not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   return new Function(`${source}
 return {
   projectBatchSize: PROJECT_TASK_BATCH_SIZE,
@@ -1891,10 +1913,10 @@ function loadMobileConversationCacheHelpers(): {
     localTasks: T[],
   ) => T[];
 } {
-  const start = CODEX_MOBILE_JS.indexOf("  function conversationStateKey");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function readSetupToken", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function conversationStateKey");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function readSetupToken", start);
   if (start < 0 || end < 0) throw new Error("Mobile conversation cache helpers not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   return new Function(`${source}
 return {
   conversationStateKey,
@@ -1923,10 +1945,10 @@ function loadMobileConversationSnapshotRuntime(params: {
   conversationStateKey: (adapter: string, threadId: string) => string;
   renderEvents: string[];
 } {
-  const start = CODEX_MOBILE_JS.indexOf("  function conversationStateKey");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function readSetupToken", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function conversationStateKey");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function readSetupToken", start);
   if (start < 0 || end < 0) throw new Error("Mobile conversation snapshot runtime not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   const renderEvents: string[] = [];
   const runtime = new Function(
     "state",
@@ -1980,10 +2002,10 @@ function loadMobileTaskSelector(): <T extends { threadId: string }>(
   tasks: T[],
   selector: string,
 ) => T | null {
-  const start = CODEX_MOBILE_JS.indexOf("  function resolveTaskSelector");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function readSetupToken", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function resolveTaskSelector");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function readSetupToken", start);
   if (start < 0 || end < 0) throw new Error("Mobile task selector not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   return new Function(`${source}\nreturn resolveTaskSelector;`)() as ReturnType<
     typeof loadMobileTaskSelector
   >;
@@ -1992,10 +2014,10 @@ function loadMobileTaskSelector(): <T extends { threadId: string }>(
 function loadMobileTaskBoardHref(currentHref: string): (
   task: { adapter: string; threadId: string },
 ) => string {
-  const start = CODEX_MOBILE_JS.indexOf("  function taskBoardTaskHref");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function formatTaskBoardTime", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function taskBoardTaskHref");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function formatTaskBoardTime", start);
   if (start < 0 || end < 0) throw new Error("Mobile task-board href helper not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   return new Function("window", `${source}\nreturn taskBoardTaskHref;`)({
     location: { href: currentHref },
   }) as ReturnType<typeof loadMobileTaskBoardHref>;
@@ -2005,10 +2027,10 @@ function loadMobileMessagePageMerger(): (
   existing: Array<{ id?: string; role: string; text: string; turnId?: string; phase?: string }>,
   incoming: Array<{ id?: string; role: string; text: string; turnId?: string; phase?: string }>,
 ) => Array<{ id?: string; role: string; text: string; turnId?: string; phase?: string }> {
-  const start = CODEX_MOBILE_JS.indexOf("  function messagePageKey");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function rebuildServerMessages", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function messagePageKey");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function rebuildServerMessages", start);
   if (start < 0 || end < 0) throw new Error("Mobile message page merger not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   return new Function(`${source}\nreturn mergeMessagePages;`)() as ReturnType<
     typeof loadMobileMessagePageMerger
   >;
@@ -2027,18 +2049,20 @@ function loadMobilePendingMessageReconciler(): (
   }>,
   messages: Array<{
     id?: string;
+    clientId?: string;
     turnId?: string;
     role: string;
     text: string;
   }>,
   deliveredClientIds?: string[],
 ) => Array<{ clientId: string }> {
-  const start = CODEX_MOBILE_JS.indexOf("  function reconcilePendingMessages");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function runHeaderInsertIndex", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function reconcilePendingMessages");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function runHeaderInsertIndex", start);
   if (start < 0 || end < 0) throw new Error("Mobile pending-message reconciler not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   return new Function("pendingMessages", "messages", "deliveredClientIds", `
 var state = { pendingMessages: pendingMessages };
+var normalizeMobileMessageText = ${normalizeMobileMessageText.toString()};
 ${source}
 reconcilePendingMessages(messages, [], deliveredClientIds);
 return state.pendingMessages;
@@ -2055,10 +2079,10 @@ function loadMobileRunSummaryRenderKey(): (
     receivedAtMs?: number;
   } | null,
 ) => unknown {
-  const start = CODEX_MOBILE_JS.indexOf("  function runSummaryRenderKey");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function renderMessages", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function runSummaryRenderKey");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function renderMessages", start);
   if (start < 0 || end < 0) throw new Error("Mobile run-summary render key not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   return new Function(`${source}\nreturn runSummaryRenderKey;`)() as ReturnType<
     typeof loadMobileRunSummaryRenderKey
   >;
@@ -2068,10 +2092,10 @@ function loadMobileRunFailureText(): (summary: {
   status?: string;
   errorMessage?: string;
 } | null) => string {
-  const start = CODEX_MOBILE_JS.indexOf("  function runFailureText");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function renderRunFailure", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function runFailureText");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function renderRunFailure", start);
   if (start < 0 || end < 0) throw new Error("Mobile run-failure helper not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   return new Function(`${source}\nreturn runFailureText;`)() as ReturnType<
     typeof loadMobileRunFailureText
   >;
@@ -2082,10 +2106,10 @@ function loadMobileTaskApprovalStatusReconciler(): (
   pendingApproval: Record<string, unknown> | null,
   runSummary: { status?: string } | null,
 ) => Record<string, unknown> {
-  const start = CODEX_MOBILE_JS.indexOf("  function reconcileTaskApprovalStatus");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function currentTask", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function reconcileTaskApprovalStatus");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function currentTask", start);
   if (start < 0 || end < 0) throw new Error("Mobile task approval reconciler not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   return new Function(`${source}\nreturn reconcileTaskApprovalStatus;`)() as ReturnType<
     typeof loadMobileTaskApprovalStatusReconciler
   >;
@@ -2106,10 +2130,10 @@ function loadMobileApprovalResultHelpers(): {
     progressItem?: Record<string, unknown>;
   }>;
 } {
-  const start = CODEX_MOBILE_JS.indexOf("  function approvalResultTitle");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function renderApprovalResult", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function approvalResultTitle");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function renderApprovalResult", start);
   if (start < 0 || end < 0) throw new Error("Mobile approval-result helpers not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   return new Function(`${source}\nreturn { title: approvalResultTitle, buildTimeline: buildConversationTimeline };`)() as ReturnType<
     typeof loadMobileApprovalResultHelpers
   >;
@@ -2119,10 +2143,10 @@ function loadVisibleMessageModel(): (message: {
   phase?: string;
   model?: string;
 }) => string {
-  const start = CODEX_MOBILE_JS.indexOf("  function visibleMessageModel");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function renderMessageRow", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function visibleMessageModel");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function renderMessageRow", start);
   if (start < 0 || end < 0) throw new Error("Mobile message model helper not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   return new Function(`${source}\nreturn visibleMessageModel;`)() as ReturnType<
     typeof loadVisibleMessageModel
   >;
@@ -2137,10 +2161,10 @@ function loadMobileMessageNodeCache(): {
     nodeKey: string,
   ) => { renderCount: number; __deskRelayMessageRenderKey?: string };
 } {
-  const start = CODEX_MOBILE_JS.indexOf("  function messageNodeBaseKey");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function renderMessageRow", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function messageNodeBaseKey");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function renderMessageRow", start);
   if (start < 0 || end < 0) throw new Error("Mobile message-node cache helpers not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   const state = { messageNodes: Object.create(null) };
   let renderCount = 0;
   const renderMessageRow = () => ({
@@ -2158,10 +2182,10 @@ function loadMobileConversationMessageVisibility(): (message: {
   role?: string;
   text?: string;
 }) => boolean {
-  const start = CODEX_MOBILE_JS.indexOf("  function isVisibleConversationMessage");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function visibleMessageText", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function isVisibleConversationMessage");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function visibleMessageText", start);
   if (start < 0 || end < 0) throw new Error("Mobile conversation-message visibility helper not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   return new Function(`${source}\nreturn isVisibleConversationMessage;`)() as ReturnType<
     typeof loadMobileConversationMessageVisibility
   >;
@@ -2175,10 +2199,10 @@ function loadMobileVisibleMessageText(): (message: {
   status?: string;
 }) => string {
   // 从包裹块常量开始取，visibleMessageText 依赖 stripCodexUserWrapper。
-  const start = CODEX_MOBILE_JS.indexOf("  var CODEX_USER_WRAPPER_BLOCK_RE");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function visibleMessageModel", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  var CODEX_USER_WRAPPER_BLOCK_RE");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function visibleMessageModel", start);
   if (start < 0 || end < 0) throw new Error("Mobile visible-message text helper not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   return new Function(`${source}\nreturn visibleMessageText;`)() as ReturnType<
     typeof loadMobileVisibleMessageText
   >;
@@ -2191,29 +2215,29 @@ function loadMobileProgressPartitioner(): (
   hidden: Array<{ id: string }>;
   visible: Array<{ id: string }>;
 } {
-  const start = CODEX_MOBILE_JS.indexOf("  function partitionProgressItems");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function renderProgressList", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function partitionProgressItems");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function renderProgressList", start);
   if (start < 0 || end < 0) throw new Error("Mobile progress partitioner not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
-  return new Function(`${source}\nreturn partitionProgressItems;`)() as ReturnType<
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
+  return new Function(`${CHAT_COMPONENTS_JS}\nvar chatText = WeRelayChatUI.createText();\n${source}\nreturn partitionProgressItems;`)() as ReturnType<
     typeof loadMobileProgressPartitioner
   >;
 }
 
 function loadMobileSwitchProgressFormatter(): (startedAtMs: number, nowMs: number) => string {
-  const start = CODEX_MOBILE_JS.indexOf("  function formatRunDuration");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function effectiveRunSummary", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function formatRunDuration");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function effectiveRunSummary", start);
   if (start < 0 || end < 0) throw new Error("Mobile switch-progress formatter not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   return new Function(`${source}\nreturn switchProgressLabel;`)() as ReturnType<
     typeof loadMobileSwitchProgressFormatter
   >;
 }
 
 function loadMobileEventPathContains(): (event: unknown, element: unknown) => boolean {
-  const start = CODEX_MOBILE_JS.indexOf("  function eventPathContains");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function ", start + 4);
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function eventPathContains");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function ", start + 4);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   return new Function(`${source}\nreturn eventPathContains;`)() as (
     event: unknown,
     element: unknown,
@@ -2221,9 +2245,9 @@ function loadMobileEventPathContains(): (event: unknown, element: unknown) => bo
 }
 
 function loadMobileComposerSessionLabel(): (reasoning: string, permission: string) => string {
-  const start = CODEX_MOBILE_JS.indexOf("  function composerSessionLabel");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function ", start + 4);
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function composerSessionLabel");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function ", start + 4);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   return new Function(`${source}\nreturn composerSessionLabel;`)() as (
     reasoning: string,
     permission: string,
@@ -2236,10 +2260,10 @@ function loadMobileTaskContextMenuTrigger(options: {
   sidebarOpen?: boolean;
   hitInside?: boolean;
 } = {}): boolean {
-  const start = CODEX_MOBILE_JS.indexOf("  function hasActiveTextSelection");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function closeSidebar", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function hasActiveTextSelection");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function closeSidebar", start);
   if (start < 0 || end < 0) throw new Error("Mobile task context-menu trigger not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   const button = { contains: (node: unknown) => node === button };
   const selection = {
     isCollapsed: !options.selectedText,
@@ -2270,10 +2294,10 @@ function loadMobileTaskContextMenuTrigger(options: {
 }
 
 function loadMobileMessageSelectionClamp() {
-  const start = CODEX_MOBILE_JS.indexOf("  function selectionNodeWithin");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function rememberMessageSelectionScope", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function selectionNodeWithin");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function rememberMessageSelectionScope", start);
   if (start < 0 || end < 0) throw new Error("Mobile message selection clamp not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   const selected: unknown[] = [];
   const range = {
     selectNodeContents: (node: unknown) => selected.push(node),
@@ -2314,10 +2338,10 @@ function loadMobileSteeredPendingMessageBuilder(): (
   baselineUserCount: number;
   baselineUserKeys: string[];
 } {
-  const start = CODEX_MOBILE_JS.indexOf("  function makeSteeredPendingMessage");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function mergeQueuedMessagesForDisplay", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function makeSteeredPendingMessage");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function mergeQueuedMessagesForDisplay", start);
   if (start < 0 || end < 0) throw new Error("Mobile steered-message builder not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   return new Function(`${source}\nreturn makeSteeredPendingMessage;`)() as ReturnType<
     typeof loadMobileSteeredPendingMessageBuilder
   >;
@@ -2335,18 +2359,18 @@ function loadMobileSteerQueuedMessageAction(options: {
     pendingMessages: Array<Record<string, unknown>>;
   };
 } {
-  const builderStart = CODEX_MOBILE_JS.indexOf("  function makeSteeredPendingMessage");
-  const builderEnd = CODEX_MOBILE_JS.indexOf(
+  const builderStart = CODEX_MOBILE_APP_JS.indexOf("  function makeSteeredPendingMessage");
+  const builderEnd = CODEX_MOBILE_APP_JS.indexOf(
     "\n  function mergeQueuedMessagesForDisplay",
     builderStart,
   );
-  const actionStart = CODEX_MOBILE_JS.indexOf("  async function steerQueuedMessage");
-  const actionEnd = CODEX_MOBILE_JS.indexOf("\n  async function deleteQueuedMessage", actionStart);
+  const actionStart = CODEX_MOBILE_APP_JS.indexOf("  async function steerQueuedMessage");
+  const actionEnd = CODEX_MOBILE_APP_JS.indexOf("\n  async function deleteQueuedMessage", actionStart);
   if (builderStart < 0 || builderEnd < 0 || actionStart < 0 || actionEnd < 0) {
     throw new Error("Mobile steer action not found");
   }
-  const source = CODEX_MOBILE_JS.slice(builderStart, builderEnd) +
-    CODEX_MOBILE_JS.slice(actionStart, actionEnd);
+  const source = CODEX_MOBILE_APP_JS.slice(builderStart, builderEnd) +
+    CODEX_MOBILE_APP_JS.slice(actionStart, actionEnd);
   const state = {
     currentThreadId: "thread-current",
     queueActionMessageId: "",
@@ -2386,7 +2410,7 @@ function loadMobileSteerQueuedMessageAction(options: {
 }
 
 function loadMobileQueuedMessageMerger(): (
-  queuedMessages: Array<{ id: string; text: string; imageCount: number }>,
+  queuedMessages: Array<{ id: string; clientId?: string; text: string; imageCount: number; createdAtMs?: number }>,
   pendingMessages: Array<{
     clientId: string;
     queuedMessageId?: string;
@@ -2406,11 +2430,11 @@ function loadMobileQueuedMessageMerger(): (
   optimistic?: boolean;
   status?: string;
 }> {
-  const start = CODEX_MOBILE_JS.indexOf("  function queuedMessageDisplayText");
-  const end = CODEX_MOBILE_JS.indexOf("\n  async function steerQueuedMessage", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function queuedMessageDisplayText");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  async function steerQueuedMessage", start);
   if (start < 0 || end < 0) throw new Error("Mobile queued-message merger not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
-  return new Function(`${source}\nreturn mergeQueuedMessagesForDisplay;`)() as ReturnType<
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
+  return new Function(`var normalizeMobileMessageText = ${normalizeMobileMessageText.toString()};\n${source}\nreturn mergeQueuedMessagesForDisplay;`)() as ReturnType<
     typeof loadMobileQueuedMessageMerger
   >;
 }
@@ -2420,10 +2444,10 @@ function loadMobileUserMessageNavigator(): (
   scrollTop: number,
   targetInset: number,
 ) => { previousIndex: number; nextIndex: number } {
-  const start = CODEX_MOBILE_JS.indexOf("  function resolveUserMessageNavigation");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function updateUserMessageNavigation", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function resolveUserMessageNavigation");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function updateUserMessageNavigation", start);
   if (start < 0 || end < 0) throw new Error("Mobile user-message navigator not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   return new Function(`${source}\nreturn resolveUserMessageNavigation;`)() as ReturnType<
     typeof loadMobileUserMessageNavigator
   >;
@@ -2433,10 +2457,10 @@ function loadMobileEntryScrollHelper(
   offsets: number[],
   inset = 72,
 ): { focus: () => void; messagesEl: { scrollTop: number } & Record<string, unknown>; fallback: string[] } {
-  const start = CODEX_MOBILE_JS.indexOf("  function scrollToLatestUserMessage(");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function resolveUserMessageNavigation", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function scrollToLatestUserMessage(");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function resolveUserMessageNavigation", start);
   if (start < 0 || end < 0) throw new Error("Mobile latest-user entry scroll helper not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   const fallback: string[] = [];
   const messagesEl = {
     scrollTop: 0,
@@ -2450,15 +2474,15 @@ function loadMobileEntryScrollHelper(
 }
 
 function loadMobileEntryFocusLifecycle() {
-  const start = CODEX_MOBILE_JS.indexOf("  function beginConversationEntryFocus(");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function resolveUserMessageNavigation", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function beginConversationEntryFocus(");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function resolveUserMessageNavigation", start);
   if (start < 0 || end < 0) throw new Error("Mobile entry focus lifecycle not found");
   const callbacks: Array<() => void> = [];
   const movements: string[] = [];
   const state = { currentAdapter: "codex", currentThreadId: "a", entryFocusKey: "", entryFocusGeneration: 0 };
   const runtime = new Function(
     "state", "conversationStateKey", "requestAnimationFrame", "scrollToLatestUserMessage", "updateUserMessageNavigation",
-    `${CODEX_MOBILE_JS.slice(start, end)}
+    `${CODEX_MOBILE_APP_JS.slice(start, end)}
 return { beginConversationEntryFocus, cancelConversationEntryFocus, finishConversationEntryFocus };`,
   )(
     state,
@@ -2489,12 +2513,12 @@ describe("mobile conversation entry scroll", () => {
   });
 
   test("entering a cached task ignores its saved scroll position and background refresh cannot reset it", () => {
-    const snapshotStart = CODEX_MOBILE_JS.indexOf("  function restoreConversationSnapshot(");
-    const snapshotEnd = CODEX_MOBILE_JS.indexOf("\n  function readSetupToken", snapshotStart);
-    const snapshotSource = CODEX_MOBILE_JS.slice(snapshotStart, snapshotEnd);
-    const renderStart = CODEX_MOBILE_JS.indexOf("  function renderMessages(forceBottom)");
-    const renderEnd = CODEX_MOBILE_JS.indexOf("\n  function ", renderStart + 1);
-    const renderSource = CODEX_MOBILE_JS.slice(renderStart, renderEnd);
+    const snapshotStart = CODEX_MOBILE_APP_JS.indexOf("  function restoreConversationSnapshot(");
+    const snapshotEnd = CODEX_MOBILE_APP_JS.indexOf("\n  function readSetupToken", snapshotStart);
+    const snapshotSource = CODEX_MOBILE_APP_JS.slice(snapshotStart, snapshotEnd);
+    const renderStart = CODEX_MOBILE_APP_JS.indexOf("  function renderMessages(forceBottom)");
+    const renderEnd = CODEX_MOBILE_APP_JS.indexOf("\n  function ", renderStart + 1);
+    const renderSource = CODEX_MOBILE_APP_JS.slice(renderStart, renderEnd);
     expect(snapshotSource).toContain("renderMessages(false)");
     expect(snapshotSource).not.toContain("snapshot.nearBottom");
     expect(snapshotSource).not.toContain("snapshot.scrollTop");
@@ -2614,9 +2638,9 @@ describe("Codex mobile conversation cache", () => {
   });
 
   test("reuses the unfinished new task and ends draft mode after the server resolves it", () => {
-    const start = CODEX_MOBILE_JS.indexOf("  async function createTask(");
-    const end = CODEX_MOBILE_JS.indexOf("\n  async function selectTask(", start);
-    const block = CODEX_MOBILE_JS.slice(start, end);
+    const start = CODEX_MOBILE_APP_JS.indexOf("  async function createTask(");
+    const end = CODEX_MOBILE_APP_JS.indexOf("\n  async function selectTask(", start);
+    const block = CODEX_MOBILE_APP_JS.slice(start, end);
 
     expect(block).toContain("var reusableTask = currentLocalTaskDraft();");
     expect(block).toContain("await selectTask(reusableTask.threadId, true);");
@@ -2633,9 +2657,9 @@ describe("Codex mobile conversation cache", () => {
   });
 
   test("shows a local task immediately and lets the persisted first message create it in the background", () => {
-    const start = CODEX_MOBILE_JS.indexOf("  async function createTask(");
-    const end = CODEX_MOBILE_JS.indexOf("\n  async function selectTask(", start);
-    const block = CODEX_MOBILE_JS.slice(start, end);
+    const start = CODEX_MOBILE_APP_JS.indexOf("  async function createTask(");
+    const end = CODEX_MOBILE_APP_JS.indexOf("\n  async function selectTask(", start);
+    const block = CODEX_MOBILE_APP_JS.slice(start, end);
     const insertIndex = block.indexOf("state.tasks.unshift(temporaryTask);");
     const selectIndex = block.indexOf("await selectTask(temporaryTask.threadId, true);");
 
@@ -2976,9 +3000,9 @@ describe("Codex mobile persistent cache", () => {
   });
 
   test("shows authenticated cache first and refreshes adapters, tasks, and messages asynchronously", () => {
-    const start = CODEX_MOBILE_JS.indexOf("  function startAuthenticatedApp");
-    const end = CODEX_MOBILE_JS.indexOf("\n  function taskStatusLabel", start);
-    const block = CODEX_MOBILE_JS.slice(start, end);
+    const start = CODEX_MOBILE_APP_JS.indexOf("  function startAuthenticatedApp");
+    const end = CODEX_MOBILE_APP_JS.indexOf("\n  function taskStatusLabel", start);
+    const block = CODEX_MOBILE_APP_JS.slice(start, end);
     const restoreIndex = block.indexOf("restorePersistentMobileCache(");
     const appVisibleIndex = block.indexOf("app.hidden = false;");
     const refreshIndex = block.indexOf("void refreshAuthenticatedApp(");
@@ -2993,12 +3017,12 @@ describe("Codex mobile persistent cache", () => {
   });
 
   test("opens the cached task board immediately and refreshes it silently", () => {
-    const loadStart = CODEX_MOBILE_JS.indexOf("  async function loadTaskBoard");
-    const loadEnd = CODEX_MOBILE_JS.indexOf("\n  function setTaskBoardView", loadStart);
-    const loadBlock = CODEX_MOBILE_JS.slice(loadStart, loadEnd);
-    const openStart = CODEX_MOBILE_JS.indexOf("  function setTaskBoardOpen");
-    const openEnd = CODEX_MOBILE_JS.indexOf("\n  function taskBoardSearch", openStart);
-    const openBlock = CODEX_MOBILE_JS.slice(openStart, openEnd);
+    const loadStart = CODEX_MOBILE_APP_JS.indexOf("  async function loadTaskBoard");
+    const loadEnd = CODEX_MOBILE_APP_JS.indexOf("\n  function setTaskBoardView", loadStart);
+    const loadBlock = CODEX_MOBILE_APP_JS.slice(loadStart, loadEnd);
+    const openStart = CODEX_MOBILE_APP_JS.indexOf("  function setTaskBoardOpen");
+    const openEnd = CODEX_MOBILE_APP_JS.indexOf("\n  function taskBoardSearch", openStart);
+    const openBlock = CODEX_MOBILE_APP_JS.slice(openStart, openEnd);
 
     expect(loadBlock).toContain("hasTaskBoardCachedContent(");
     expect(loadBlock).toContain("if (error.network && hasCachedBoard) return;");
@@ -3070,10 +3094,25 @@ describe("Codex mobile persistent cache", () => {
     ]);
   });
 
+  test("keeps cached sidebar tasks visible during adapter switching and initial reconnect failure", () => {
+    const renderStart = CODEX_MOBILE_APP_JS.indexOf("  function renderTasks() {");
+    const renderEnd = CODEX_MOBILE_APP_JS.indexOf("\n  function taskBoardStatusLabel", renderStart);
+    const renderBlock = CODEX_MOBILE_APP_JS.slice(renderStart, renderEnd);
+    expect(renderBlock).not.toContain("if (state.switchingAdapter)");
+    const resetStart = CODEX_MOBILE_APP_JS.indexOf("  function resetTaskStateForAdapterSwitch()");
+    const resetEnd = CODEX_MOBILE_APP_JS.indexOf("\n  async function switchAdapter", resetStart);
+    expect(CODEX_MOBILE_APP_JS.slice(resetStart, resetEnd)).not.toContain("renderTasks();");
+    const loadStart = CODEX_MOBILE_APP_JS.indexOf("  async function loadTasks(initial)");
+    const loadEnd = CODEX_MOBILE_APP_JS.indexOf("\n  function syncComposerInset", loadStart);
+    expect(CODEX_MOBILE_APP_JS.slice(loadStart, loadEnd)).toContain(
+      "isMobileConnectionUnavailable(error) && state.tasks.length",
+    );
+  });
+
   test("shows the target adapter cache before waiting for the desktop switch", () => {
-    const start = CODEX_MOBILE_JS.indexOf("  async function switchAdapter");
-    const end = CODEX_MOBILE_JS.indexOf("\n  function showAuthentication", start);
-    const block = CODEX_MOBILE_JS.slice(start, end);
+    const start = CODEX_MOBILE_APP_JS.indexOf("  async function switchAdapter");
+    const end = CODEX_MOBILE_APP_JS.indexOf("\n  function showAuthentication", start);
+    const block = CODEX_MOBILE_APP_JS.slice(start, end);
     const restoreIndex = block.indexOf('restoreCachedAdapterState(adapterId, "");');
     const requestIndex = block.indexOf('await api(\n        "/api/adapters/"');
 
@@ -3131,12 +3170,12 @@ describe("Codex mobile web rendering", () => {
   });
 
   test("keeps the visible transcript while an adapter switch catches up", () => {
-    const renderStart = CODEX_MOBILE_JS.indexOf("  function renderMessages");
-    const renderEnd = CODEX_MOBILE_JS.indexOf("\n  function updateHeader", renderStart);
-    const renderBlock = CODEX_MOBILE_JS.slice(renderStart, renderEnd);
-    const switchStart = CODEX_MOBILE_JS.indexOf("  async function switchAdapter");
-    const switchEnd = CODEX_MOBILE_JS.indexOf("\n  function showAuthentication", switchStart);
-    const switchBlock = CODEX_MOBILE_JS.slice(switchStart, switchEnd);
+    const renderStart = CODEX_MOBILE_APP_JS.indexOf("  function renderMessages");
+    const renderEnd = CODEX_MOBILE_APP_JS.indexOf("\n  function updateHeader", renderStart);
+    const renderBlock = CODEX_MOBILE_APP_JS.slice(renderStart, renderEnd);
+    const switchStart = CODEX_MOBILE_APP_JS.indexOf("  async function switchAdapter");
+    const switchEnd = CODEX_MOBILE_APP_JS.indexOf("\n  function showAuthentication", switchStart);
+    const switchBlock = CODEX_MOBILE_APP_JS.slice(switchStart, switchEnd);
 
     expect(renderBlock).toContain('messagesEl.setAttribute("aria-busy", "true")');
     expect(renderBlock).not.toContain(
@@ -3154,8 +3193,8 @@ describe("Codex mobile web rendering", () => {
     expect(CODEX_MOBILE_HTML).not.toContain('id="composer-reasoning-button"');
     expect(CODEX_MOBILE_HTML).not.toContain('id="composer-permission-button"');
     expect(sessionLabel("中", "完全访问")).toBe("中 · 完全访问");
-    expect(CODEX_MOBILE_JS).toContain('appendSessionMenuHeading("\\u63A8\\u7406\\u5F3A\\u5EA6")');
-    expect(CODEX_MOBILE_JS).toContain('appendSessionMenuHeading("\\u8BBF\\u95EE\\u6743\\u9650")');
+    expect(CODEX_MOBILE_JS).toContain('kind: "reasoning", label: "\\u63A8\\u7406\\u5F3A\\u5EA6"');
+    expect(CODEX_MOBILE_JS).toContain('kind: "permission", label: "\\u8BBF\\u95EE\\u6743\\u9650"');
     expect(CODEX_MOBILE_CSS).toContain(
       ".composer-permission-option .composer-model-option-label { white-space: nowrap; overflow-wrap: normal; }",
     );
@@ -3190,7 +3229,7 @@ describe("Codex mobile web rendering", () => {
       target: detachedRow,
       composedPath: () => [detachedRow, modelMenu],
     }, modelMenu)).toBe(true);
-    expect(CODEX_MOBILE_JS).toContain("!eventPathContains(event, composerModelMenu)");
+    expect(CODEX_MOBILE_JS).toContain("!control.contains(event.target)");
   });
 
   test("supports task permission scopes inside the combined session menu", () => {
@@ -3847,9 +3886,9 @@ describe("Codex mobile web rendering", () => {
   });
 
   test("reconciles restored optimistic messages against the merged transcript", () => {
-    const loadStart = CODEX_MOBILE_JS.indexOf("  async function loadMessages(");
-    const loadEnd = CODEX_MOBILE_JS.indexOf("\n  function temporaryTaskTitle", loadStart);
-    const loadBlock = CODEX_MOBILE_JS.slice(loadStart, loadEnd);
+    const loadStart = CODEX_MOBILE_APP_JS.indexOf("  async function loadMessages(");
+    const loadEnd = CODEX_MOBILE_APP_JS.indexOf("\n  function temporaryTaskTitle", loadStart);
+    const loadBlock = CODEX_MOBILE_APP_JS.slice(loadStart, loadEnd);
 
     expect(loadBlock).toContain("var messages = state.serverMessages;");
     expect(loadBlock).toContain(
@@ -3886,24 +3925,75 @@ describe("Codex mobile web rendering", () => {
     ])).toEqual([]);
   });
 
+  test("renders one queued card when the native queue appears before its POST acknowledgement", () => {
+    const merge = loadMobileQueuedMessageMerger();
+    const native = [{ id: "native-queue", clientId: "web-send", text: "下一步检查", imageCount: 0, createdAtMs: 11_000 }];
+    const pending = [{ clientId: "web-send", text: "下一步检查", imageCount: 0,
+      status: "sending", createdAtMs: 10_000, displayInTranscript: false }];
+    expect(merge(native, pending)).toEqual(native);
+    // Two deliberate submissions with the same text are not one send.
+    expect(merge(native, [...pending, { ...pending[0]!, clientId: "another-send" }])).toHaveLength(2);
+  });
+
+  test("legacy queue snapshots match at most one pending send using time, text and attachments", () => {
+    const merge = loadMobileQueuedMessageMerger();
+    const native = [{ id: "legacy-queue", text: "下一步检查", imageCount: 1, createdAtMs: 11_000 }];
+    const pending = { clientId: "web-send", text: "下一步检查", imageCount: 1,
+      status: "sending", createdAtMs: 10_000, displayInTranscript: false };
+    expect(merge(native, [pending])).toEqual(native);
+    expect(merge(native, [pending, { ...pending, clientId: "second-send" }])).toHaveLength(2);
+    expect(merge(native, [{ ...pending, createdAtMs: 12_000 }])).toHaveLength(2);
+    expect(merge(native, [{ ...pending, imageCount: 0 }])).toHaveLength(2);
+    expect(merge(native, [{ ...pending, status: "waiting_to_send" }])).toHaveLength(2);
+    expect(merge(native, [{ ...pending, queuedMessageId: "different-native-id" }])).toHaveLength(2);
+  });
+
+  test("merges an image send with its wrapped Codex receipt before the POST returns", () => {
+    const reconcile = loadMobilePendingMessageReconciler();
+    const pending = [{ clientId: "image-send", text: "检查页面", imageCount: 1,
+      status: "sending", turnId: "turn-image", baselineUserCount: 0, baselineUserKeys: [] }];
+    const native = [{ id: "native-image", turnId: "turn-image", role: "user",
+      text: "图片：png1\n检查页面\n[image]\n</image>" }];
+    expect(reconcile(pending, native)).toEqual([]);
+    expect(pending[0]).toMatchObject({ deliveryConfirmed: true });
+  });
+
+  test("restored image sends infer attachment count from retained images", () => {
+    const reconcile = loadMobilePendingMessageReconciler();
+    const pending = [{ clientId: "restored-image", text: "检查页面", imageCount: 0,
+      images: [{ url: "/api/message-images/opaque" }], status: "unconfirmed",
+      turnId: "turn-image", baselineUserCount: 0, baselineUserKeys: [] }];
+    expect(reconcile(pending, [{ id: "native-image", turnId: "turn-image", role: "user",
+      text: "图片：png1\n检查页面\n[image]\n</image>" }])).toEqual([]);
+  });
+
+  test("does not merge a second intentional image send with another client's receipt", () => {
+    const reconcile = loadMobilePendingMessageReconciler();
+    const pending = [{ clientId: "second-image", text: "检查页面", imageCount: 1,
+      status: "sending", baselineUserCount: 0, baselineUserKeys: [] }];
+    expect(reconcile(pending, [{ id: "native-first", clientId: "first-image", role: "user",
+      text: "图片：png1\n检查页面\n[image]\n</image>" }])).toHaveLength(1);
+  });
+
   test("hides a cached optimistic bubble immediately and makes retry a no-op after acknowledgement", () => {
-    const reconcileStart = CODEX_MOBILE_JS.indexOf("  function reconcilePendingMessages");
-    const reconcileEnd = CODEX_MOBILE_JS.indexOf("  function runHeaderInsertIndex", reconcileStart);
-    const visibleStart = CODEX_MOBILE_JS.indexOf("  function visiblePendingMessages");
-    const visibleEnd = CODEX_MOBILE_JS.indexOf("  function currentVisibleRunSummary", visibleStart);
-    const retryStart = CODEX_MOBILE_JS.indexOf("  function retryPendingMessage");
-    const retryEnd = CODEX_MOBILE_JS.indexOf('  composerForm.addEventListener', retryStart);
+    const reconcileStart = CODEX_MOBILE_APP_JS.indexOf("  function reconcilePendingMessages");
+    const reconcileEnd = CODEX_MOBILE_APP_JS.indexOf("  function runHeaderInsertIndex", reconcileStart);
+    const visibleStart = CODEX_MOBILE_APP_JS.indexOf("  function visiblePendingMessages");
+    const visibleEnd = CODEX_MOBILE_APP_JS.indexOf("  function currentVisibleRunSummary", visibleStart);
+    const retryStart = CODEX_MOBILE_APP_JS.indexOf("  function retryPendingMessage");
+    const retryEnd = CODEX_MOBILE_APP_JS.indexOf('  async function submitComposer', retryStart);
     const pending = { clientId: "mobile-cached", threadId: "task", text: "只发送一次", imageCount: 0,
       status: "forwarding_to_agent", baselineUserKeys: [], baselineUserCount: 0 };
     const state = { pendingMessages: [pending], serverMessages: [{id: "actual", role: "user", text: pending.text}] };
     let posts = 0;
     const actions = new Function("state", "submitPendingMessage", `
+      var normalizeMobileMessageText = ${normalizeMobileMessageText.toString()};
       function taskById() { return {}; }
       function isTemporaryTask() { return false; }
       function renderMessages() {}
-      ${CODEX_MOBILE_JS.slice(reconcileStart, reconcileEnd)}
-      ${CODEX_MOBILE_JS.slice(visibleStart, visibleEnd)}
-      ${CODEX_MOBILE_JS.slice(retryStart, retryEnd)}
+      ${CODEX_MOBILE_APP_JS.slice(reconcileStart, reconcileEnd)}
+      ${CODEX_MOBILE_APP_JS.slice(visibleStart, visibleEnd)}
+      ${CODEX_MOBILE_APP_JS.slice(retryStart, retryEnd)}
       return { visiblePendingMessages, retryPendingMessage };
     `)(state, () => { posts++; });
     expect(actions.visiblePendingMessages()).toEqual([]);
@@ -3978,9 +4068,9 @@ describe("Codex mobile web rendering", () => {
   });
 
   test("ends stale progress animation after the same run is completed", () => {
-    const start = CODEX_MOBILE_JS.indexOf("  function settleVisibleProgressItem");
-    const end = CODEX_MOBILE_JS.indexOf("\n  function renderProgressList", start);
-    const settle = new Function(`${CODEX_MOBILE_JS.slice(start, end)}\nreturn settleVisibleProgressItem;`)();
+    const start = CODEX_MOBILE_APP_JS.indexOf("  function settleVisibleProgressItem");
+    const end = CODEX_MOBILE_APP_JS.indexOf("\n  function renderProgressList", start);
+    const settle = new Function(`${CODEX_MOBILE_APP_JS.slice(start, end)}\nreturn settleVisibleProgressItem;`)();
     const progress = { status: "running", turnId: "turn-1", createdAtMs: 1_000, text: "正在规划" };
     expect(settle(progress, { status: "completed", completedAtMs: 2_000 }, [])).toMatchObject({ status: "completed" });
     expect(settle(progress, { status: "running", startedAtMs: 900 }, [])).toMatchObject({ status: "running" });
@@ -4310,15 +4400,15 @@ describe("Codex mobile web rendering", () => {
   });
 
   test("filters running tasks out of the recent-completed view", () => {
-    const restoreStart = CODEX_MOBILE_JS.indexOf("  function restorePersistentMobileCache");
-    const restoreEnd = CODEX_MOBILE_JS.indexOf(
+    const restoreStart = CODEX_MOBILE_APP_JS.indexOf("  function restorePersistentMobileCache");
+    const restoreEnd = CODEX_MOBILE_APP_JS.indexOf(
       "\n  function restoreTrustedPersistentMobileCachePreview",
       restoreStart,
     );
-    const restoreBlock = CODEX_MOBILE_JS.slice(restoreStart, restoreEnd);
-    const loadStart = CODEX_MOBILE_JS.indexOf("  async function loadTaskBoard");
-    const loadEnd = CODEX_MOBILE_JS.indexOf("\n  function setTaskBoardView", loadStart);
-    const loadBlock = CODEX_MOBILE_JS.slice(loadStart, loadEnd);
+    const restoreBlock = CODEX_MOBILE_APP_JS.slice(restoreStart, restoreEnd);
+    const loadStart = CODEX_MOBILE_APP_JS.indexOf("  async function loadTaskBoard");
+    const loadEnd = CODEX_MOBILE_APP_JS.indexOf("\n  function setTaskBoardView", loadStart);
+    const loadBlock = CODEX_MOBILE_APP_JS.slice(loadStart, loadEnd);
 
     expect(restoreBlock).toContain("!isTaskBoardInProgress(item)");
     expect(loadBlock).toContain("!isTaskBoardInProgress(item)");
@@ -5577,7 +5667,7 @@ describe("Codex mobile server", () => {
       expect(html).toContain('class="send-arrow-icon" viewBox="0 0 32 32"');
       expect(html).toContain('x="16.1284" y="9" width="2.01621" height="10.081"');
       expect(html).toContain('class="send-running-orb"');
-      expect(html).toContain('id="send-running-orb" width="20" height="20"');
+      expect(html).toContain('id="send-running-orb" data-chat-part="send-running-orb" width="20" height="20"');
       expect(html).toContain('class="send-stop-icon"');
       expect(html).toContain('<rect x="5" y="5" width="14" height="14" rx="2.2"/>');
       expect(html).not.toContain('<rect x="3.5" y="5" width="17" height="14" rx="2.5"/>');
@@ -5871,7 +5961,7 @@ describe("Codex mobile server", () => {
       expect(js).not.toContain("setConnection(");
       expect(js).not.toContain('taskList.innerHTML = ""');
       expect(js).toContain("addImageFiles");
-      expect(js).toContain('composerInput.addEventListener("paste"');
+      expect(js).toContain('on(composerInput, "paste"');
       expect(js).not.toContain('composerTool.addEventListener("click"');
       expect(js).not.toContain("defaultComposerStatus");
       expect(js).not.toContain("已加入队列，前面还有");
@@ -6694,7 +6784,7 @@ describe("Codex mobile generated image messages", () => {
 
   test("opens selected input images in the same full-screen viewer", () => {
     expect(CODEX_MOBILE_JS).toContain('previewButton.className = "composer-media-preview"');
-    expect(CODEX_MOBILE_JS).toContain("openImageViewer(image.previewUrl, image.fileName)");
+    expect(CODEX_MOBILE_JS).toContain("actions.onOpenImage(image.previewUrl, image.fileName)");
     expect(CODEX_MOBILE_CSS).toContain(".composer-media-preview");
   });
 });
@@ -7025,10 +7115,10 @@ function loadMobilePersistentCacheRuntime(params: {
   persistMobileCacheNow: () => boolean;
   clearPersistentMobileCache: () => void;
 } {
-  const start = CODEX_MOBILE_JS.indexOf("  function conversationStateKey");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function readSetupToken", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function conversationStateKey");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function readSetupToken", start);
   if (start < 0 || end < 0) throw new Error("Mobile persistent cache source not found");
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   const composerInput = { value: "", placeholder: "" };
   const renderEvents: string[] = [];
   const runtime = new Function(
@@ -7274,40 +7364,37 @@ describe("mobile question answers", () => {
 });
 
 test("unchanged task polling preserves the open reasoning menu's clickable nodes", () => {
-  const start = CODEX_MOBILE_JS.indexOf("  function renderSessionControl()");
-  const end = CODEX_MOBILE_JS.indexOf("  function reasoningEffortLabel(value)", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function renderSessionControl()");
+  const end = CODEX_MOBILE_APP_JS.indexOf("  function reasoningEffortLabel(value)", start);
   const model = { currentReasoningEffort: "medium", reasoningEffortOptions: [{ id: "medium", label: "中" }, { id: "high", label: "高" }], canChangeReasoningEffort: true, loadedAtMs: 1 };
-  const nodes: unknown[] = [];
-  const menu: Record<string, unknown> = {};
-  Object.defineProperty(menu, "innerHTML", { set: () => { nodes.length = 0; } });
-  const button = { classList: { toggle: () => {} }, setAttribute: () => {} };
+  const { view: composerView, part } = composerHarness();
+  const menu = part("composer-session-menu");
   const dependencies: Record<string, unknown> = {
     state: { currentThreadId: "original", sessionMenuOpen: true },
     currentTaskModelState: () => model, currentTaskPermissionState: () => ({ options: [], canChange: false }),
-    currentTaskModelKey: () => "pi:original", composerSessionControl: {}, composerSessionButton: button,
+    currentTaskModelKey: () => "pi:original", composerView,
     composerSessionLabelEl: {}, composerSessionMenu: menu, closeSessionMenu: () => {}, syncComposerSettingsVisibility: () => {},
     currentTask: () => ({}), taskNeedsCreation: () => false, draftSettingsSubmitted: () => false,
     composerSessionLabel: (reasoning: string, permission: string) => `${reasoning} · ${permission}`,
     reasoningEffortLabel: (id: string) => id, permissionLabel: (id: string) => id,
-    appendSessionMenuHeading: (label: string) => { nodes.push({ label }); },
-    appendSessionMenuOption: (option: unknown) => { nodes.push({ option }); },
   };
-  const render = new Function(...Object.keys(dependencies), `${CODEX_MOBILE_JS.slice(start, end)}\nreturn renderSessionControl;`)(...Object.values(dependencies)) as () => void;
-  render(); const highNode = nodes[2];
-  model.loadedAtMs = 2; render(); expect(nodes[2]).toBe(highNode);
-  model.currentReasoningEffort = "high"; render(); expect(nodes[2]).not.toBe(highNode);
+  const render = new Function(...Object.keys(dependencies), `${CODEX_MOBILE_APP_JS.slice(start, end)}\nreturn renderSessionControl;`)(...Object.values(dependencies)) as () => void;
+  render(); const highNode = menu.children[2];
+  model.loadedAtMs = 2; render(); expect(menu.children[2]).toBe(highNode);
+  model.currentReasoningEffort = "high"; render(); expect(menu.children[2]).not.toBe(highNode);
   expect(menu.hidden).toBe(false);
+  composerView.destroy();
 });
 
 test("background model refresh cannot steal an in-flight model or reasoning selection", async () => {
-  const start = CODEX_MOBILE_JS.indexOf("  async function loadCurrentTaskModel(force)");
-  const end = CODEX_MOBILE_JS.indexOf("  async function loadCurrentTaskPermission(force)", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  async function loadCurrentTaskModel(force)");
+  const end = CODEX_MOBILE_APP_JS.indexOf("  async function loadCurrentTaskPermission(force)", start);
   for (const flag of ["modelChanging", "reasoningChanging"]) {
     const cached = { currentModel: "one", loadedAtMs: 0 };
     const state = { currentThreadId: "original", modelRequestId: 7, taskModels: { original: cached }, [flag]: true };
     let calls = 0;
     const load = new Function("state", "renderModelControl", "currentTaskModelKey", "api",
-      `${CODEX_MOBILE_JS.slice(start, end)}\nreturn loadCurrentTaskModel;`)(state, () => {}, () => "original", () => { calls++; }) as (force: boolean) => Promise<unknown>;
+      `${CODEX_MOBILE_APP_JS.slice(start, end)}\nreturn loadCurrentTaskModel;`)(state, () => {}, () => "original", () => { calls++; }) as (force: boolean) => Promise<unknown>;
     expect(await load(true)).toBe(cached); expect(await load(false)).toBe(cached);
     expect(state.modelRequestId).toBe(7); expect(calls).toBe(0);
   }

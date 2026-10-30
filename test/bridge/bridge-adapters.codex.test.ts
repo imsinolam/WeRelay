@@ -3916,7 +3916,7 @@ describe("Codex desktop IPC transport", () => {
     }
   });
 
-  test("keeps controls locked when a newer live turn has no turn id yet", async () => {
+  test("allows next-turn model selection while a newer live turn has no turn id yet", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-control-new-live-"));
     const rolloutFile = path.join(directory, "rollout.jsonl");
     const threadId = "thread-new-live";
@@ -3950,8 +3950,7 @@ describe("Codex desktop IPC transport", () => {
 
     try {
       expect(await adapter.getSessionModelState(threadId)).toMatchObject({
-        canChange: false,
-        unavailableReason: "任务正在处理，完成或停止后再切换模型。",
+        canChange: true,
       });
       expect(adapter.pendingDesktopTurnThreadIds.has(threadId)).toBe(true);
     } finally {
@@ -3991,7 +3990,7 @@ describe("Codex desktop IPC transport", () => {
     }
   });
 
-  test("does not allow changing a Codex model while that task is running", async () => {
+  test("updates only next-turn Codex model settings while the task is running", async () => {
     const adapter = new CodexPtyAdapter({
       kind: "codex",
       command: "codex",
@@ -4003,21 +4002,20 @@ describe("Codex desktop IPC transport", () => {
       data: [{ id: "model-sol", model: "gpt-5.6-sol", displayName: "GPT-5.6 Sol", hidden: false }],
       nextCursor: null,
     });
+    const updates: unknown[] = [];
     adapter.desktopIpcClient = {
       getThreadStateView: () => ({
         latestModel: "gpt-5.6-sol",
         threadRuntimeStatus: { type: "active", activeFlags: [] },
       }),
+      updateThreadSettingsForNextTurn: async (...args: unknown[]) => { updates.push(args); },
     };
 
     expect(await adapter.getSessionModelState("thread-running")).toMatchObject({
-      currentModel: "gpt-5.6-sol",
-      canChange: false,
-      unavailableReason: "任务正在处理，完成或停止后再切换模型。",
+      currentModel: "gpt-5.6-sol", canChange: true,
     });
-    await expect(
-      adapter.setSessionModel("thread-running", "gpt-5.6-sol"),
-    ).rejects.toThrow("任务正在处理，完成或停止后再切换模型");
+    await adapter.setSessionModel("thread-running", "gpt-5.6-sol");
+    expect(updates).toEqual([["thread-running", { model: "gpt-5.6-sol" }]]);
   });
 
   test("creates a canonical task and hands it to the desktop owner", async () => {
@@ -4995,14 +4993,50 @@ describe("Codex desktop IPC transport", () => {
     adapter.state.activeTurnId = "turn_running";
     adapter.state.activeTurnOrigin = "local";
 
-    const result = await adapter.sendInputToSession("thread_a", "只排队一次");
+    const result = await adapter.sendInputToSession("thread_a", "只排队一次", {clientId: "web-client"});
 
     expect(result).toMatchObject({ queued: true, queuePosition: 1 });
     expect(adapter.getQueuedTaskInputs("thread_a")).toMatchObject([{
       id: result.queuedMessageId,
+      clientId: "web-client",
       text: "只排队一次",
     }]);
+    expect(await adapter.sendInputToSession("thread_a", "只排队一次", {clientId: "web-client"})).toMatchObject({queued: true, queuedMessageId: result.queuedMessageId, queuePosition: 1});
+    expect(adapter.getQueuedTaskInputs("thread_a")).toHaveLength(1);
     fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  test("native queue exposes the web identity while the enqueue acknowledgement is still pending", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-native-queue-slow-"));
+    const globalStateFile = path.join(directory, ".codex-global-state.json");
+    fs.writeFileSync(globalStateFile, JSON.stringify({"queued-follow-ups": {}}));
+    const adapter = new CodexPtyAdapter({kind: "codex", command: "codex", cwd: process.cwd(), renderMode: "headless", codexTransport: "desktop", codexDesktopGlobalStateFile: globalStateFile}) as any;
+    let release!: () => void;
+    let wrote!: () => void;
+    const written = new Promise<void>(resolve => { wrote = resolve; });
+    const acknowledgement = new Promise<void>(resolve => { release = resolve; });
+    adapter.desktopIpcClient = {setQueuedFollowUpsState: async (_threadId: string, state: unknown) => {
+      fs.writeFileSync(globalStateFile, JSON.stringify({"queued-follow-ups": state}));
+      // Distinct native write revision even on filesystems with coarse mtime.
+      const changedAt = new Date(Date.now() + 1_000);
+      fs.utimesSync(globalStateFile, changedAt, changedAt);
+      wrote();
+      await acknowledgement;
+    }};
+    try {
+      const sending = adapter.enqueueDesktopQueuedFollowUp("thread", [{type: "text", text: "合成排队消息"}], "stable-client");
+      await written;
+      const queue = adapter.getQueuedTaskInputs("thread");
+      expect(queue).toMatchObject([{clientId: "stable-client", text: "合成排队消息"}]);
+      expect(queue).toHaveLength(1);
+      release();
+      expect(await sending).toMatchObject({queuedMessageId: queue[0].id});
+      expect(await adapter.enqueueDesktopQueuedFollowUp("thread", [{type: "text", text: "合成排队消息"}], "stable-client")).toMatchObject({queuedMessageId: queue[0].id});
+      expect(adapter.getQueuedTaskInputs("thread")).toHaveLength(1);
+    } finally {
+      release();
+      fs.rmSync(directory, {recursive: true, force: true});
+    }
   });
 
   test("uses listed desktop runtime status to queue a background task message", async () => {

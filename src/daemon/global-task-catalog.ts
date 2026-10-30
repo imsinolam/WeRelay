@@ -74,6 +74,8 @@ export async function listLightweightAdapterSessions(
       return markNotLoaded(await (await import("../bridge/bridge-adapters.reasonix.ts")).listReasonixSessions(cwd, limit));
     case "pi":
       return await (await import("../bridge/pi-session-catalog.ts")).listPiSessions({ limit });
+    case "pi-desktop":
+      return await (await import("../bridge/bridge-adapters.pi-desktop.ts")).listPiDesktopSessions(limit);
     case "workbuddy":
       return await (await import("../bridge/bridge-adapters.workbuddy.ts")).listWorkBuddyDesktopSessionCandidates(limit);
     case "deepseek":

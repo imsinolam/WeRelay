@@ -7,6 +7,7 @@ import type {
   BridgeState,
 } from "../../src/bridge/bridge-types.ts";
 import {
+  CODEX_TASK_LIST_PAGE_SIZE,
   buildWechatAttachmentPromptPrefix,
   buildWechatInboundPrompt,
   buildOneTimeCode,
@@ -77,6 +78,23 @@ describe("splitWechatTextIntoChunks", () => {
     expect(chunks.length).toBe(3);
     expect(chunks.join("")).toBe(text);
   });
+});
+
+test("task lists default to fifteen and retain exact custom page ranges", () => {
+  expect(CODEX_TASK_LIST_PAGE_SIZE).toBe(15);
+  const first = { startIndex: 0, pageSize: CODEX_TASK_LIST_PAGE_SIZE };
+  const next = resolveCodexTaskListPageNavigation({ direction: "next", current: first, history: [] });
+  expect(next.current).toEqual({ startIndex: 15, pageSize: 15 });
+  const custom = resolveCodexTaskListPageNavigation({
+    direction: "next", current: next.current, history: next.history, requestedPageSize: 20,
+  });
+  expect(custom.current).toEqual({ startIndex: 30, pageSize: 20 });
+  expect(resolveCodexTaskListPageNavigation({ direction: "prev", ...custom })).toEqual(next);
+  const output = formatResumeSessionList({ adapter: "pi", page: 2,
+    candidates: [{ sessionId: "sixteenth", title: "第十六条", lastUpdatedAt: "2026-10-27T00:00:00Z" }],
+  });
+  expect(output).toContain("16. 第十六条");
+  expect(output).toContain("[下一页] 再看 15 条");
 });
 
 describe("parseSystemCommand", () => {
@@ -1128,7 +1146,7 @@ describe("formatStatusReport", () => {
     };
 
     expect(formatStatusReport(bridgeState, adapterState)).toBe(
-      "状态：处理中\n来源：桌面端",
+      "状态：运行中\n来源：桌面端",
     );
     expect(formatStatusReport(bridgeState, adapterState)).not.toMatch(
       /thread_|turn_|instance_id|worker_pid|C:\\repo/,
@@ -1282,7 +1300,7 @@ describe("formatResumeSessionList", () => {
     });
 
     expect(output).not.toContain("DSH 最近任务");
-    expect(output).toContain("1. [trade_highlow_v3] US中转服务器 · 当前 · 处理中 🟢");
+    expect(output).toContain("1. [trade_highlow_v3] US中转服务器 · 当前 · 运行中 🟢");
     expect(output).toContain("2. [DeskRelay] 等待审批 · 待审批");
     expect(output).toContain("🟢");
     expect(output).not.toContain("[当前]");
@@ -1770,7 +1788,7 @@ describe("formatResumeSessionList for Codex desktop tasks", () => {
     expect(output).not.toContain("dddddddd");
     expect(output).not.toContain("07/25");
     expect(output).toContain("当前 · 待审批");
-    expect(output).toContain("运行完整测试 · 处理中 🟢");
+    expect(output).toContain("运行完整测试 · 运行中 🟢");
     expect(output).toContain("🟢");
     expect(output).not.toContain("[进行中]");
     expect(output).toContain("[3] 进入任务 3");
@@ -1809,10 +1827,10 @@ describe("formatResumeSessionList for Codex desktop tasks", () => {
       hasMore: true,
     });
 
-    expect(output).toContain("11. 第十六个任务 · 处理中");
-    expect(output).not.toContain("11. 第十六个任务\u3000运行中");
-    expect(output).toContain("12. 第十七个任务");
-    expect(output).toContain("[下一页] 再看 10 条，可带数量如[下一页20]");
+    expect(output).toContain("16. 第十六个任务 · 运行中");
+    expect(output).not.toContain("16. 第十六个任务\u3000运行中");
+    expect(output).toContain("17. 第十七个任务");
+    expect(output).toContain("[下一页] 再看 15 条，可带数量如[下一页20]");
     expect(output).not.toContain("发送“上一页”返回");
     expect(output).toContain("[3] 进入任务 3");
     expect(output).toContain("任务序号在下次发送 [任务] 前保持不变。");

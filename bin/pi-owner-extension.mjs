@@ -26,6 +26,20 @@ export default function (pi) {
   let closing = false;
   let switchingModel = false;
   let creatingSession = false;
+  let statusTimer;
+  let advertisedStatus;
+  let editorText;
+  let editorRevision = randomBytes(24).toString('hex');
+  const draftReceipts = new Map();
+  const composerDraft = () => {
+    if (!context?.hasUI || typeof context.ui?.getEditorText !== 'function' || typeof context.ui?.setEditorText !== 'function') {
+      return { supported: false, draft: null };
+    }
+    const text = context.ui.getEditorText();
+    if (typeof text !== 'string') return { supported: false, draft: null };
+    if (editorText !== text) { editorText = text; editorRevision = randomBytes(24).toString('hex'); }
+    return { supported: true, draft: text.length ? { text, revision: editorRevision } : null };
+  };
   const createCommand = `werelay-new-${randomBytes(8).toString('hex')}`;
   let createRequest;
   let replacingRequest;
@@ -61,17 +75,46 @@ export default function (pi) {
   const send = (value) => {
     if (socket && !socket.destroyed && authenticated) socket.write(`${JSON.stringify({ ...value, token })}\n`);
   };
-  const advertise = () => {
+  const advertise = (status = run ? (run.status === 'running' ? 'busy' : 'idle') : context?.isIdle?.() ? 'idle' : 'busy') => {
+    advertisedStatus = status;
     if (!standalone || !server?.listening || !sessionId() || closing) return;
+    const sessionFile = context?.sessionManager.getSessionFile?.();
     const record = JSON.stringify({ pid: process.pid, cwd: context?.cwd || process.cwd(), sessionId: sessionId(), socket: endpoint, token,
-      status: run ? (run.status === 'running' ? 'busy' : 'idle') : context?.isIdle?.() ? 'idle' : 'busy' });
+      ...(typeof sessionFile === 'string' && path.isAbsolute(sessionFile) ? { sessionFile } : {}),
+      status, ...(run?.startedAtMs ? { startedAtMs: run.startedAtMs } : {}),
+      ...(run?.completedAtMs ? { completedAtMs: run.completedAtMs } : {}) });
     const temporary = `${advertisement}.tmp`;
     fs.writeFileSync(temporary, record, { mode: 0o600 });
     fs.renameSync(temporary, advertisement);
   };
+  const startStatusSync = () => {
+    clearInterval(statusTimer);
+    // Preparation can fail before agent_start/agent_settled. Reconcile with
+    // the real owner's public state without inventing a successful reply.
+    statusTimer = setInterval(() => {
+      try {
+        if (closing || typeof context?.isIdle !== 'function') return;
+        const status = context.isIdle() ? 'idle' : 'busy';
+        if (status === advertisedStatus) return;
+        if (status === 'idle' && run?.status === 'running') run = null;
+        if (status === 'busy' && run?.status !== 'running') {
+          outcome = 'completed';
+          run = { status: 'running', startedAtMs: Date.now() };
+        }
+        advertise(status);
+        send({ type: 'status', sessionId: sessionId(), status, run });
+      } catch {
+        // Pi invalidates captured contexts on dispose/reload. This observer
+        // must never crash the real owner or leave its old busy record alive.
+        cleanup();
+      }
+    }, 1_000);
+    statusTimer.unref();
+  };
   const cleanup = () => {
     if (closing) return;
     closing = true;
+    clearInterval(statusTimer);
     socket?.destroy();
     server?.close();
     if (standalone) {
@@ -136,10 +179,36 @@ export default function (pi) {
         const safe = !creatingSession && !switchingModel && !context.hasPendingMessages?.() && context.isIdle() && !context.ui.getEditorText().trim();
         send({ type: 'response', id: request.id, ok: safe,
           ...(!safe ? { error: context.isIdle() ? 'Pi 编辑区有尚未发送的内容。' : 'Pi 正在运行。' } : {}) });
+      } else if (request.type === 'composer_draft') {
+        send({ type: 'response', id: request.id, ok: true, composerDraft: composerDraft() });
       } else if (request.type === 'prompt' && typeof request.text === 'string' && request.text.trim()) {
         if (switchingModel || creatingSession) throw new Error('Pi 正在切换模型或新建任务，请稍后发送消息。');
+        const revision = request.composerDraftRevision;
+        const receiptKey = `${sessionId()}:${request.clientId}`;
+        if (revision && draftReceipts.has(receiptKey)) {
+          const receipt = draftReceipts.get(receiptKey);
+          if (receipt.revision !== revision || receipt.text !== request.text) throw new Error('草稿发送标识冲突，本条未发送。');
+          send({ type: 'response', id: request.id, ok: true, queued: receipt.queued, duplicate: true });
+          return;
+        }
+        const original = revision ? composerDraft() : null;
+        if (revision && (!request.clientId || original.draft?.revision !== revision)) {
+          throw new Error('电脑端草稿已发送、清空或修改；本条未发送，请核对后重新编辑发送。');
+        }
         const queued = !context.isIdle();
-        pi.sendUserMessage(request.text, queued ? { deliverAs: 'followUp' } : undefined);
+        // The compare and clear happen synchronously inside the one real editor owner.
+        if (revision) context.ui.setEditorText('');
+        try {
+          pi.sendUserMessage(request.text, queued ? { deliverAs: 'followUp' } : undefined);
+        } catch (error) {
+          if (revision && context.ui.getEditorText() === '') context.ui.setEditorText(original.draft.text);
+          throw error;
+        }
+        if (revision) {
+          editorText = undefined;
+          draftReceipts.set(receiptKey, { revision, text: request.text, queued });
+          if (draftReceipts.size > 100) draftReceipts.delete(draftReceipts.keys().next().value);
+        }
         send({ type: 'response', id: request.id, ok: true, queued });
       } else if (request.type === 'model_state') {
         send({ type: 'response', id: request.id, ok: true, modelState: modelState() });
@@ -178,8 +247,9 @@ export default function (pi) {
     socket = peer;
     buffer = '';
     authenticated = !standalone;
+    peer.setEncoding('utf8');
     peer.on('data', (chunk) => {
-      buffer += chunk.toString('utf8');
+      buffer += chunk;
       if (buffer.length > 128 * 1024) { peer.destroy(); return; }
       let end;
       while ((end = buffer.indexOf('\n')) >= 0) {
@@ -223,16 +293,26 @@ export default function (pi) {
   };
   pi.on('session_start', (_event, ctx) => {
     context = ctx;
+    editorText = undefined;
+    editorRevision = randomBytes(24).toString('hex');
+    outcome = 'completed';
     run = ctx.isIdle() ? null : { status: 'running', startedAtMs: Date.now() };
     if (standalone) { listen(); advertise(); send({ type: 'session', sessionId: sessionId() }); }
     else { connect(); send({ type: 'session', sessionId: sessionId() }); }
+    startStatusSync();
   });
-  pi.on('agent_start', () => {
+  const beginRun = () => {
+    if (run?.status === 'running') return;
     outcome = 'completed';
     run = { status: 'running', startedAtMs: Date.now() };
     advertise();
     send({ type: 'agent_start', sessionId: sessionId(), run });
-  });
+  };
+  // Pi is already busy while asynchronous preparation hooks are running.
+  // Report that same run once; agent_start must not reset its start time.
+  pi.on('before_agent_start', beginRun);
+  pi.on('agent_start', beginRun);
+  pi.on('input', () => { editorText = undefined; editorRevision = randomBytes(24).toString('hex'); });
   pi.on('agent_before_settle', (event) => { outcome = event.outcome || 'completed'; });
   pi.on('message_end', (event) => {
     const message = event.message;

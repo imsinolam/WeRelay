@@ -1,13 +1,13 @@
 import fs from "node:fs";
 import { describe, expect, test } from "bun:test";
 import { WeRelayDaemon } from "../../src/daemon/werelay-daemon.ts";
-import { CODEX_MOBILE_JS } from "../../src/daemon/codex-mobile-web.ts";
+import { CODEX_MOBILE_APP_JS, CODEX_MOBILE_JS } from "../../src/daemon/codex-mobile-web.ts";
 
 function fn(name: string): string {
-  const start = CODEX_MOBILE_JS.indexOf("  function " + name + "(");
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function " + name + "(");
   if (start < 0) throw new Error("Missing " + name);
-  const end = CODEX_MOBILE_JS.indexOf("\n  function ", start + 1);
-  return CODEX_MOBILE_JS.slice(start, end < 0 ? undefined : end);
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function ", start + 1);
+  return CODEX_MOBILE_APP_JS.slice(start, end < 0 ? undefined : end);
 }
 
 describe("durable mobile send recovery", () => {
@@ -29,23 +29,23 @@ describe("durable mobile send recovery", () => {
     expect(CODEX_MOBILE_JS).toContain('await persistPendingMessageImages(pending)');
   });
   test("temporary tasks read only the draft catalog and never existing-task permissions", () => {
-    const model = CODEX_MOBILE_JS.slice(CODEX_MOBILE_JS.indexOf("async function loadCurrentTaskModel"), CODEX_MOBILE_JS.indexOf("async function loadCurrentTaskPermission"));
+    const model = CODEX_MOBILE_APP_JS.slice(CODEX_MOBILE_APP_JS.indexOf("async function loadCurrentTaskModel"), CODEX_MOBILE_APP_JS.indexOf("async function loadCurrentTaskPermission"));
     expect(model).toContain('draft ? "/api/new-task/model"');
-    const permission = CODEX_MOBILE_JS.slice(CODEX_MOBILE_JS.indexOf("async function loadCurrentTaskPermission"), CODEX_MOBILE_JS.indexOf("async function selectCurrentTaskPermission"));
+    const permission = CODEX_MOBILE_APP_JS.slice(CODEX_MOBILE_APP_JS.indexOf("async function loadCurrentTaskPermission"), CODEX_MOBILE_APP_JS.indexOf("async function selectCurrentTaskPermission"));
     expect(permission.indexOf("taskNeedsCreation(currentTask())")).toBeLessThan(permission.indexOf("await api("));
     expect(permission.slice(0,permission.indexOf("await api("))).toContain("return null;");
   });
 });
 
 test("retries more than six times silently with the same client id and original image payload", async () => {
-  const start = CODEX_MOBILE_JS.indexOf("  function pendingMessagesForTarget(");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function beginOptimisticRunIfNeeded", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function pendingMessagesForTarget(");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function beginOptimisticRunIfNeeded", start);
   const pending: any = {clientId: "durable-image", adapter: "deepseek", threadId: "thread-one", text: "带图消息", imageCount: 1, images: [{fileName: "a.png", mimeType: "image/png", dataBase64: "aGVsbG8="}], browserAttempts: 0};
   const state = {pendingMessages: [pending], authenticated: true, sending: false, currentThreadId: "thread-one", currentAdapter: "deepseek"};
   const bodies: any[] = [];
   const toasts: string[] = [];
   const noop = () => {};
-  const run = new Function("state", "api", "navigator", "setTimeout", "showToast", "renderMessages", "updateHeader", "saveCurrentConversationSnapshot", "persistMobileCacheNow", "restorePendingMessageImages", "persistPendingMessageImages", "adapterApiPath", "renderQueuedMessages", "migrateTemporaryConversation", "loadMessages", "cancelConversationEntryFocus", CODEX_MOBILE_JS.slice(start, end) + ";return submitPendingMessage;")(
+  const run = new Function("state", "api", "navigator", "setTimeout", "showToast", "renderMessages", "updateHeader", "saveCurrentConversationSnapshot", "persistMobileCacheNow", "restorePendingMessageImages", "persistPendingMessageImages", "adapterApiPath", "renderQueuedMessages", "migrateTemporaryConversation", "loadMessages", "cancelConversationEntryFocus", fn("isNativeComposerDraftConflict") + CODEX_MOBILE_APP_JS.slice(start, end) + ";return submitPendingMessage;")(
     state, async (_path: string, options: any) => { bodies.push(JSON.parse(options.body)); if (bodies.length <= 8) throw new Error("offline"); return {status: "accepted"}; },
     {onLine: true}, noop, (text: string) => toasts.push(text), noop, noop, noop, noop, async () => {}, async () => {}, (path: string) => path, noop, noop, noop,
     noop,
@@ -65,10 +65,10 @@ test("retries more than six times silently with the same client id and original 
 });
 
 test("browser attachment restore hydrates bytes before sending and refuses a partial image message", async () => {
-  const start = CODEX_MOBILE_JS.indexOf("  async function persistPendingMessageImages(");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function makePendingMessage", start);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  async function persistPendingMessageImages(");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function makePendingMessage", start);
   const saved = [{fileName: "a.png", mimeType: "image/png", dataBase64: "aGVsbG8=", previewUrl: "data:image/png;base64,aGVsbG8="}];
-  const runtime = new Function("pendingImageStoreOperation", CODEX_MOBILE_JS.slice(start, end) + ";return {restorePendingMessageImages, persistPendingMessageImages};")(async () => saved);
+  const runtime = new Function("pendingImageStoreOperation", CODEX_MOBILE_APP_JS.slice(start, end) + ";return {restorePendingMessageImages, persistPendingMessageImages};")(async () => saved);
   const pending: any = {clientId: "m1", imageStoreKey: "m1", imageCount: 1, images: []};
   await runtime.restorePendingMessageImages(pending);
   expect(pending.images).toEqual(saved);
@@ -78,9 +78,9 @@ test("browser attachment restore hydrates bytes before sending and refuses a par
 
 
 test("a queued image is persisted before clearing the composer and before the send lock", () => {
-  const start = CODEX_MOBILE_JS.indexOf('composerForm.addEventListener("submit"');
-  const end = CODEX_MOBILE_JS.indexOf('authForm.addEventListener', start);
-  const source = CODEX_MOBILE_JS.slice(start, end);
+  const start = CODEX_MOBILE_APP_JS.indexOf('async function submitComposer(');
+  const end = CODEX_MOBILE_APP_JS.indexOf('authForm.addEventListener', start);
+  const source = CODEX_MOBILE_APP_JS.slice(start, end);
   expect(source.indexOf("await persistPendingMessageImages(pending)")).toBeGreaterThan(0);
   expect(source.indexOf("await persistPendingMessageImages(pending)")).toBeLessThan(source.indexOf("state.pendingMessages.push(pending)"));
   expect(source.indexOf("await persistPendingMessageImages(pending)")).toBeLessThan(source.indexOf('composerInput.value = ""'));

@@ -1,4 +1,5 @@
 import { extractCodexCrossTaskMessage } from "./codex-cross-task-message.ts";
+import { assertComposerDraftRevision, NativeComposerDraftRevisions, readCodexComposerDraft } from "./native-composer-draft.ts";
 import { isInternalTask, readTaskOriginMetadata, type TaskOriginMetadata } from "./task-origin.ts";
 import fs from "node:fs";
 import { isGeneratedTaskTitle, latestUserMessageText, titleFromLatestMessage } from "./task-title-fallback.ts";
@@ -24,6 +25,8 @@ import type {
   BridgeSessionReadOptions,
   BridgeSessionRunSummary,
   BridgeSessionSendResult,
+  BridgeSessionComposerDraft,
+  BridgeSessionSendOptions,
   BridgeThreadSwitchReason,
   BridgeThreadSwitchSource,
   BridgeTurnInputItem,
@@ -661,6 +664,8 @@ export function extractCodexDesktopQueuedTaskInputs(
       : undefined;
     return [{
       id: message.id,
+      ...(typeof message.werelayClientId === "string" && message.werelayClientId
+        ? { clientId: message.werelayClientId } : {}),
       text: message.text,
       imageCount: codexDesktopQueuedFollowUpImageItems(message).length,
       ...(createdAtMs !== undefined ? { createdAtMs } : {}),
@@ -3439,6 +3444,7 @@ export class CodexPtyAdapter extends AbstractPtyAdapter {
     modifiedAtMs: number;
     value: unknown;
   } | null = null;
+  private nativeComposerDraftRevisions: NativeComposerDraftRevisions | null = null;
   private desktopQueuedFollowUpMutationChain: Promise<void> = Promise.resolve();
   private desktopThreadRuntimeStatusCache =
     new Map<string, CodexDesktopRuntimeStatusCacheEntry>();
@@ -3542,6 +3548,7 @@ export class CodexPtyAdapter extends AbstractPtyAdapter {
   private buildDesktopQueuedFollowUp(
     threadId: string,
     items: BridgeTurnInputItem[],
+    clientId?: string,
   ): CodexDesktopQueuedFollowUp {
     const text = items
       .filter((item): item is Extract<BridgeTurnInputItem, { type: "text" }> =>
@@ -3565,6 +3572,7 @@ export class CodexPtyAdapter extends AbstractPtyAdapter {
     });
     return {
       id: crypto.randomUUID(),
+      ...(clientId ? { werelayClientId: clientId } : {}),
       text,
       context: {
         addedFiles: [],
@@ -3623,13 +3631,20 @@ export class CodexPtyAdapter extends AbstractPtyAdapter {
   private async enqueueDesktopQueuedFollowUp(
     threadId: string,
     items: BridgeTurnInputItem[],
+    clientId?: string,
   ): Promise<BridgeSessionSendResult> {
     return await this.withDesktopQueuedFollowUpMutation(async () => {
       const state = readCodexDesktopQueuedFollowUpsState(
         this.readDesktopGlobalState(),
       );
-      const message = this.buildDesktopQueuedFollowUp(threadId, items);
       const queue = state[threadId] ?? [];
+      const existingIndex = clientId ? queue.findIndex(value =>
+        normalizeCodexDesktopQueuedFollowUp(value)?.werelayClientId === clientId
+      ) : -1;
+      if (existingIndex >= 0) {
+        return {queued: true, queuedMessageId: normalizeCodexDesktopQueuedFollowUp(queue[existingIndex])!.id, queuePosition: existingIndex + 1};
+      }
+      const message = this.buildDesktopQueuedFollowUp(threadId, items, clientId);
       queue.push(message);
       state[threadId] = queue;
       try {
@@ -4057,13 +4072,17 @@ export class CodexPtyAdapter extends AbstractPtyAdapter {
   async sendInputToSession(
     threadId: string,
     text: string,
+    options?: BridgeSessionSendOptions,
   ): Promise<BridgeSessionSendResult> {
     const normalizedThreadId = threadId.trim();
     if (!normalizedThreadId) {
       throw new Error("请选择一个 Codex 任务。");
     }
+    if (options?.composerDraftRevision) {
+      assertComposerDraftRevision(await this.getSessionComposerDraft(normalizedThreadId), options.composerDraftRevision);
+    }
     if (this.usesDesktopTransport()) {
-      return await this.sendDesktopTurnToThread(normalizedThreadId, text);
+      return await this.sendDesktopTurnToThread(normalizedThreadId, text, options);
     }
     if (normalizedThreadId !== this.sharedThreadId) {
       await this.resumeSession(normalizedThreadId);
@@ -4075,10 +4094,14 @@ export class CodexPtyAdapter extends AbstractPtyAdapter {
   async sendInputItemsToSession(
     threadId: string,
     items: BridgeTurnInputItem[],
+    options?: BridgeSessionSendOptions,
   ): Promise<BridgeSessionSendResult> {
     const normalizedThreadId = threadId.trim();
     if (!normalizedThreadId) {
       throw new Error("请选择一个 Codex 任务。");
+    }
+    if (options?.composerDraftRevision) {
+      assertComposerDraftRevision(await this.getSessionComposerDraft(normalizedThreadId), options.composerDraftRevision);
     }
     const normalizedItems = items.flatMap((item): BridgeTurnInputItem[] => {
       if (item.type === "text") {
@@ -4106,9 +4129,24 @@ export class CodexPtyAdapter extends AbstractPtyAdapter {
           )
           .map((item) => item.text)
           .join("\n"),
+        options,
       );
     }
-    return await this.sendDesktopTurnItemsToThread(normalizedThreadId, normalizedItems);
+    return await this.sendDesktopTurnItemsToThread(normalizedThreadId, normalizedItems, options);
+  }
+
+  async getSessionComposerDraft(threadId: string): Promise<BridgeSessionComposerDraft> {
+    if (!this.usesDesktopTransport()) return { supported: false, draft: null };
+    // Read fresh: cached mtime snapshots must not revive an already-sent draft.
+    try {
+      const value: unknown = JSON.parse(await fs.promises.readFile(this.getDesktopGlobalStateFilePath(), "utf8"));
+      const draft = readCodexComposerDraft(value, threadId);
+      if (!draft.supported) return draft;
+      this.nativeComposerDraftRevisions ??= new NativeComposerDraftRevisions(path.join(
+        ensureWorkspaceChannelDir(this.options.cwd).workspaceDir, "codex-composer-draft-revisions.json",
+      ));
+      return this.nativeComposerDraftRevisions.track(threadId, draft);
+    } catch { return { supported: false, draft: null, unavailableReason: "Codex 草稿暂时无法读取。" }; }
   }
 
   private overlayPersistedDesktopRuntimeStatuses(
@@ -5024,15 +5062,7 @@ export class CodexPtyAdapter extends AbstractPtyAdapter {
 
     const liveState = this.getDesktopThreadStateView(normalizedThreadId) ??
       await this.getDesktopThreadStateViewWithRefresh(normalizedThreadId);
-    const reconciliation = this.reconcilePersistedDesktopCompletion(
-      normalizedThreadId,
-      liveState,
-    );
-    const persistedTerminalIsCurrent = Boolean(
-      reconciliation.terminalTurnId &&
-      (!reconciliation.liveStateActive ||
-        reconciliation.liveSummary?.turnId === reconciliation.terminalTurnId),
-    );
+    this.reconcilePersistedDesktopCompletion(normalizedThreadId, liveState);
     const liveModel = extractCodexDesktopSessionModel(liveState);
     const latestMessageModel = liveModel
       ? undefined
@@ -5063,39 +5093,21 @@ export class CodexPtyAdapter extends AbstractPtyAdapter {
       )
       ? reportedReasoningEffort
       : undefined;
-    const listedRuntimeStatus = this.desktopListedRuntimeStatusByThreadId.get(
-      normalizedThreadId,
-    );
-    const taskRunning = !persistedTerminalIsCurrent && (
-      codexDesktopRuntimeType(liveState) === "active" ||
-      listedRuntimeStatus?.type === "active" ||
-      this.pendingDesktopTurnThreadIds.has(normalizedThreadId) ||
-      this.activeTurn?.threadId === normalizedThreadId ||
-      Array.from(this.backgroundTurns.values()).some(
-        (turn) => turn.threadId === normalizedThreadId,
-      )
-    );
     return {
       ...(currentModel ? { currentModel } : {}),
       options,
-      canChange: !taskRunning && !modelListError && options.length > 0,
+      canChange: !modelListError && options.length > 0,
       ...(currentReasoningEffort ? { currentReasoningEffort } : {}),
       ...(reasoningEffortOptions.length > 0 ? { reasoningEffortOptions } : {}),
       ...(reasoningEffortOptions.length > 0
         ? {
-            canChangeReasoningEffort: !taskRunning && !modelListError,
-            ...(taskRunning
-              ? { reasoningEffortUnavailableReason: "任务正在处理，完成或停止后再切换推理强度。" }
-              : modelListError
-                ? { reasoningEffortUnavailableReason: "暂时无法读取 Codex 可用推理强度。" }
-                : {}),
+            canChangeReasoningEffort: !modelListError,
+            ...(modelListError ? { reasoningEffortUnavailableReason: "暂时无法读取 Codex 可用推理强度。" } : {}),
           }
         : {}),
-      ...(taskRunning
-        ? { unavailableReason: "任务正在处理，完成或停止后再切换模型。" }
-        : modelListError || options.length === 0
-          ? { unavailableReason: "暂时无法读取 Codex 可用模型。" }
-          : {}),
+      ...(modelListError || options.length === 0
+        ? { unavailableReason: "暂时无法读取 Codex 可用模型。" }
+        : {}),
     };
   }
 
@@ -6807,8 +6819,9 @@ export class CodexPtyAdapter extends AbstractPtyAdapter {
   private async sendDesktopTurnToThread(
     threadId: string,
     text: string,
+    options?: BridgeSessionSendOptions,
   ): Promise<BridgeSessionSendResult> {
-    return await this.sendDesktopTurnItemsToThread(threadId, [{ type: "text", text }]);
+    return await this.sendDesktopTurnItemsToThread(threadId, [{ type: "text", text }], options);
   }
 
   private async isDuplicateDesktopTurnInput(params: {
@@ -6915,6 +6928,7 @@ export class CodexPtyAdapter extends AbstractPtyAdapter {
   private async sendDesktopTurnItemsToThread(
     threadId: string,
     items: BridgeTurnInputItem[],
+    options?: BridgeSessionSendOptions,
   ): Promise<BridgeSessionSendResult> {
     if (this.desktopBootstrapThreadIds.has(threadId)) {
       const handedOff = await this.tryHandoffDesktopBootstrapThread(threadId);
@@ -6940,6 +6954,11 @@ export class CodexPtyAdapter extends AbstractPtyAdapter {
     const imageCount = items.filter((item) => item.type !== "text").length;
     const reconciliation = this.reconcilePersistedDesktopCompletion(threadId);
     const queuedInputs = this.getQueuedTaskInputs(threadId);
+    const knownQueueIndex = options?.clientId
+      ? queuedInputs.findIndex(message => message.clientId === options.clientId) : -1;
+    if (knownQueueIndex >= 0) {
+      return {queued: true, queuedMessageId: queuedInputs[knownQueueIndex]!.id, queuePosition: knownQueueIndex + 1};
+    }
     const liveTurnIsStale = Boolean(
       reconciliation.terminalTurnId &&
       (!reconciliation.liveSummary?.turnId ||
@@ -6966,7 +6985,8 @@ export class CodexPtyAdapter extends AbstractPtyAdapter {
       return { duplicate: true };
     }
     if (queued) {
-      return await this.enqueueDesktopQueuedFollowUp(threadId, items);
+      if (options?.composerDraftRevision) assertComposerDraftRevision(await this.getSessionComposerDraft(threadId), options.composerDraftRevision);
+      return await this.enqueueDesktopQueuedFollowUp(threadId, items, options?.clientId);
     }
     if (this.getPendingApprovalRequestsForThread(threadId).length > 0) {
       throw new Error(
@@ -7008,6 +7028,7 @@ export class CodexPtyAdapter extends AbstractPtyAdapter {
         ? items[0].text
         : items;
       const permissionSettings = this.resolveDesktopPermissionSettings(threadId);
+      if (options?.composerDraftRevision) assertComposerDraftRevision(await this.getSessionComposerDraft(threadId), options.composerDraftRevision);
       const turn = await client.startTurn(
         threadId,
         startInput,

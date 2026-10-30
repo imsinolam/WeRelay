@@ -5,6 +5,7 @@ export class LegacyAdapterRuntime implements RuntimeHost {
   readonly runtimeKind = "legacy_adapter" as const;
   readonly sendInputToSession: BridgeAdapter["sendInputToSession"];
   readonly sendInputItemsToSession: BridgeAdapter["sendInputItemsToSession"];
+  readonly getSessionComposerDraft: BridgeAdapter["getSessionComposerDraft"];
   readonly createSessionInProject: BridgeAdapter["createSessionInProject"];
   readonly renameSession: BridgeAdapter["renameSession"];
   readonly followSession: BridgeAdapter["followSession"];
@@ -38,6 +39,7 @@ export class LegacyAdapterRuntime implements RuntimeHost {
     this.adapter = adapter;
     this.sendInputToSession = adapter.sendInputToSession?.bind(adapter);
     this.sendInputItemsToSession = adapter.sendInputItemsToSession?.bind(adapter);
+    this.getSessionComposerDraft = adapter.getSessionComposerDraft?.bind(adapter);
     this.createSessionInProject = adapter.createSessionInProject?.bind(adapter);
     this.renameSession = adapter.renameSession?.bind(adapter);
     this.followSession = adapter.followSession?.bind(adapter);

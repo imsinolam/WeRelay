@@ -49,9 +49,9 @@ test("a WeRelay adapter sends to the already-running Pi instance without spawnin
     });
     expect(await adapter.getNewSessionModelState()).toMatchObject({ currentModel: "openai/gpt", canChange: true });
     expect(await adapter.getSessionModelState("other-session")).toMatchObject({
-      canChange: false, unavailableReason: "请先打开这条 Pi 任务再切换模型。",
+      canChange: false, unavailableReason: "Pi 原窗口未接入，请在原窗口执行 /reload 后重试。",
     });
-    await expect(adapter.setSessionModel("other-session", "anthropic/sonnet")).rejects.toThrow("请先打开这条 Pi 任务");
+    await expect(adapter.setSessionModel("other-session", "anthropic/sonnet")).rejects.toThrow("未能确认唯一的 Pi 原窗口");
     expect(await adapter.setSessionModel(sessionId, "anthropic/sonnet")).toMatchObject({
       currentModel: "anthropic/sonnet",
     });
@@ -224,6 +224,37 @@ test("two owner advertisements for the same Pi task fail closed without sending 
   } finally {
     await adapter.dispose();
     for (const handler of handlers) handler.get("session_shutdown")?.({ reason: "quit" }, {});
+    if (previous === undefined) delete process.env.WERELAY_PI_OWNER_DIRECTORY; else process.env.WERELAY_PI_OWNER_DIRECTORY = previous;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("reading Pi model settings attaches only the selected existing owner without sending or spawning", async () => {
+  if (process.platform === "win32") return;
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "wr-pi-model-"));
+  fs.chmodSync(root, 0o700);
+  const previous = process.env.WERELAY_PI_OWNER_DIRECTORY;
+  process.env.WERELAY_PI_OWNER_DIRECTORY = root;
+  const sessionId = "12345678-1234-1234-1234-123456789abc";
+  const handlers = new Map<string, (event: unknown, ctx: unknown) => void>();
+  const models = [{ provider: "openai", id: "gpt", name: "GPT" }, { provider: "other", id: "next", name: "Next" }];
+  let selected = models[0];
+  const adapter = new PiOwnerAdapter({ kind: "pi", command: "must-not-spawn", cwd: root, renderMode: "headless" });
+  try {
+    const extension = (await import(`../../bin/pi-owner-extension.mjs?models=${Date.now()}`)).default;
+    extension({ on: (name: string, cb: (event: unknown, ctx: unknown) => void) => handlers.set(name, cb),
+      setModel: async (model: typeof selected) => { selected = model; return true; } });
+    handlers.get("session_start")?.({}, { sessionManager: { getSessionId: () => sessionId }, isIdle: () => true,
+      modelRegistry: { getAvailable: () => models }, get model() { return selected; } });
+    const deadline = Date.now() + 1500;
+    while (!discoverPiOwners(root).length && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+    await adapter.start();
+    expect(await adapter.getSessionModelState(sessionId)).toMatchObject({ currentModel: "openai/gpt", canChange: true });
+    expect(await adapter.setSessionModel(sessionId, "other/next")).toMatchObject({ currentModel: "other/next" });
+    expect((adapter as unknown as { child: unknown }).child).toBeNull();
+  } finally {
+    await adapter.dispose();
+    handlers.get("session_shutdown")?.({}, {});
     if (previous === undefined) delete process.env.WERELAY_PI_OWNER_DIRECTORY; else process.env.WERELAY_PI_OWNER_DIRECTORY = previous;
     fs.rmSync(root, { recursive: true, force: true });
   }

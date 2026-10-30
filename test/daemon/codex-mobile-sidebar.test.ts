@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { CODEX_MOBILE_JS } from "../../src/daemon/codex-mobile-web.ts";
+import { CODEX_MOBILE_APP_JS } from "../../src/daemon/codex-mobile-web.ts";
 
 function harness(mobile = false) {
   const state = {revealCurrentTaskOnSidebarOpen: true, currentThreadId: "target", taskView: "projects", collapsedProjectGroups: {project: false}, taskNodes: {} as Record<string, unknown>};
@@ -12,9 +12,9 @@ function harness(mobile = false) {
   state.taskNodes.target = button;
   const taskList = {scrollTop: 0, clientHeight: 300, getBoundingClientRect: () => ({top: 100, bottom: 400, height: 300})};
   const searchInput = {value: ""};
-  const start = CODEX_MOBILE_JS.indexOf("  function revealCurrentTaskInSidebar()");
-  const end = CODEX_MOBILE_JS.indexOf("  function createTaskButton(", start);
-  const create = new Function("state", "app", "window", "taskById", "searchInput", "taskGroupKey", "renderTasks", "requestAnimationFrame", "taskList", "closeTaskContextMenu", `${CODEX_MOBILE_JS.slice(start, end)}\nreturn {revealCurrentTaskInSidebar, openSidebar, closeSidebar};`);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function revealCurrentTaskInSidebar()");
+  const end = CODEX_MOBILE_APP_JS.indexOf("  function createTaskButton(", start);
+  const create = new Function("state", "app", "window", "taskById", "searchInput", "taskGroupKey", "renderTasks", "requestAnimationFrame", "taskList", "closeTaskContextMenu", `${CODEX_MOBILE_APP_JS.slice(start, end)}\nreturn {revealCurrentTaskInSidebar, openSidebar, closeSidebar};`);
   const api = create(state, {classList: {contains: () => open, add: () => {open = true;}, remove: () => {open = false;}}}, {matchMedia: () => ({matches: mobile})}, () => known ? {title: "目标任务", projectName: "项目"} : null, searchInput, () => "project", () => {renders++;}, (f: () => void) => frames.push(f), taskList, () => {}) as {revealCurrentTaskInSidebar: () => void; openSidebar: () => void};
   return {state, taskList, searchInput, api, frames, renders: () => renders, setKnown: (v: boolean) => {known = v;}, setTop: (v: number) => {top = v;}, flush: () => {for (const f of frames.splice(0)) f();}};
 }
@@ -56,7 +56,7 @@ test("visible rows do not scroll and a stale frame cannot scroll a different tas
   expect(h.taskList.scrollTop).toBe(0);
 });
 test("both repeated entry and task switching request positioning after closing the drawer", () => {
-  const start = CODEX_MOBILE_JS.indexOf("  async function selectTask(");
-  const source = CODEX_MOBILE_JS.slice(start, CODEX_MOBILE_JS.indexOf("  function showToast(", start));
+  const start = CODEX_MOBILE_APP_JS.indexOf("  async function selectTask(");
+  const source = CODEX_MOBILE_APP_JS.slice(start, CODEX_MOBILE_APP_JS.indexOf("  function showToast(", start));
   expect(source.match(/closeSidebar\(\);\s+state.revealCurrentTaskOnSidebarOpen = true;/g)).toHaveLength(2);
 });

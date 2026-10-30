@@ -11,6 +11,8 @@ import {
 } from "../../src/daemon/mobile-message-recovery.ts";
 import { WeRelayDaemon } from "../../src/daemon/werelay-daemon.ts";
 import { FailedMobileMessageSweep } from "../../src/daemon/failed-mobile-message-reconciliation.ts";
+import { MobileMessageImageStore } from "../../src/daemon/mobile-message-image-store.ts";
+import type { BridgeSessionMessage } from "../../src/bridge/bridge-types.ts";
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) fs.rmSync(dir, {recursive: true, force: true}); });
 function setup(turnId?: string) {
@@ -92,6 +94,39 @@ test("native receipts cannot confirm an image message without its attachment", a
   expect(outbox.reconcileReceived("codex", "task", "with-image", [received])).toBe(false);
 });
 
+test("another client identity cannot confirm an identical failed message", () => {
+  const {outbox} = setup("turn");
+  expect(outbox.reconcileReceived("codex", "task", "original-id", [{...received, clientId: "another-client"} as BridgeSessionMessage])).toBe(false);
+});
+
+test("background recovery uses the original image's exact turn without resending or notifying", async () => {
+  for (const route of ["retry", "sweep", "notification"]) {
+    const {outbox, stateFile} = setup("turn");
+    const imagePath = path.join(path.dirname(stateFile), "original.png");
+    fs.writeFileSync(imagePath, "fixture-image");
+    outbox.accept({adapter: "codex", threadId: "task", clientId: "image-client", text: "图片请求", images: [{path: imagePath, fileName: "original.png", mimeType: "image/png"}], createdAtMs: Date.now()});
+    outbox.markSending("codex", "task", "image-client", Date.now());
+    outbox.markSubmitted("codex", "task", "image-client", {turnId: "image-turn"});
+    outbox.markUnconfirmed("codex", "task", "image-client", "接收超时");
+    const store = new MobileMessageImageStore({stateFile: path.join(path.dirname(stateFile), "images.json")});
+    store.remember({adapter: "codex", threadId: "task", turnId: "image-turn", text: "图片请求", images: [{path: imagePath}]});
+    const {daemon, reads, notices, setMessages} = daemonHarness(outbox, async () => { throw new Error("must not send"); });
+    daemon.mobileMessageImageStore = store;
+    setMessages([{id: "native-image", role: "user", text: '<image name="[Image #1]" path="/tmp/original.png">\n[image]\n</image>\n图片请求', turnId: "image-turn", images: [{source: "local", path: "/tmp/resized.png"}]}]);
+    if (route === "retry") await daemon.dispatchMobileMessageOutboxEntry(outbox.get("codex", "task", "image-client"));
+    else if (route === "sweep") {
+      delete daemon.reconcileFailedMobileMessages;
+      daemon.failedMobileMessageSweep = new FailedMobileMessageSweep();
+      await daemon.reconcileFailedMobileMessages("codex");
+    } else await daemon.deliverMobileMessageFailureNotifications();
+    expect(outbox.get("codex", "task", "image-client")).toMatchObject({status: "delivered", attempts: 1});
+    expect(reads.length).toBeGreaterThan(0);
+    expect(notices).toEqual([]);
+    const restored = new MobileMessageOutbox({stateFile, now: () => 15_000});
+    expect(restored.retry("codex", "task", "image-client")).toBe(false);
+  }
+});
+
 test("receipt reads are bounded and cannot mutate the outbox after timeout", async () => {
   const {outbox, entry} = setup();
   let complete!: (messages: typeof received[]) => void;
@@ -130,10 +165,11 @@ test("retry preserves known native turn evidence while acceptance is uncertain",
 function daemonHarness(outbox: MobileMessageOutbox, send: () => Promise<never>) {
   const daemon = Object.create(WeRelayDaemon.prototype) as any;
   const reads: Array<{threadId: string; options: unknown}> = [];
-  let messages: typeof received[] = [];
+  let messages: BridgeSessionMessage[] = [];
   const notices: string[] = [];
   daemon.mobileMessageOutbox = outbox;
-  daemon.slots = new Map([["codex", {runtime: {
+  daemon.mobileMessageImageStore = {enrich: (items: BridgeSessionMessage[]) => items};
+  daemon.slots = new Map([["codex", {adapter: "codex", runtime: {
     getSessionMessagePage: async (threadId: string, options: unknown) => {
       reads.push({threadId, options});
       return {messages};
@@ -148,7 +184,7 @@ function daemonHarness(outbox: MobileMessageOutbox, send: () => Promise<never>) 
   daemon.queueWechatMessage = async (_user: string, notice: string) => { notices.push(notice); return true; };
   daemon.authorizedUserId = "test-recipient";
   daemon.scheduleMobileMessageOutboxDrain = () => {};
-  return {daemon, reads, notices, sideEffects, setMessages: (value: typeof received[]) => { messages = value; }};
+  return {daemon, reads, notices, sideEffects, setMessages: (value: BridgeSessionMessage[]) => { messages = value; }};
 }
 
 function acceptedOutbox(now: () => number) {
@@ -258,7 +294,7 @@ test("确定拒绝保留5次发送预算和原失败通知，永久拒绝不重�
       expect(sends).toBe(expectedSends);
       expect(outbox.get("codex", "task", "test-client")).toMatchObject({status: "failed", attempts: expectedSends});
       expect(await daemon.deliverMobileMessageFailureNotifications()).toBe(true);
-      expect(notices[0]).toContain("网页消息多次提交仍失败");
+      expect(notices[0]).toContain("网页消息未能提交");
       expect(notices[0]).toContain("消息已保留在网页任务台，可复制后重试。");
     }
   } finally { clock.mockRestore(); }
@@ -368,4 +404,61 @@ test("旧版未确认条目的观察期限有界，检查不会消耗或刷新�
     expect(mobileMessageReceiptObservationDeadlineMs(restored.get("codex", "task", "original-id")!)).toBe(deadline);
     expect(new MobileMessageOutbox({stateFile, now: () => now}).get("codex", "task", "original-id")?.status).toBe("unconfirmed");
   } finally { clock.mockRestore(); }
+});
+
+
+test("known Pi owner and model configuration failures do not repeat the same rejected request", () => {
+  for (const error of [
+    "这个项目没有已接入的 Pi 原窗口；请先打开该项目的 Pi 并执行 /reload。未启动独立 owner。",
+    "Pi 任务已找到，但原窗口尚未提供可接入的发送接口。请在该 Pi 窗口执行 /reload；如果由 Pi Desktop 持有，请在桌面端继续。未启动第二个 Pi，也没有新建替代任务。",
+    "DeepSeek Harness selectModel failed: session/model-unavailable: Select an available model before sending a message.",
+  ]) expect(shouldRetryMobileMessage(error, 1, 5)).toBe(false);
+});
+
+test("late enqueue acknowledgement or error cannot resurrect a consumed or cancelled message", async () => {
+  for (const settled of ["queued", "delivered", "cancelled"]) {
+    for (const fail of [false, true]) {
+      const {outbox} = acceptedOutbox(() => Date.now());
+      const {daemon} = daemonHarness(outbox, async () => { throw new Error("unused"); });
+      let release!: () => void;
+      let started!: () => void;
+      const startedPromise = new Promise<void>(resolve => { started = resolve; });
+      const paused = new Promise<void>(resolve => { release = resolve; });
+      daemon.dispatchPersistedMobileMessage = async () => {
+        started();
+        await paused;
+        if (fail) throw new Error("send timeout");
+        return {queued: true, queuedMessageId: "native-queue"};
+      };
+      const sending = daemon.dispatchMobileMessageOutboxEntry(outbox.get("codex", "task", "test-client"));
+      await startedPromise;
+      outbox.reconcile("codex", "task", {messages: [], queuedMessages: [{id: "native-queue", clientId: "test-client", text: "合成回归消息", imageCount: 0}]});
+      if (settled === "cancelled") outbox.updateQueuedEntry("codex", "task", "native-queue", null);
+      if (settled === "delivered") outbox.reconcile("codex", "task", {queuedMessages: [], messages: [{id: "native-user", role: "user", text: "合成回归消息", createdAtMs: Date.now() + 1}]});
+      release();
+      await sending;
+      expect(outbox.get("codex", "task", "test-client")).toMatchObject({status: settled, attempts: 1});
+      expect(outbox.pendingFailureNotifications()).toEqual([]);
+      expect(outbox.readyEntries(Number.MAX_SAFE_INTEGER)).toEqual([]);
+    }
+  }
+});
+
+test("daemon forwards every web client identity for both text and image inputs, without requiring a draft", async () => {
+  const {outbox} = acceptedOutbox(() => Date.now());
+  const {daemon} = daemonHarness(outbox, async () => { throw new Error("unused"); });
+  delete daemon.dispatchPersistedMobileMessage;
+  daemon.mobileCreatedTaskKeys = new Set();
+  daemon.getSlotThreadId = () => "task";
+  const sent: unknown[] = [];
+  daemon.slots.get("codex").runtime.sendInputToSession = async () => {};
+  daemon.dispatchMobileInput = async (...args: unknown[]) => { sent.push(args.slice(1)); return {turnId: "turn"}; };
+  daemon.mobileMessageImageStore = {remember: () => {}};
+  const entry = outbox.get("codex", "task", "test-client")!;
+  await daemon.dispatchPersistedMobileMessage(entry);
+  await daemon.dispatchPersistedMobileMessage({...entry, images: [{path: "/tmp/input.png", fileName: "input.png", mimeType: "image/png"}]});
+  expect(sent).toEqual([
+    ["task", "合成回归消息", [], {clientId: "test-client"}],
+    ["task", "合成回归消息", ["/tmp/input.png"], {clientId: "test-client"}],
+  ]);
 });

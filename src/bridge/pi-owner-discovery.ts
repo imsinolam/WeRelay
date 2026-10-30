@@ -9,6 +9,11 @@ export type PiOwnerAdvertisement = {
   socket: string;
   token: string;
   status?: "idle" | "busy";
+  sessionFile?: string;
+  startedAtMs?: number;
+  completedAtMs?: number;
+  /** Validated advertisement mtime, only a stable fallback for fileless tasks. */
+  advertisedAtMs?: number;
 };
 
 export function piOwnerDirectory(): string {
@@ -42,6 +47,11 @@ export function discoverPiOwners(directory = piOwnerDirectory()): PiOwnerAdverti
       owners.push({
         pid: record.pid, cwd: record.cwd, sessionId: record.sessionId, socket: record.socket, token: record.token,
         ...(record.status === "idle" || record.status === "busy" ? { status: record.status } : {}),
+        ...(typeof record.sessionFile === "string" && path.isAbsolute(record.sessionFile)
+          ? { sessionFile: record.sessionFile } : {}),
+        ...(Number.isFinite(record.startedAtMs) && record.startedAtMs! > 0 ? { startedAtMs: record.startedAtMs } : {}),
+        ...(Number.isFinite(record.completedAtMs) && record.completedAtMs! > 0 ? { completedAtMs: record.completedAtMs } : {}),
+        advertisedAtMs: stat.mtimeMs,
       });
     } catch { /* stale or malformed owner: never attach */ }
   }

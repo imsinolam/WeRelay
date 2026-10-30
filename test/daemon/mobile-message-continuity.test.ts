@@ -1,16 +1,18 @@
 import { expect, test } from "bun:test";
-import { CODEX_MOBILE_JS } from "../../src/daemon/codex-mobile-web.ts";
+import { CODEX_MOBILE_APP_JS } from "../../src/daemon/codex-mobile-web.ts";
+import { normalizeMobileMessageText } from "../../src/daemon/mobile-message-text.ts";
 type Message = {role?: string; text: string; clientId?: string; id?: string; turnId?: string; status?: string; createdAtMs?: number; phase?: string; serverAcknowledged?: boolean; deliveryConfirmed?: boolean; baselineUserKeys?: string[]; baselineUserCount?: number; threadId?: string; adapter?: string; images?: unknown[]; imageCount?: number};
 type Summary = {status: string; turnId?: string; clientId?: string; startedAtMs?: number; baselineTurnId?: string};
 function block(from: string, to: string) {
-  const a = CODEX_MOBILE_JS.indexOf('  function ' + from);
-  const b = CODEX_MOBILE_JS.indexOf('  function ' + to, a);
+  const a = CODEX_MOBILE_APP_JS.indexOf('  function ' + from);
+  const b = CODEX_MOBILE_APP_JS.indexOf('  function ' + to, a);
   if (a < 0 || b < 0) throw new Error(`missing ${from}/${to}`);
-  return CODEX_MOBILE_JS.slice(a, b);
+  return CODEX_MOBILE_APP_JS.slice(a, b);
 }
 function harness() {
   const state = {currentThreadId:'task', currentAdapter:'codex', pendingMessages:[] as Message[], outboundMessages:[] as Message[], serverMessages:[] as Message[], deliveredClientIds:[] as string[], localRunSummary:null as Summary|null, runSummary:null as Summary|null, optimisticProgressTurnId:null as string|null, progressItems:[] as unknown[], lastLiveMessageRefreshAtMs:0};
   const api = new Function('state', `
+    var normalizeMobileMessageText = ${normalizeMobileMessageText.toString()};
     function filterVisibleConversationMessages(x) {return x || [];} function currentTask(){return null;}
     function pendingImageStoreOperation(){return Promise.resolve();}
     ${block('visiblePendingMessages()', 'currentVisibleRunSummary()')}
@@ -61,6 +63,18 @@ test('a native user message atomically replaces the provisional bubble under the
   h.state.serverMessages=[{id:'native',role:'user',text:'新的请求',turnId:'new',createdAtMs:baseMs + 10}];
   expect(h.visiblePendingMessages()).toHaveLength(0);
   expect(h.messageNodeBaseKey(h.state.serverMessages[0]!)).toBe(key);
+});
+test("restored image outbox cannot resurrect a second bubble on consecutive native snapshots", () => {
+  const h = harness();
+  const remote = pending({text: "图片请求", status: "unconfirmed", turnId: "image-turn", images: [{url: "/api/message-images/fixture"}], baselineUserKeys: undefined, baselineUserCount: undefined});
+  h.state.outboundMessages = [remote];
+  expect(h.conversation()).toHaveLength(1);
+  for (let tick = 0; tick < 3; tick++) {
+    h.state.serverMessages = [{id: "native-image", role: "user", turnId: "image-turn", text: "图片：png1\n图片请求\n[image]\n</image>"}];
+    h.state.outboundMessages = [{...remote}];
+    expect(h.conversation()).toHaveLength(1);
+    expect(h.state.pendingMessages).toHaveLength(0);
+  }
 });
 test('same text in a different known turn never acknowledges this send',()=>{
   const h=harness();h.state.pendingMessages=[pending({turnId:'new'})];

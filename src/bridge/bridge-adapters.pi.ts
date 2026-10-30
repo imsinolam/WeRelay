@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { randomBytes, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import type { BridgeAdapter, BridgeAdapterState, BridgeEvent, BridgeSessionMessage, BridgeSessionSendResult, BridgeResumeSessionCandidate, BridgeSessionModelState, BridgeSessionRunSummary } from "./bridge-types.ts";
+import type { BridgeAdapter, BridgeAdapterState, BridgeEvent, BridgeSessionMessage, BridgeSessionSendResult, BridgeResumeSessionCandidate, BridgeSessionModelState, BridgeSessionRunSummary, BridgeSessionComposerDraft, BridgeSessionSendOptions } from "./bridge-types.ts";
 import type { AdapterOptions, EventSink } from "./bridge-adapters.shared.ts";
 import { buildCliEnvironment, resolveSpawnTarget } from "./bridge-adapters.shared.ts";
 import { findPiSessionFile, listPiSessions, readPiSessionMessages, readPiSessionProject, readPiNativeSessionId } from "./pi-session-catalog.ts";
@@ -14,8 +14,9 @@ import { acquirePiOwnerLock } from "./pi-owner-lock.ts";
 import { discoverPiOwners, selectPiOwner, type PiOwnerAdvertisement } from "./pi-owner-discovery.ts";
 import { readPiOwnerModels, readPiInstalledModels } from "./pi-model-catalog.ts";
 import { formatPiModelError } from "./pi-model-error.ts";
+import { readPiOwnerDraft } from "./pi-owner-draft.ts";
 
-type OwnerRecord = { type: string; token?: string; id?: string; sessionId?: string; ok?: boolean; error?: string; text?: string; queued?: boolean; outcome?: "completed" | "aborted" | "error"; modelState?: BridgeSessionModelState; run?: BridgeSessionRunSummary | null };
+type OwnerRecord = { type: string; token?: string; id?: string; sessionId?: string; ok?: boolean; error?: string; text?: string; queued?: boolean; duplicate?: boolean; composerDraft?: BridgeSessionComposerDraft; status?: "busy" | "idle"; outcome?: "completed" | "aborted" | "error"; modelState?: BridgeSessionModelState; run?: BridgeSessionRunSummary | null };
 const EXTENSION_PATH = fileURLToPath(new URL("../../bin/pi-owner-extension.mjs", import.meta.url));
 
 const PI_OWNERSHIP_FLAGS = /^(?:--(?:session(?:-id|-dir)?|resume|continue|fork|no-session|mode|print|extension|no-extensions)(?:=|$)|-(?:r|c|p|e)$|--$)/i;
@@ -127,17 +128,28 @@ export class PiOwnerAdapter implements BridgeAdapter {
     if (!sessionId) throw new Error("Pi 尚未确认当前会话。");
     await this.sendInputToSession(sessionId, text);
   }
-  async sendInputToSession(sessionId: string, text: string): Promise<BridgeSessionSendResult> {
+  async sendInputToSession(sessionId: string, text: string, options?: BridgeSessionSendOptions): Promise<BridgeSessionSendResult> {
     if (!text.trim()) throw new Error("消息不能为空。");
     sessionId = await this.nativeSessionId(sessionId);
     if (sessionId !== this.state.sharedSessionId || !this.socket || this.socket.destroyed || !this.ownerSessionConfirmed) await this.resumeSession(sessionId);
     // The real owner may start (and even finish) before its acknowledgement reaches us.
     this.activeOrigin = "wechat";
     const settledBeforeSend = this.settledRevision;
-    const response = await this.request("prompt", sessionId, text);
+    const response = await this.request("prompt", sessionId, text, undefined, options);
+    if (response.duplicate) return { queued: Boolean(response.queued), duplicate: true };
     this.state.lastInputAt = nowIso();
     if (!response.queued && this.settledRevision === settledBeforeSend && this.state.status !== "busy") this.status("busy");
     return { queued: Boolean(response.queued) };
+  }
+  async getSessionComposerDraft(sessionId: string): Promise<BridgeSessionComposerDraft> {
+    sessionId = await this.nativeSessionId(sessionId);
+    if (sessionId === this.state.sharedSessionId && this.socket && !this.socket.destroyed && this.ownerSessionConfirmed) {
+      const response = await this.request("composer_draft", sessionId);
+      return response.composerDraft ?? { supported: false, draft: null };
+    }
+    const owners = discoverPiOwners().filter((owner) => owner.sessionId === sessionId);
+    if (owners.length !== 1) return { supported: false, draft: null };
+    return await readPiOwnerDraft(owners[0]!);
   }
   async listResumeSessions(limit = 10): Promise<BridgeResumeSessionCandidate[]> {
     const candidates = (await listPiSessions({ limit })).map((candidate) => this.ownerSessionConfirmed && candidate.sessionId === this.state.sharedSessionId
@@ -274,11 +286,14 @@ export class PiOwnerAdapter implements BridgeAdapter {
   }
   async getSessionModelState(sessionId: string): Promise<BridgeSessionModelState> {
     sessionId = await this.nativeSessionId(sessionId);
-    if (sessionId !== this.state.sharedSessionId) {
-      return { options: [], canChange: false, unavailableReason: "请先打开这条 Pi 任务再切换模型。" };
-    }
-    if (!this.socket || this.socket.destroyed || !this.ownerSessionConfirmed) {
-      return { options: [], canChange: false, unavailableReason: "Pi 原窗口尚未连接；发送消息时会重新确认这条原任务。" };
+    if (sessionId !== this.state.sharedSessionId || !this.socket || this.socket.destroyed || !this.ownerSessionConfirmed) {
+      const owners = discoverPiOwners().filter((owner) => owner.sessionId === sessionId);
+      if (owners.length !== 1) {
+        return { options: [], canChange: false, unavailableReason: owners.length > 1
+          ? "这条 Pi 任务有多个原窗口，请在电脑端确认后重试。"
+          : "Pi 原窗口未接入，请在原窗口执行 /reload 后重试。" };
+      }
+      await this.resumeSession(sessionId);
     }
     let response: OwnerRecord;
     try {
@@ -292,7 +307,10 @@ export class PiOwnerAdapter implements BridgeAdapter {
   }
   async setSessionModel(sessionId: string, model: string): Promise<BridgeSessionModelState> {
     sessionId = await this.nativeSessionId(sessionId);
-    if (sessionId !== this.state.sharedSessionId) throw new Error("请先打开这条 Pi 任务再切换模型。");
+    if (sessionId !== this.state.sharedSessionId) {
+      const owners = discoverPiOwners().filter((owner) => owner.sessionId === sessionId);
+      if (owners.length !== 1) throw new Error("未能确认唯一的 Pi 原窗口，请在原窗口执行 /reload 后重试。");
+    }
     await this.resumeSession(sessionId);
     const response = await this.request("set_model", sessionId, undefined, model);
     if (!response.modelState) throw new Error("Pi 未确认模型切换，请刷新模型列表。");
@@ -461,9 +479,10 @@ export class PiOwnerAdapter implements BridgeAdapter {
     if (this.socket) { socket.destroy(); return; }
     this.socket = socket;
     this.buffer = "";
-    socket.on("data", (data) => {
-      this.buffer += data.toString("utf8");
-      if (this.buffer.length > 256 * 1024) { socket.destroy(); return; }
+    socket.setEncoding("utf8");
+    socket.on("data", (data: string) => {
+      this.buffer += data;
+      if (this.buffer.length > 1024 * 1024) { socket.destroy(); return; }
       let end: number;
       while ((end = this.buffer.indexOf("\n")) >= 0) {
         const line = this.buffer.slice(0, end); this.buffer = this.buffer.slice(end + 1);
@@ -518,6 +537,10 @@ export class PiOwnerAdapter implements BridgeAdapter {
       this.runSummary = record.run ?? { status: "running", startedAtMs: Date.now() };
       this.status("busy");
     }
+    if (record.type === "status" && (record.status === "busy" || record.status === "idle")) {
+      this.runSummary = record.run ?? null;
+      this.status(record.status);
+    }
     if (record.type === "assistant" && record.text) this.lastReply = record.text;
     if (record.type === "assistant_error") this.lastError = formatPiModelError(record.error);
     if (record.type === "settled") {
@@ -539,7 +562,7 @@ export class PiOwnerAdapter implements BridgeAdapter {
       this.lastReply = ""; this.lastError = ""; this.activeOrigin = "local"; this.status("idle");
     }
   }
-  private async request(type: "prompt" | "abort" | "can_switch" | "model_state" | "set_model" | "set_reasoning" | "new_session", sessionId: string, text?: string, model?: string): Promise<OwnerRecord> {
+  private async request(type: "prompt" | "abort" | "can_switch" | "model_state" | "set_model" | "set_reasoning" | "new_session" | "composer_draft", sessionId: string, text?: string, model?: string, options?: BridgeSessionSendOptions): Promise<OwnerRecord> {
     const socket = this.socket;
     if (!socket || socket.destroyed) throw new Error("Pi 本地 owner 未连接，未另建任务。");
     const id = randomUUID();
@@ -549,9 +572,9 @@ export class PiOwnerAdapter implements BridgeAdapter {
         reject(new Error(type === "set_model"
           ? "Pi 模型切换结果暂未确认，请刷新模型列表，避免重复操作。"
           : "Pi 未确认收到消息，请先检查原任务以免重复发送。"));
-      }, (type === "set_model" || type === "new_session") ? 30_000 : 10_000);
+      }, (type === "set_model" || type === "new_session") ? 30_000 : type === "composer_draft" ? 2_000 : 10_000);
       this.pending.set(id, { resolve, reject, timer });
-      socket.write(`${JSON.stringify({ id, token: this.token, type, sessionId, text, model })}\n`);
+      socket.write(`${JSON.stringify({ id, token: this.token, type, sessionId, text, model, ...options })}\n`);
     });
   }
 }

@@ -6,6 +6,7 @@ export const BRIDGE_PROVIDER_IDS = [
   "codebuddy",
   "reasonix",
   "pi",
+  "pi-desktop",
   "workbuddy",
   "deepseek",
   "opencode",
@@ -22,6 +23,7 @@ export const IMPLEMENTED_BRIDGE_ADAPTER_IDS = [
   "codebuddy",
   "reasonix",
   "pi",
+  "pi-desktop",
   "workbuddy",
   "deepseek",
   "opencode",
@@ -325,6 +327,22 @@ export const BRIDGE_PROVIDERS: Record<BridgeProviderId, BridgeProviderDefinition
     dependencies: [{
       id: "pi-cli", kind: "command", name: "pi", label: "Pi Agent 命令",
       hint: "未找到 pi 命令。请安装 Pi Agent 并配置模型。",
+    }],
+  },
+  "pi-desktop": {
+    id: "pi-desktop",
+    label: "Pi Desktop",
+    command: "pi-desktop",
+    transport: "desktop_app",
+    daemon: true,
+    capabilities: {
+      sessions: true, messages: true, images: false,
+      queue: false, approvals: false, stop: true, nativeCommands: false,
+    },
+    sessionIntegration: { owner: "desktop_owner", continuity: "same_owner", localVisibility: "live" },
+    dependencies: [{
+      id: "pi-desktop-app", kind: "app", path: "/Applications/PI-Desktop.app", label: "Pi Desktop 桌面应用",
+      hint: "请安装并运行 Pi Desktop，手动开启本机 MCP 控制；WeRelay 不会自动重启桌面端。自定义数据目录可设置 WERELAY_PI_DESKTOP_DATA_DIR。",
     }],
   },
   workbuddy: {

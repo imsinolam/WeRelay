@@ -9,6 +9,7 @@ import {
   MobileMessageOutbox,
   computeMobileMessageRetryDelayMs,
   formatMobileMessageFailureNotice,
+  mobileMessageOutboxEntryToUserMessage,
 } from "../../src/daemon/mobile-message-outbox.ts";
 
 const tempDirs: string[] = [];
@@ -26,6 +27,32 @@ function createStateFile(): string {
 }
 
 describe("MobileMessageOutbox", () => {
+  test("native queue identity takes over before an RPC acknowledgement and persists across restart", () => {
+    const stateFile = createStateFile();
+    let outbox = new MobileMessageOutbox({stateFile});
+    outbox.accept({clientId: "client", adapter: "codex", threadId: "thread", text: "继续", images: [], createdAtMs: 10_000});
+    outbox.markSending("codex", "thread", "client", 11_000);
+    outbox.reconcile("codex", "thread", {messages: [], queuedMessages: [{id: "native", clientId: "client", text: "继续", imageCount: 0}]});
+    outbox = new MobileMessageOutbox({stateFile});
+    expect(outbox.list("codex", "thread")).toMatchObject([{clientId: "client", status: "queued", queuedMessageId: "native", queuePosition: 1}]);
+    expect(outbox.readyEntries()).toEqual([]);
+    expect(outbox.pendingFailureNotifications()).toEqual([]);
+  });
+
+  test("restored outbox images carry their count and wrapped native receipts clear only one send", () => {
+    const stateFile = createStateFile();
+    let outbox = new MobileMessageOutbox({stateFile});
+    for (const clientId of ["first", "second"]) {
+      outbox.accept({clientId, adapter: "codex", threadId: "thread", text: "图片请求", images: [{path: "/tmp/input.png", fileName: "input.png", mimeType: "image/png"}], createdAtMs: 10_000});
+      outbox.markSubmitted("codex", "thread", clientId, {turnId: "turn"});
+    }
+    expect(mobileMessageOutboxEntryToUserMessage(outbox.list("codex", "thread")[0]!)).toMatchObject({imageCount: 1});
+    const receipt = {id: "native", role: "user" as const, text: "图片：png1\n图片请求\n[image]\n</image>", turnId: "turn"};
+    outbox.reconcile("codex", "thread", {messages: [receipt]});
+    outbox = new MobileMessageOutbox({stateFile});
+    outbox.reconcile("codex", "thread", {messages: [receipt]});
+    expect(outbox.list("codex", "thread").map(entry => entry.clientId)).toEqual(["second"]);
+  });
   test("retains missing queues without resending, persists their state, and cleans up on native evidence", () => {
     const stateFile = createStateFile();
     let outbox = new MobileMessageOutbox({ stateFile });
@@ -488,7 +515,7 @@ describe("mobile outbox helpers", () => {
       error: "电脑端暂时未连接",
       url: "https://relay.example/t/task",
     })).toBe(
-      "[修复移动网页] 网页消息多次提交仍失败\n" +
+      "[修复移动网页] 网页消息未能提交\n" +
       "消息已保留在网页任务台，可复制后重试。\n" +
       "内容：请继续处理发送顺序\n" +
       "原因：电脑端暂时未连接\n" +

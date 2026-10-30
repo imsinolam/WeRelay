@@ -44,10 +44,10 @@ Windows PowerShell 使用 `Get-Command werelay` 和 `Get-Command werelay-setup`�
 
 ## 在微信中更新
 
-安装了新版更新能力的 WeRelay，会在启动后及运行期间**每 24 小时检查一次** GitHub 已发布的 Release。正式版和标为预发布的 `preview` / `rc` 版本都包括在内；比较完整版本号，不会把 `preview.10` 当成 `preview.2`，也不会自动降级。电脑关机或休眠错过检查时，下次运行会补查；自动提醒每 24 小时最多成功发送一次，同一版本不重复提醒。网络失败会稍后重试，微信上下文失效时等你发来新消息再尝试送达。
+安装了新版更新能力的 WeRelay，会在启动后及运行期间**每 24 小时检查一次** GitHub 已发布的 Release。新版本统一使用 `0.x.x`，末位逐次增加；同一版本对应同一源码和安装包，不再分 preview 与正式版。更新检查仍兼容历史预发布记录，并按完整版本号判断，不会自动降级。电脑关机或休眠错过检查时，下次运行会补查；自动提醒每 24 小时最多成功发送一次，同一版本不重复提醒。网络失败会稍后重试，微信上下文失效时等你发来新消息再尝试送达。
 
 - 发送 **“检查更新”**：只查询和显示结果，不安装；手动查询不受自动检查周期限制。
-- 收到提醒后回复 **“更新”** 或 **`/update`**：自动下载对应 Release 的源码归档，在独立临时目录中安装锁定依赖、构建并生成 tarball，再安装这个本地 tarball。预发布会明确标注。
+- 收到提醒后回复 **“更新”** 或 **`/update`**：自动下载对应 Release 的源码归档，在独立临时目录中安装锁定依赖、构建并生成 tarball，再安装这个本地 tarball。历史预发布记录仍保留原标注。
 - 安装前保留原包和命令入口备份；替换或版本校验失败时自动回退。若回退也失败，会明确告知，不声称旧安装仍完好。
 - 安装后**不会自行重启**。可回复 **“重启”**：仅在能确认由已知 macOS launchd 服务托管时退出并由服务恢复；手动启动、Windows 或其他未确认保活的环境会提示在电脑重启。重启期间微信和网页连接会短暂断开。
 - 更新检查、下载和构建在后台进行，不阻塞正常微信任务消息。替换安装仍可能影响随后启动的 WeRelay 入口，请避开关键操作时段；不要把“后台更新”理解为绝无中断风险。
@@ -58,7 +58,7 @@ Windows PowerShell 使用 `Get-Command werelay` 和 `Get-Command werelay-setup`�
 
 ## 手动更新
 
-从 [GitHub Releases](https://github.com/imsinolam/WeRelay/releases) 选择要安装的正式版或预发布版，下载该 Release 的 Source code 并解压。进入该版本目录后重新安装依赖并打包：
+从 [GitHub Releases](https://github.com/imsinolam/WeRelay/releases) 选择要安装的版本，下载该 Release 的 Source code 并解压。进入该版本目录后重新安装依赖并打包：
 
 macOS / Linux：
 

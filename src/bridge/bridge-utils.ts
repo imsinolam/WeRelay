@@ -52,7 +52,7 @@ export type SystemCommand =
 // between the local machine and WeChat server timestamps: with a small value,
 // a PC clock running slightly ahead silently dropped fresh messages.
 export const MESSAGE_START_GRACE_MS = 30_000;
-export const CODEX_TASK_LIST_PAGE_SIZE = 10;
+export const CODEX_TASK_LIST_PAGE_SIZE = 15;
 export const CODEX_TASK_LIST_MAX_PAGE_SIZE = 100;
 
 export type CodexTaskListPagePosition = {
@@ -1277,7 +1277,7 @@ export function formatWorkerStatusLabel(
     case "starting":
       return "启动中";
     case "busy":
-      return "处理中";
+      return "运行中";
     case "awaiting_approval":
       return "待审批";
     case "awaiting_input":
@@ -1566,7 +1566,7 @@ function formatResumeSessionRuntimeMarkers(
 
   const currentWorkerMarker = isCurrent
     ? currentWorkerStatus === "busy"
-      ? "处理中 🟢"
+      ? "运行中 🟢"
       : currentWorkerStatus === "awaiting_approval"
         ? "待审批"
         : currentWorkerStatus === "awaiting_input"
@@ -1591,7 +1591,7 @@ function formatResumeSessionRuntimeMarkers(
     } else if (status.activeFlags.includes("waitingOnUserInput")) {
       markers.push("待输入");
     } else {
-      markers.push("处理中 🟢");
+      markers.push("运行中 🟢");
     }
   } else if (status?.type === "systemError") {
     markers.push("异常");

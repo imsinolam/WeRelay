@@ -348,7 +348,7 @@ function runtimeMarker(candidate: GlobalTaskCandidate): string {
   if (status?.type === "active") {
     if (status.activeFlags.includes("waitingOnApproval")) return " · 待审批";
     if (status.activeFlags.includes("waitingOnUserInput")) return " · 待输入";
-    return " · 处理中 🟢";
+    return " · 运行中 🟢";
   }
   return status?.type === "systemError" ? " · 异常" : "";
 }
@@ -376,7 +376,7 @@ export function countRunningGlobalTasks(
  * 默认列表条数：运行中任务多于常规一页时，按运行数量向上取整到 5 的倍数。
  *
  * 用户希望“正在跑的任务”不用翻页就能全部看到，但又不希望列表无限变长；
- * 取整到 5 的倍数可以让 11 个运行任务显示 15 条，而不是精确的 11 条，
+ * 取整到 5 的倍数可以让 16 个运行任务显示 20 条，而不是精确的 16 条，
  * 顺带露出几条刚完成的任务，同时保持条数稳定、不随任务数抖动。
  */
 export function resolveDefaultGlobalTaskPageSize(params: {

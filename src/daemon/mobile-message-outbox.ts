@@ -7,6 +7,7 @@ import path from "node:path";
 import type { BridgeMessageImage, BridgeSessionMessage } from "../bridge/bridge-types.ts";
 import { ensureWorkspaceChannelDir, normalizeWorkspacePath } from "../wechat/channel-config.ts";
 import { writePrivateFileAtomic } from "../utils/private-files.ts";
+import { normalizeMobileMessageText } from "./mobile-message-text.ts";
 
 export type MobileMessageOutboxStatus =
   | "accepted"
@@ -44,6 +45,7 @@ export type MobileMessageOutboxEntry = {
   originalThreadId?: string;
   createTaskSourceThreadId?: string;
   newTaskSettings?: MobileNewTaskSettings;
+  composerDraftRevision?: string;
   text: string;
   images: MobileMessageOutboxImage[];
   createdAtMs: number;
@@ -74,6 +76,7 @@ export type MobileMessageOutboxAcceptInput = {
   originalThreadId?: string;
   createTaskSourceThreadId?: string;
   newTaskSettings?: MobileNewTaskSettings;
+  composerDraftRevision?: string;
   text: string;
   images: MobileMessageOutboxImage[];
   createdAtMs?: number;
@@ -84,6 +87,7 @@ type MobileMessageOutboxFile = {
   cwd?: string;
   nextSequence: number;
   entries: MobileMessageOutboxEntry[];
+  composerDraftReceipts?: string[];
 };
 
 type MobileMessageOutboxOptions = {
@@ -164,6 +168,7 @@ function normalizeEntry(value: unknown): MobileMessageOutboxEntry | null {
       ? { createTaskSourceThreadId: normalizeOptionalText(value.createTaskSourceThreadId) }
       : {}),
     ...(value.newTaskSettings ? { newTaskSettings: parseMobileNewTaskSettings(value.newTaskSettings) } : {}),
+    ...(normalizeOptionalText(value.composerDraftRevision) ? { composerDraftRevision: normalizeOptionalText(value.composerDraftRevision) } : {}),
     ...(value.newTaskSettingsApplied === true ? { newTaskSettingsApplied: true } : {}),
     text: normalizeText(value.text),
     images,
@@ -216,8 +221,8 @@ function entryMatchesThread(entry: MobileMessageOutboxEntry, threadId: string): 
   return entry.threadId === threadId || entry.originalThreadId === threadId;
 }
 
-function normalizedMessageText(text: string): string {
-  return text.split("\n").filter((line) => line.trim().toLowerCase() !== "[image]").join("\n").trim();
+function messageTextMatchesEntry(message: BridgeSessionMessage, entry: MobileMessageOutboxEntry): boolean {
+  return normalizeMobileMessageText(message.text, entry.images.length > 0) === normalizeMobileMessageText(entry.text);
 }
 
 function messageOccurredAtMs(message: BridgeSessionMessage): number | null {
@@ -234,10 +239,10 @@ function nativeMessageReceiptKey(message: BridgeSessionMessage): string {
 function messageMatchesEntry(message: BridgeSessionMessage, entry: MobileMessageOutboxEntry): boolean {
   const clientId = (message as BridgeSessionMessage & { clientId?: string }).clientId;
   if (clientId) return clientId === entry.clientId;
-  if (entry.turnId && message.turnId === entry.turnId && normalizedMessageText(message.text) === normalizedMessageText(entry.text)) return true;
+  if (entry.turnId && message.turnId === entry.turnId && messageTextMatchesEntry(message, entry)) return true;
   if (entry.turnId && message.turnId && message.turnId !== entry.turnId) return false;
   if (entry.status !== "submitted" && entry.status !== "queued") return false;
-  if (normalizedMessageText(message.text ?? "") !== normalizedMessageText(entry.text)) {
+  if (!messageTextMatchesEntry(message, entry)) {
     return false;
   }
   const messageAtMs = messageOccurredAtMs(message);
@@ -259,9 +264,11 @@ function truncate(value: string, maxLength: number): string {
 
 /** Only connection failures known to precede acceptance may retry indefinitely. */
 export function classifyMobileSendFailure(error: string): "transient" | "permanent" | "unconfirmed" | "unknown" {
+  if (/草稿.*(?:已发送|已在网页提交|标识冲突|未发送)/.test(error)) return "permanent";
   if (/Codex 桌面任务状态尚未就绪，消息尚未发送/.test(error)) return "transient";
   if (/暂未确认|未确认收到|avoid.*duplicate|unconfirmed/i.test(error)) return "unconfirmed";
-  if (/Pi 窗口.*\/reload.*加载 WeRelay 扩展|当前项目已有未接入的 Pi 窗口/i.test(error)) return "permanent";
+  if (/Pi 窗口.*\/reload.*加载 WeRelay 扩展|当前项目已有未接入的 Pi 窗口|没有已接入的 Pi 原窗口|Pi 任务已找到，但原窗口尚未提供可接入的发送接口/i.test(error)) return "permanent";
+  if (/session\/model-unavailable/i.test(error)) return "permanent";
   if (/does not support image|attachment-error|不支持.*图片|图片.*不正确|没有找到这个|not found|invalid.*(image|input|model)|内容不能为空/i.test(error)) return "permanent";
   if (/ECONNREFUSED|ENETUNREACH|EHOSTUNREACH|ENOTFOUND|EAI_AGAIN|not connected|未连接|连接.*未就绪|waiting for app-server|电脑.*离线|at capacity|rate limit|too many requests|\b429\b/i.test(error)) return "transient";
   if (/timed out|timeout|超时|disconnected|连接中断/i.test(error)) return "unconfirmed";
@@ -283,7 +290,7 @@ export function formatMobileMessageFailureNotice(params: {
   const text = params.text.trim() || "（图片消息）";
   const error = params.error.trim() || "电脑端暂时无法接收消息";
   return [
-    `[${truncate(title, 55)}] ${params.unconfirmed ? "接收状态未确认" : "网页消息多次提交仍失败"}`,
+    `[${truncate(title, 55)}] ${params.unconfirmed ? "接收状态未确认" : "网页消息未能提交"}`,
     params.unconfirmed
       ? "消息已保留，请先查看原任务，避免重复发送。"
       : "消息已保留在网页任务台，可复制后重试。",
@@ -300,7 +307,9 @@ export function mobileMessageOutboxEntryToUserMessage(
   pending: true;
   status: MobileMessageOutboxStatus;
   attempts: number;
+  imageCount: number;
   lastError?: string;
+  composerDraftRevision?: string;
   queuedMessageId?: string;
   queueMissing?: boolean;
   lastAttemptAtMs?: number;
@@ -317,9 +326,11 @@ export function mobileMessageOutboxEntryToUserMessage(
     text: entry.text,
     createdAtMs: entry.createdAtMs,
     clientId: entry.clientId,
+    ...(entry.composerDraftRevision ? { composerDraftRevision: entry.composerDraftRevision } : {}),
     pending: true,
     status: entry.status,
     attempts: entry.attempts,
+    imageCount: images.length,
     ...(entry.turnId ? { turnId: entry.turnId } : {}),
     ...(entry.lastError ? { lastError: entry.lastError } : {}),
     ...(entry.queuedMessageId ? { queuedMessageId: entry.queuedMessageId } : {}),
@@ -336,6 +347,7 @@ export class MobileMessageOutbox {
   private readonly now: () => number;
   private entries: MobileMessageOutboxEntry[] = [];
   private nextSequence = 1;
+  private composerDraftReceipts = new Set<string>();
 
   constructor(options: MobileMessageOutboxOptions) {
     this.cwd = options.cwd ? normalizeWorkspacePath(options.cwd) : undefined;
@@ -371,6 +383,7 @@ export class MobileMessageOutbox {
         ? { createTaskSourceThreadId: input.createTaskSourceThreadId.trim() }
         : {}),
       ...(newTaskSettings ? { newTaskSettings: { ...newTaskSettings } } : {}),
+      ...(input.composerDraftRevision ? { composerDraftRevision: input.composerDraftRevision } : {}),
       text: input.text,
       images: input.images.map((image) => ({ ...image })),
       createdAtMs: input.createdAtMs ?? this.now(),
@@ -380,6 +393,10 @@ export class MobileMessageOutbox {
       nextAttemptAtMs: 0,
     };
     this.entries.push(entry);
+    if (input.composerDraftRevision) {
+      this.composerDraftReceipts.add(this.composerDraftReceiptKey(adapter, threadId, input.composerDraftRevision));
+      if (this.composerDraftReceipts.size > 2048) this.composerDraftReceipts.delete(this.composerDraftReceipts.values().next().value!);
+    }
     this.prune(false);
     this.persist();
     return { entry: cloneEntry(entry), duplicate: false };
@@ -387,6 +404,21 @@ export class MobileMessageOutbox {
 
   get(adapter: string, threadId: string, clientId: string): MobileMessageOutboxEntry | null {
     const entry = this.findMutable(adapter, threadId, clientId);
+    return entry ? cloneEntry(entry) : null;
+  }
+
+  private composerDraftReceiptKey(adapter: string, threadId: string, revision: string): string {
+    return createHash("sha256").update(JSON.stringify([adapter, threadId, revision])).digest("hex");
+  }
+
+  hasComposerDraftSubmission(adapter: string, threadId: string, revision: string): boolean {
+    return this.composerDraftReceipts.has(this.composerDraftReceiptKey(adapter, threadId, revision)) ||
+      Boolean(this.findComposerDraftSubmission(adapter, threadId, revision));
+  }
+
+  findComposerDraftSubmission(adapter: string, threadId: string, revision: string): MobileMessageOutboxEntry | null {
+    const entry = this.entries.find((candidate) => candidate.adapter === adapter &&
+      entryMatchesThread(candidate, threadId) && candidate.composerDraftRevision === revision);
     return entry ? cloneEntry(entry) : null;
   }
 
@@ -653,10 +685,12 @@ export class MobileMessageOutbox {
     if (!entry || entry.status === "delivered") return entry?.status === "delivered";
     for (const message of messages) {
       if (message.role !== "user" || (message as BridgeSessionMessage & {pending?: boolean}).pending) continue;
+      const receiptClientId = (message as BridgeSessionMessage & {clientId?: string}).clientId;
+      if (receiptClientId && receiptClientId !== entry.clientId) continue;
       if (entry.turnId && message.turnId && entry.turnId !== message.turnId) continue;
       const exactTurn = Boolean(entry.turnId && entry.turnId === message.turnId);
       if (!exactTurn && (message.createdAtMs === undefined || message.createdAtMs < entry.createdAtMs)) continue;
-      if (normalizedMessageText(message.text ?? "") !== normalizedMessageText(entry.text)) continue;
+      if (!messageTextMatchesEntry(message, entry)) continue;
       if (!entry.text.trim() && !entry.images.length) continue;
       if (entry.images.some(image => !message.images?.some(actual => actual.source === "local" && actual.path === image.path))) continue;
       const nativeReceiptKey = message.id ? `id:${message.id}` : JSON.stringify([message.turnId, message.createdAtMs, message.text]);
@@ -766,10 +800,28 @@ export class MobileMessageOutbox {
     threadId: string,
     params: {
       messages: BridgeSessionMessage[];
-      queuedMessages?: Array<{ id: string; text: string; imageCount: number }>;
+      queuedMessages?: Array<{ id: string; clientId?: string; text: string; imageCount: number }>;
       nowMs?: number;
     },
   ): void {
+    // The desktop state can arrive before the enqueue RPC resolves. Persist the
+    // stable identity now so a page reload or daemon restart cannot resend it.
+    for (const entry of this.entries) {
+      if (entry.adapter !== adapter || !entryMatchesThread(entry, threadId) ||
+          entry.status === "delivered" || entry.status === "cancelled") continue;
+      const index = params.queuedMessages?.findIndex(message =>
+        (!message.clientId || message.clientId === entry.clientId) &&
+        (entry.queuedMessageId ? entry.queuedMessageId === message.id : message.clientId === entry.clientId)
+      ) ?? -1;
+      if (index < 0) continue;
+      const queued = params.queuedMessages![index]!;
+      if (entry.status !== "queued" || entry.queuedMessageId !== queued.id || entry.queuePosition !== index + 1) {
+        this.markQueued(adapter, threadId, entry.clientId, {
+          queuedMessageId: queued.id, queuePosition: index + 1,
+          submittedAtMs: entry.submittedAtMs ?? params.nowMs ?? this.now(),
+        });
+      }
+    }
     const relevant = this.entries
       .filter((entry) => entry.adapter === adapter && entryMatchesThread(entry, threadId))
       .filter((entry) => entry.status === "submitted" || entry.status === "queued")
@@ -847,6 +899,8 @@ export class MobileMessageOutbox {
       ) {
         return;
       }
+      this.composerDraftReceipts = new Set(Array.isArray(parsed.composerDraftReceipts)
+        ? parsed.composerDraftReceipts.filter((key): key is string => typeof key === "string" && /^[a-f0-9]{64}$/.test(key)).slice(-2048) : []);
       this.entries = parsed.entries
         .map(normalizeEntry)
         .filter((entry): entry is MobileMessageOutboxEntry => Boolean(entry));
@@ -855,6 +909,10 @@ export class MobileMessageOutbox {
         ...this.entries.map((entry) => entry.sequence + 1),
         1,
       );
+      for (const entry of this.entries) {
+        if (entry.composerDraftRevision) this.composerDraftReceipts.add(this.composerDraftReceiptKey(entry.adapter, entry.threadId, entry.composerDraftRevision));
+      }
+      this.composerDraftReceipts = new Set([...this.composerDraftReceipts].slice(-2048));
       this.prune(false);
       this.persist();
     } catch {
@@ -879,7 +937,7 @@ export class MobileMessageOutbox {
   }
 
   private persist(): void {
-    if (this.entries.length === 0) {
+    if (this.entries.length === 0 && this.composerDraftReceipts.size === 0) {
       fs.rmSync(this.stateFile, { force: true });
       return;
     }
@@ -888,6 +946,7 @@ export class MobileMessageOutbox {
       ...(this.cwd ? { cwd: this.cwd } : {}),
       nextSequence: this.nextSequence,
       entries: this.entries,
+      ...(this.composerDraftReceipts.size ? { composerDraftReceipts: [...this.composerDraftReceipts] } : {}),
     };
     writePrivateFileAtomic(this.stateFile, `${JSON.stringify(state, null, 2)}\n`, {
       encoding: "utf8",

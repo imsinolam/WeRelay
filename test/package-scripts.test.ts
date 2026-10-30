@@ -83,6 +83,32 @@ describe("package quality scripts", () => {
     );
   });
 
+  test("requires a verified publishing server host key", () => {
+    const helper = fs.readFileSync(
+      path.resolve(import.meta.dir, "..", "scripts/publish-github-via-server.mjs"),
+      "utf8",
+    );
+    expect(helper).toContain('"StrictHostKeyChecking=yes"');
+    expect(helper).not.toContain('"StrictHostKeyChecking=accept-new"');
+  });
+
+  test("pins fixed communication dependencies in both install lockfiles", () => {
+    const root = path.resolve(import.meta.dir, "..");
+    const metadata = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
+    const npmLock = JSON.parse(fs.readFileSync(path.join(root, "package-lock.json"), "utf8"));
+    const bunLock = fs.readFileSync(path.join(root, "bun.lock"), "utf8");
+    for (const [name, version] of Object.entries({
+      "@hono/node-server": "2.1.3",
+      "body-parser": "2.4.0",
+      "fast-uri": "3.1.9",
+      qs: "6.16.1",
+    })) {
+      expect(metadata.overrides[name]).toBe(version);
+      expect(npmLock.packages[`node_modules/${name}`].version).toBe(version);
+      expect(bunLock).toContain(`"${name}@${version}"`);
+    }
+  });
+
   test("prepack typechecks source before building the local tarball", () => {
     expect(packageJson.scripts?.prepack).toBe(
       "npm run typecheck:src && npm run build",

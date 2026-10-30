@@ -22,7 +22,7 @@ Pi Desktop 的原生显示 ID 是 `native-pi:` 加原文件真实路径、NUL �
 
 Pi CLI 与 Pi Desktop **复用原生记录**属于同一个 Pi 集合。Desktop 原生运行实例须加载 WeRelay 扩展，目录可见不等于已具备发送能力。旧扩展升级后需要在原 CLI `/reload`；桌面需让原生运行实例重新加载扩展，不由 WeRelay 强制重启应用。
 
-Pi Desktop 自建的独立桌面会话有另外的数据库、JSONL 格式及写者协议，本修复未实现它们的索引或发送。不能宣称“所有 Desktop 自建任务都已接入”，也不能启动新 sidecar 冒充已有 writer。Windows 暂不支持普通原窗口的 POSIX owner 发现。
+Pi Desktop 自建任务使用独立 `pi-desktop` provider，经用户主动开启的本机 MCP 控制接口调用既有桌面主进程，不直接读取或改写数据库。任务源与原生 `pi` 分离；Desktop 原生 Pi 别名和远程 Host 记录不重复纳入。没有控制接口时拒绝发送，不启动替代 sidecar。当前仅提供文字任务、分页历史、新建、重命名和停止；审批、提问、图片、模型配置与队列不宣称支持。Windows 暂不支持普通原窗口的 POSIX owner 发现，也暂不接入 Desktop 控制接口：POSIX 权限位不能验证 Windows ACL，生产读取器保持拒绝；协议测试使用独立假端点，不跳过跨平台消息、去重和 HTTP 回归。
 
 ## 防回归验收
 
@@ -30,6 +30,15 @@ Pi Desktop 自建的独立桌面会话有另外的数据库、JSONL 格式及写
 - `pi-session-catalog.test.ts`：根目录、递归、更名、重复 ID、agent 目录、真实记录排序、桌面别名及符号链接边界。
 - `pi-existing-owner.test.ts`：既有认证原窗口发送；同 ID 首次发送/断线恢复；一个 sidecar 多任务各自路由；重载不删除其他广告；owner 冲突拒绝；并发同任务只建立一个连接。
 - `pi-owner-safety.test.ts`：无接口拒绝新 writer；Desktop lease 不删除；项目创建不串项目；完成先于确认不回到忙碌。
-- `werelay-daemon.test.ts`：识别 Pi Desktop 为 Pi；`/pi` 不触发打开可见空终端。
+- `werelay-daemon.test.ts`：识别 Pi Desktop 为独立 `pi-desktop`；`/pi` 不触发打开可见空终端。
 
 部署后还必须实际验收：保持已有 CLI/Desktop 任务，微信 `/pi` 返回统一列表，分别向指定原任务发一次消息，在原窗口确认只有一条新用户消息和一个真实运行轮次。无接口任务应明确报错而非分叉。模拟扩展与只读目录验证不能代替这项微信端验收。
+
+## Desktop 控制客户端与验收
+
+- `pi-desktop-client.ts`：读取应用自己生成的私有端点文件，校验同用户、文件权限、PID 和回环地址；初始化 MCP 会话，发起 `pi_desktop_invoke`；拒绝重定向，凭据不进入状态或错误文本。端点变化时重新握手，但不重放失败写操作。
+- `bridge-adapters.pi-desktop.ts`：只读 list/get 不调用 session/open；发消息前验证精确任务并拒绝运行中并发输入。按消息 ID 和 turn 关联完成回复，旧回复不用于结束新一轮。历史使用 Desktop 的 messageStart/messageBefore 游标。
+- `test/bridge/pi-desktop.test.ts`：认证假 Desktop owner 与真实移动 HTTP 路由联通，覆盖 CLI/Desktop 分离、任务继续、分页、去重、停止、无接口和超时失败封闭。测试只创建临时数据，不发送真实微信消息或修改用户桌面会话。
+- 协议依据：本机已安装 PI-Desktop 0.21.0 的 MCP operation catalog、主进程 IPC handler 和 session 结构；没有把应用源码或运行凭据复制进仓库。
+
+候选集成后，在专用测试任务验收：网页与微信各发一句独特文字；原桌面任务只出现一条输入、一个轮次；完成回复回到正确终端；读列表／翻页不改变桌面当前任务；停止作用于所选原任务。再关闭控制接口确认明确不可用，未启动 Pi CLI、未新建任务。实际桌面验收前不能写“完整支持”。

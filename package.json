@@ -1,6 +1,6 @@
 {
   "name": "werelay",
-  "version": "0.3.21",
+  "version": "0.3.23",
   "private": true,
   "description": "Extend real desktop coding-agent sessions to WeChat, LAN web, and an optional public relay without forking context",
   "type": "module",
@@ -16,10 +16,10 @@
     "NOTICE.md",
     "LICENSE.txt",
     "docs/README.md",
-    "docs/使用指南/",
-    "docs/架构设计/",
-    "docs/开发协作/",
-    "docs/发布/",
+    "docs/\u4f7f\u7528\u6307\u5357/",
+    "docs/\u67b6\u6784\u8bbe\u8ba1/",
+    "docs/\u5f00\u53d1\u534f\u4f5c/",
+    "docs/\u53d1\u5e03/",
     "docs/images/werelay-logo.svg",
     "docs/images/werelay-wordmark.png",
     "docs/images/werelay-relationship.png",
@@ -166,6 +166,10 @@
   "packageManager": "bun@1.3.1",
   "overrides": {
     "ip-address": "10.7.4",
-    "zod": "4.6.7"
+    "zod": "4.6.7",
+    "@hono/node-server": "2.1.3",
+    "body-parser": "2.4.0",
+    "fast-uri": "3.1.9",
+    "qs": "6.16.1"
   }
 }

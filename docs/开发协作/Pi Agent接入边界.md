@@ -38,3 +38,25 @@ node --experimental-strip-types test/fixtures/pi/verify-native-new-session.mjs <
 ```
 
 脚本只使用临时项目与假模型，验证模型目录读取、同一 runtime 内新建、重连后应用模型和推理强度、旧广告清理、零模型网络调用及零用户消息；不覆盖手机、微信或生产 Desktop GUI 验收。普通功能提交不自动安装或部署。
+
+## 运行状态与首次落盘（2026-10-27）
+
+Pi 1.4.0 的真实 SDK 隔离验证确认：异步 `before_agent_start` 准备期间，原 owner 的 `isIdle()` 已经为 `false`，而 `agent_start` 尚未触发；新会话的 JSONL 也可能还未落盘。只监听 `agent_start` 或只枚举磁盘文件，都会漏掉这个阶段的运行状态。
+
+- 扩展在 `before_agent_start`、`agent_start` 上幂等报告同一轮运行，不能重置该轮开始时间。每秒只读核对原 owner 的公开 `isIdle()`，仅状态改变时更新私有广告和已鉴权客户端，不反复写盘。
+- 准备失败、恢复空闲但没有正常完成事件时，只清除运行状态，不伪造回复或完成通知。先被状态观察发现的新一轮必须重置上一轮结果，不能沿用上轮失败。
+- 全局目录读取唯一活 owner 的状态；首次落盘前，仅当它提供的原生 `sessionFile` 属于当前会话目录时才纳入。落盘后按原生 ID 去重，不创建副本；同 ID 多个 owner 时拒绝猜测。
+- 排序使用原生事件时间及原 owner 报告的真实开始/结束时间，不因轮询或窗口打开而不断刷新任务时间。不能把进程存活、文件较新或应用已打开等同于“运行中”。
+- CLI 与 Desktop **导入的原生 Pi 会话**共享这套规则，但必须各自加载进程内扩展。Desktop 私有数据库格式不因此获得接入能力，不另起 CLI owner 冒充支持。
+- 安装新版 WeRelay 后，旧窗口仍可能持有旧扩展；应在当前任务完成后于 Pi 执行 `/reload`，或由用户正常重新打开窗口。不得为刷新状态自动重启正在运行的任务。
+
+微信列表及网页任务看板统一显示“运行中”；微信运行项带 `🟢`，默认每页 15 条。终端筛选仍使用全局快照编号，显式指定条数及运行任务较多时的既有扩容规则不变，使用说明仍独立一条消息。
+
+回归入口：
+
+```sh
+bun test test/bridge/pi-task-runtime-status.test.ts test/daemon/global-task-index.test.ts
+node --experimental-strip-types test/fixtures/pi/verify-native-runtime-status.mjs <已安装的-Pi-SDK-file-URL>
+```
+
+真实 SDK 脚本只使用临时项目、假模型和同一原 owner，覆盖准备期运行、模型循环运行、完成后空闲及零网络请求；不是生产微信或 Desktop GUI 验收。

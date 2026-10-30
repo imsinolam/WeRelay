@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { WeRelayDaemon, resolveDaemonBareNumericReply, resolveDaemonTaskListSnapshot, resolveDaemonTaskTargetedMessage } from "../../src/daemon/werelay-daemon.ts";
+import { WeRelayDaemon, codexTaskMonitorRetryDelayMs, resolveDaemonBareNumericReply, resolveDaemonTaskListSnapshot, resolveDaemonTaskTargetedMessage } from "../../src/daemon/werelay-daemon.ts";
 import { formatResumeSessionList } from "../../src/bridge/bridge-utils.ts";
 import { ApprovalNotificationDeliveryQueue } from "../../src/daemon/approval-notification-delivery.ts";
 import {
@@ -152,4 +152,10 @@ test("the background Codex observer still follows child approvals without cachin
   await daemon.runCodexTaskMonitor(slot);
   expect(followed).toEqual(["child"]);
   expect(daemon.codexTaskObservations.size).toBe(0);
+});
+
+
+test("Codex monitor backs off repeated failures and promptly resumes after recovery", () => {
+  expect([0, 1, 2, 3, 4, 5, 100].map(codexTaskMonitorRetryDelayMs))
+    .toEqual([2_000, 4_000, 8_000, 16_000, 32_000, 60_000, 60_000]);
 });

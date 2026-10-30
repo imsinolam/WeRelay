@@ -98,6 +98,7 @@ export type WorkspaceEndpointAdapter =
   | "codebuddy"
   | "reasonix"
   | "pi"
+  | "pi-desktop"
   | "workbuddy"
   | "deepseek"
   | "opencode"

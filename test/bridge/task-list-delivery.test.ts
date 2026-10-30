@@ -38,7 +38,7 @@ test("Pi task lists use the short terminal label and put 使用说明 at the sta
   expect(splitTaskListMessages(formatGlobalTaskList({ snapshot: piSnapshot, startIndex: 0, pageSize: 10 }))[0])
     .toContain("1、[Pi · WXGWork]\n最近的用户问题");
   expect(guide).toStartWith("使用说明：\n[3] 进入任务 3");
-  expect(guide).toContain("[下一页] 再看 10 条");
+  expect(guide).toContain("[下一页] 再看 15 条");
 });
 
 test("legacy terminal pages split the footer, but empty/end pages do not send instructions", () => {

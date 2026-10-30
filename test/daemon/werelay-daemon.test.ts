@@ -712,6 +712,9 @@ describe("werelay-daemon helpers", () => {
     expect(refreshBlock).toContain("this.stateStore.setAdapterUsageOrder");
     expect(source).toContain("this.recordAdapterMessageActivity({");
     expect(adaptersBlock).toContain("orderedAdapters.map");
+    expect(adaptersBlock).toContain("sortAdaptersByRecentMessageActivity(");
+    expect(adaptersBlock).toContain("this.stateStore.getAdapterMessageActivities()");
+    expect(refreshBlock).toContain("mergeAdapterUsageOrder(this.mobileAdapterUsageOrder, DAEMON_ADAPTERS)");
   });
 
   test("keeps the previous Codex catalog when an off-thread refresh times out", () => {
@@ -808,10 +811,10 @@ describe("werelay-daemon helpers", () => {
     expect(detectOpenMobileAdaptersFromProcessList("/usr/local/bin/piano --version").has("pi")).toBe(false);
   });
 
-  test("Pi Desktop belongs to the Pi catalog even without a plain Pi CLI", () => {
-    expect(detectOpenMobileAdaptersFromProcessList("/Applications/PI-Desktop.app/Contents/MacOS/PI-Desktop").has("pi")).toBe(true);
-    expect(detectOpenMobileAdaptersFromProcessList("/Users/test/Applications/PI-Desktop Local.app/Contents/MacOS/PI-Desktop").has("pi")).toBe(true);
-    expect(detectOpenMobileAdaptersFromProcessList("/tmp/PI-Desktop-backup.txt").has("pi")).toBe(false);
+  test("Pi Desktop has its own catalog instead of impersonating a Pi CLI", () => {
+    expect(detectOpenMobileAdaptersFromProcessList("/Applications/PI-Desktop.app/Contents/MacOS/PI-Desktop").has("pi-desktop")).toBe(true);
+    expect(detectOpenMobileAdaptersFromProcessList("/Users/test/Applications/PI-Desktop Local.app/Contents/MacOS/PI-Desktop").has("pi-desktop")).toBe(true);
+    expect(detectOpenMobileAdaptersFromProcessList("/tmp/PI-Desktop-backup.txt").has("pi-desktop")).toBe(false);
   });
 
   test("Pi terminal filtering does not open a fresh companion to read its task list", () => {
@@ -2971,7 +2974,7 @@ describe("werelay-daemon helpers", () => {
     });
 
     expect(output).toBe(
-      "当前：Codex\nCodex：空闲\nClaude Code：待审批\nTClaude：未启动\nGrok CLI：未启动\nCodeBuddy：未启动\nreasonix：未启动\nPi Agent：未启动\nWorkBuddy：未启动\nDSH：未启动\nOpenCode：未启动",
+      "当前：Codex\nCodex：空闲\nClaude Code：待审批\nTClaude：未启动\nGrok CLI：未启动\nCodeBuddy：未启动\nreasonix：未启动\nPi Agent：未启动\nPi Desktop：未启动\nWorkBuddy：未启动\nDSH：未启动\nOpenCode：未启动",
     );
     expect(output).not.toMatch(/cwd|started_at|pid|D:\/work/);
   });

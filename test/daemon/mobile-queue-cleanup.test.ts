@@ -1,19 +1,20 @@
 import { describe, expect, test } from "bun:test";
-import { CODEX_MOBILE_JS } from "../../src/daemon/codex-mobile-web.ts";
+import { CODEX_MOBILE_APP_JS } from "../../src/daemon/codex-mobile-web.ts";
+import { normalizeMobileMessageText } from "../../src/daemon/mobile-message-text.ts";
 
 function queueFunction(name: string, state: Record<string, unknown> = {}) {
-  const start = CODEX_MOBILE_JS.indexOf("  function " + name + "(");
-  const end = CODEX_MOBILE_JS.indexOf("\n  function ", start + 1);
-  const asyncEnd = CODEX_MOBILE_JS.indexOf("\n  async function ", start + 1);
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function " + name + "(");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  function ", start + 1);
+  const asyncEnd = CODEX_MOBILE_APP_JS.indexOf("\n  async function ", start + 1);
   if (start < 0) throw new Error("Missing queue function: " + name);
-  const source = CODEX_MOBILE_JS.slice(start, Math.min(...[end, asyncEnd].filter(index => index >= 0)));
+  const source = CODEX_MOBILE_APP_JS.slice(start, Math.min(...[end, asyncEnd].filter(index => index >= 0)));
   // reconcilePendingQueueState 依赖待发送确认判定与超时常量。
-  const guardStart = CODEX_MOBILE_JS.indexOf("  var PENDING_CONFIRMATION_TIMEOUT_MS");
-  const guardEnd = CODEX_MOBILE_JS.indexOf("\n  function reconcilePendingQueueState", guardStart);
+  const guardStart = CODEX_MOBILE_APP_JS.indexOf("  var PENDING_CONFIRMATION_TIMEOUT_MS");
+  const guardEnd = CODEX_MOBILE_APP_JS.indexOf("\n  function reconcilePendingQueueState", guardStart);
   const guard = guardStart >= 0 && guardEnd > guardStart
-    ? CODEX_MOBILE_JS.slice(guardStart, guardEnd)
+    ? CODEX_MOBILE_APP_JS.slice(guardStart, guardEnd)
     : "";
-  return new Function("state", "effectiveRunSummary", guard + source + "\nreturn " + name + ";")(state, () => null);
+  return new Function("state", "effectiveRunSummary", "normalizeMobileMessageText", guard + source + "\nreturn " + name + ";")(state, () => null, normalizeMobileMessageText);
 }
 
 const pending = { clientId: "client-1", text: "继续检查", status: "queued", imageCount: 0, queuedMessageId: "queue-1", displayInTranscript: false };
@@ -34,6 +35,14 @@ describe("mobile queue cleanup", () => {
     const merge = queueFunction("mergeQueuedMessagesForDisplay");
     expect(merge([native], [pending], [{ role: "user", text: pending.text, turnId: "turn" }],
       { status: "running", turnId: "turn", startedAtMs: 200 })).toEqual([]);
+  });
+
+  test("image wrappers do not keep a consumed native queue next to its real user bubble", () => {
+    const merge = queueFunction("mergeQueuedMessagesForDisplay");
+    const queued = {...native, imageCount: 1};
+    expect(merge([queued], [{...pending, imageCount: 1}],
+      [{role: "user", text: "图片：png1\n继续检查\n[image]\n</image>", turnId: "turn"}],
+      {status: "running", turnId: "turn", startedAtMs: 200})).toEqual([]);
   });
 
   test("delivery receipts remove queue decoration without requiring the native page to be loaded", () => {
