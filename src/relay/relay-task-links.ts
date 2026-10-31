@@ -29,6 +29,12 @@ const MAX_TASK_LINKS = 100_000;
 const REGISTERED_ALIAS_CACHE_TTL_MS = 30 * 24 * 60 * 60_000;
 const REGISTER_RETRY_MIN_MS = 1_000;
 const REGISTER_RETRY_MAX_MS = 30_000;
+const REGISTER_REQUEST_TIMEOUT_MS = 2_000;
+
+export type TaskLinkRegistrationFailure = {
+  reason: "timeout" | "http" | "protocol" | "network";
+  status?: number;
+};
 
 export type WeRelayRelayTaskLinkTarget = {
   adapter: string;
@@ -204,8 +210,9 @@ type PendingRegistration = WeRelayRelayTaskLinkTarget & {
   alias: string;
   retryMs: number;
   timer?: ReturnType<typeof setTimeout>;
-  confirmed: Promise<void>;
-  confirm: () => void;
+  inFlight: boolean;
+  confirmed: Promise<boolean>;
+  confirm: (success: boolean) => void;
 };
 
 export class WeRelayRelayTaskLinkClient {
@@ -213,6 +220,8 @@ export class WeRelayRelayTaskLinkClient {
   private readonly deviceId: string;
   private readonly deviceToken: string;
   private readonly fetchImpl: typeof fetch;
+  private readonly requestTimeoutMs: number;
+  private readonly onRegistrationFailure?: (failure: TaskLinkRegistrationFailure) => void;
   private readonly registered = new BoundedTtlSet<string>({
     maxSize: 20_000,
     ttlMs: REGISTERED_ALIAS_CACHE_TTL_MS,
@@ -225,11 +234,18 @@ export class WeRelayRelayTaskLinkClient {
     deviceId: string;
     deviceToken: string;
     fetchImpl?: typeof fetch;
+    requestTimeoutMs?: number;
+    onRegistrationFailure?: (failure: TaskLinkRegistrationFailure) => void;
   }) {
     this.relayUrl = normalizeWeRelayRelayBaseUrl(options.relayUrl);
     this.deviceId = options.deviceId.trim();
     this.deviceToken = options.deviceToken.trim();
     this.fetchImpl = options.fetchImpl ?? fetch;
+    this.requestTimeoutMs = options.requestTimeoutMs ?? REGISTER_REQUEST_TIMEOUT_MS;
+    if (!Number.isFinite(this.requestTimeoutMs) || this.requestTimeoutMs <= 0) {
+      throw new Error("短链接注册超时必须为正数。");
+    }
+    this.onRegistrationFailure = options.onRegistrationFailure;
   }
 
   buildTaskUrl(
@@ -257,6 +273,9 @@ export class WeRelayRelayTaskLinkClient {
     searchParams: URLSearchParams,
     options: { timeoutMs?: number } = {},
   ): Promise<string> {
+    if (this.abortController.signal.aborted) {
+      throw new Error("短链接暂时无法生成，请稍后重试。");
+    }
     const target = normalizeTarget({ adapter, threadId });
     const alias = createWeRelayRelayTaskLinkAlias(
       this.deviceToken,
@@ -264,7 +283,9 @@ export class WeRelayRelayTaskLinkClient {
       target.threadId,
     );
     if (!this.registered.has(alias)) {
-      const registration = this.ensureRegistered(alias, target);
+      // An explicit send/list request must not wait behind a 30-second
+      // background backoff after connectivity has already recovered.
+      const registration = this.ensureRegistered(alias, target, true);
       const timeoutMs = Math.max(1, options.timeoutMs ?? 5_000);
       let timer: ReturnType<typeof setTimeout> | undefined;
       await Promise.race([
@@ -336,6 +357,7 @@ export class WeRelayRelayTaskLinkClient {
     this.abortController.abort();
     for (const registration of this.pending.values()) {
       if (registration.timer) clearTimeout(registration.timer);
+      registration.confirm(false);
     }
     this.pending.clear();
   }
@@ -343,16 +365,28 @@ export class WeRelayRelayTaskLinkClient {
   private ensureRegistered(
     alias: string,
     target: WeRelayRelayTaskLinkTarget,
+    urgent = false,
   ): PendingRegistration | null {
+    if (this.abortController.signal.aborted) {
+      throw new Error("短链接暂时无法生成，请稍后重试。");
+    }
     if (this.registered.has(alias)) return null;
     const existing = this.pending.get(alias);
-    if (existing) return existing;
-    let confirm: () => void = () => {};
-    const confirmed = new Promise<void>((resolve) => { confirm = resolve; });
+    if (existing) {
+      if (urgent && existing.timer && !existing.inFlight) {
+        clearTimeout(existing.timer);
+        existing.timer = undefined;
+        void this.register(existing);
+      }
+      return existing;
+    }
+    let confirm: (success: boolean) => void = () => {};
+    const confirmed = new Promise<boolean>((resolve) => { confirm = resolve; });
     const registration: PendingRegistration = {
       alias,
       ...target,
       retryMs: REGISTER_RETRY_MIN_MS,
+      inFlight: false,
       confirmed,
       confirm,
     };
@@ -362,34 +396,65 @@ export class WeRelayRelayTaskLinkClient {
   }
 
   private async register(registration: PendingRegistration): Promise<void> {
-    if (this.abortController.signal.aborted) return;
+    if (this.abortController.signal.aborted || registration.inFlight) return;
+    registration.inFlight = true;
+    const requestController = new AbortController();
+    const stop = () => requestController.abort();
+    this.abortController.signal.addEventListener("abort", stop, { once: true });
+    let failure: TaskLinkRegistrationFailure = { reason: "network" };
+    const timeout = setTimeout(() => {
+      failure = { reason: "timeout" };
+      requestController.abort();
+    }, this.requestTimeoutMs);
+    // Race as well as abort: custom transports may ignore AbortSignal, and
+    // reading an acknowledgement body can stall after headers have arrived.
+    let cancel: () => void = () => {};
+    const cancelled = new Promise<never>((_, reject) => {
+      cancel = () => reject(new Error("registration aborted"));
+      requestController.signal.addEventListener("abort", cancel, { once: true });
+    });
     try {
-      const response = await this.fetchImpl(
-        `${this.relayUrl}${WERELAY_RELAY_TASK_LINK_REGISTER_PATH}`,
-        {
-          method: "POST",
-          headers: {
-            authorization: `Bearer ${this.deviceToken}`,
-            "content-type": "application/json",
-            "x-werelay-device-id": this.deviceId,
+      const attempt = async () => {
+        const response = await this.fetchImpl(
+          `${this.relayUrl}${WERELAY_RELAY_TASK_LINK_REGISTER_PATH}`,
+          {
+            method: "POST",
+            headers: {
+              authorization: `Bearer ${this.deviceToken}`,
+              "content-type": "application/json",
+              "x-werelay-device-id": this.deviceId,
+            },
+            body: JSON.stringify({
+              alias: registration.alias,
+              adapter: registration.adapter,
+              threadId: registration.threadId,
+            }),
+            signal: requestController.signal,
+            redirect: "error",
           },
-          body: JSON.stringify({
-            alias: registration.alias,
-            adapter: registration.adapter,
-            threadId: registration.threadId,
-          }),
-          signal: this.abortController.signal,
-        },
-      );
-      if (!response.ok) {
-        throw new Error(`Relay 返回 ${response.status}`);
-      }
+        );
+        if (requestController.signal.aborted || !response.ok) {
+          if (!requestController.signal.aborted) failure = { reason: "http", status: response.status };
+          void response.body?.cancel().catch(() => {});
+          throw new Error("Relay 短链接注册未完成。");
+        }
+        failure = { reason: "protocol" };
+        const acknowledgement: unknown = await response.json();
+        if (!acknowledgement || typeof acknowledgement !== "object" ||
+            !("ok" in acknowledgement) || acknowledgement.ok !== true) {
+          throw new Error("Relay 没有确认短链接注册。");
+        }
+      };
+      await Promise.race([attempt(), cancelled]);
+      if (this.abortController.signal.aborted || this.pending.get(registration.alias) !== registration) return;
       this.pending.delete(registration.alias);
       this.registered.add(registration.alias);
-      registration.confirm();
+      registration.confirm(true);
       return;
     } catch {
       if (this.abortController.signal.aborted) return;
+      // Never expose response bodies, URLs, device IDs, aliases or task IDs.
+      try { this.onRegistrationFailure?.(failure); } catch { /* diagnostics are non-fatal */ }
       registration.timer = setTimeout(() => {
         registration.timer = undefined;
         void this.register(registration);
@@ -399,6 +464,11 @@ export class WeRelayRelayTaskLinkClient {
         REGISTER_RETRY_MAX_MS,
         registration.retryMs * 2,
       );
+    } finally {
+      clearTimeout(timeout);
+      this.abortController.signal.removeEventListener("abort", stop);
+      requestController.signal.removeEventListener("abort", cancel);
+      registration.inFlight = false;
     }
   }
 }

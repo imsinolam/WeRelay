@@ -2,8 +2,9 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { piDesktopConnectorPaths } from "./pi-desktop-plugin.ts";
 
-export const PI_DESKTOP_UNAVAILABLE = "Pi Desktop 控制接口不可用。请在电脑端开启本机 MCP 控制后重试；WeRelay 不会重启桌面端、启动 Pi CLI 或创建替代任务。";
+export const PI_DESKTOP_UNAVAILABLE = "Pi Desktop 尚未接入。请在电脑运行 werelay-pi-desktop-enable，按提示在 Pi Desktop 插件管理中安装并授权一次后重试；已有本机 MCP 控制接口也可直接连接。WeRelay 不会重启桌面端、启动 Pi CLI 或创建替代任务。";
 const PI_DESKTOP_WINDOWS_UNAVAILABLE = "Pi Desktop 在 Windows 上暂不可接入：尚不能可靠验证本机凭据文件的访问权限。请在桌面原窗口继续操作；WeRelay 不会重启桌面端、放宽权限检查、启动 Pi CLI 或创建替代任务。";
 export class PiDesktopUncertainError extends Error {}
 export type PiDesktopEndpoint = { url: string; token: string; pid: number };
@@ -49,6 +50,7 @@ export class PiDesktopClient implements PiDesktopControl {
   private nextId = 0;
   constructor(private readonly options: {
     endpointFile?: string;
+    endpointFiles?: string[];
     timeoutMs?: number;
     /** Protocol-test seam; production always uses the secure file reader. */
     readEndpoint?: () => PiDesktopEndpoint;
@@ -91,9 +93,16 @@ export class PiDesktopClient implements PiDesktopControl {
   private async connect(): Promise<void> {
     if (this.connecting) return this.connecting;
     this.connecting = (async () => {
-      const endpoint = this.options.readEndpoint
-        ? this.options.readEndpoint()
-        : readPiDesktopEndpoint(this.options.endpointFile);
+      let endpoint: PiDesktopEndpoint | undefined;
+      if (this.options.readEndpoint) endpoint = this.options.readEndpoint();
+      else {
+        const files = this.options.endpointFiles ?? (this.options.endpointFile ? [this.options.endpointFile]
+          : [piDesktopConnectorPaths().endpointFile, defaultPiDesktopEndpointFile()]);
+        for (const file of files) {
+          try { endpoint = readPiDesktopEndpoint(file); break; } catch { /* Try only the other known private local endpoint. */ }
+        }
+      }
+      if (!endpoint) throw new Error(process.platform === "win32" ? PI_DESKTOP_WINDOWS_UNAVAILABLE : PI_DESKTOP_UNAVAILABLE);
       if (this.session && this.endpoint?.url === endpoint.url && this.endpoint.token === endpoint.token && this.endpoint.pid === endpoint.pid) return;
       this.session = undefined;
       const response = await this.request(endpoint, { jsonrpc: "2.0", id: ++this.nextId, method: "initialize", params: {
@@ -130,6 +139,9 @@ export class PiDesktopClient implements PiDesktopControl {
       throw new PiDesktopUncertainError("Pi Desktop 未返回有效的操作确认，请检查原任务，未自动重试。");
     }
     if (envelope.error || result.isError) {
+      // A native operation can fail after enqueueing the prompt. Without an
+      // explicit rejection receipt, never release its watch and replay it.
+      if (operation === "agent/prompt") throw new PiDesktopUncertainError("Pi Desktop 未确认收到消息，请检查原任务；未自动重试，也未切换或新建替代任务。");
       throw new Error(`Pi Desktop 未能确认 ${operation} 操作，请在桌面端检查；未切换或新建替代任务。`);
     }
     return value.result;

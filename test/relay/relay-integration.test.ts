@@ -22,6 +22,7 @@ import {
 } from "../../src/relay/relay-server.ts";
 import {
   createWeRelayRelayTaskLinkAlias,
+  WeRelayRelayTaskLinkClient,
   WERELAY_RELAY_TASK_LINK_REGISTER_PATH,
 } from "../../src/relay/relay-task-links.ts";
 
@@ -100,6 +101,39 @@ async function waitUntilOnline(baseUrl: string): Promise<void> {
 }
 
 describe("WeRelay application relay", () => {
+  test("the short-link client retries a real aborted HTTP registration and resolves the same task", async () => {
+    const deviceId = "short-link-recovery";
+    const deviceToken = "short-link-test-secret";
+    const relay = await startWeRelayRelayServer({
+      host: "127.0.0.1", port: 0, deviceId, deviceToken,
+    });
+    closers.push(() => relay.close());
+    let calls = 0;
+    let firstSignal: AbortSignal | null | undefined;
+    const client = new WeRelayRelayTaskLinkClient({
+      relayUrl: relay.baseUrl, deviceId, deviceToken, requestTimeoutMs: 100,
+      fetchImpl: async (url, init) => {
+        calls++;
+        if (calls === 1) {
+          firstSignal = init?.signal;
+          return await new Promise<Response>((_, reject) => {
+            firstSignal?.addEventListener("abort", () => reject(new Error("simulated connection interruption")), { once: true });
+          });
+        }
+        return await fetch(url, init);
+      },
+    });
+    closers.push(() => client.close());
+    const url = await client.buildConfirmedTaskUrl("real-task", "deepseek", new URLSearchParams(), { timeoutMs: 3_000 });
+    expect(firstSignal?.aborted).toBe(true);
+    expect(calls).toBe(2);
+    const response = await fetch(url, { redirect: "manual" });
+    expect(response.status).toBe(302);
+    const target = new URL(response.headers.get("location")!, relay.baseUrl);
+    expect(target.searchParams.get("adapter")).toBe("deepseek");
+    expect(target.searchParams.get("task")).toBe("real-task");
+  });
+
   test("serves versioned organizer assets without exposing private session data", async () => {
     const relay = await startWeRelayRelayServer({
       host: "127.0.0.1", port: 0, deviceId: "organizer-device", deviceToken: "organizer-test-token",
@@ -218,6 +252,7 @@ describe("WeRelay application relay", () => {
     const sessionToken = `v1.${Date.now() + 60_000}.nonce.signature`;
     let version = 1;
     const requestCounts = new Map<string, number>();
+    let refreshedTasksAcknowledged = false;
     const localServer = http.createServer((request, response) => {
       const requestPath = request.url ?? "/";
       const url = new URL(requestPath, "http://werelay.local");
@@ -304,6 +339,21 @@ describe("WeRelay application relay", () => {
       localBaseUrl: `http://127.0.0.1:${localPort}`,
       localPrewarmToken: "local-prewarm-secret",
       retryDelayMs: 5,
+      fetchImpl: async (input, init) => {
+        const response = await fetch(input, init);
+        if (String(input).endsWith(WERELAY_RELAY_RESPONSE_PATH) && response.ok && typeof init?.body === "string") {
+          const result = JSON.parse(init.body) as { bodyBase64?: string };
+          if (result.bodyBase64) {
+            const payload = JSON.parse(Buffer.from(result.bodyBase64, "base64").toString("utf8")) as {
+              tasks?: Array<{ title?: string; adapter?: string }>;
+            };
+            if (payload.tasks?.[0]?.title === "任务列表 2" && !payload.tasks[0].adapter) {
+              refreshedTasksAcknowledged = true;
+            }
+          }
+        }
+        return response;
+      },
     });
     closers.push(() => client.close());
     await waitUntilOnline(relay.baseUrl);
@@ -341,8 +391,10 @@ describe("WeRelay application relay", () => {
     const refreshDeadline = Date.now() + 1_000;
     while (
       Date.now() < refreshDeadline &&
-      (requestCounts.get(tasksPath) ?? 0) <= initialTaskRequests
+      !refreshedTasksAcknowledged
     ) await Bun.sleep(10);
+    // A local request starting does not mean Relay has cached its response yet.
+    expect(refreshedTasksAcknowledged).toBe(true);
     expect(requestCounts.get(tasksPath)).toBe(initialTaskRequests + 1);
     expect(requestCounts.get(boardPath)).toBe(initialBoardRequests);
     expect(requestCounts.get(messagesPath)).toBe(initialMessageRequests);

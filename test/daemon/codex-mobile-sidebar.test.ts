@@ -7,6 +7,7 @@ function harness(mobile = false) {
   let open = false;
   let known = true;
   let renders = 0;
+  let agentReveals = 0;
   let top = 900;
   const button = {isConnected: true, getBoundingClientRect: () => ({top, bottom: top + 40, height: 40})};
   state.taskNodes.target = button;
@@ -14,9 +15,9 @@ function harness(mobile = false) {
   const searchInput = {value: ""};
   const start = CODEX_MOBILE_APP_JS.indexOf("  function revealCurrentTaskInSidebar()");
   const end = CODEX_MOBILE_APP_JS.indexOf("  function createTaskButton(", start);
-  const create = new Function("state", "app", "window", "taskById", "searchInput", "taskGroupKey", "renderTasks", "requestAnimationFrame", "taskList", "closeTaskContextMenu", `${CODEX_MOBILE_APP_JS.slice(start, end)}\nreturn {revealCurrentTaskInSidebar, openSidebar, closeSidebar};`);
-  const api = create(state, {classList: {contains: () => open, add: () => {open = true;}, remove: () => {open = false;}}}, {matchMedia: () => ({matches: mobile})}, () => known ? {title: "目标任务", projectName: "项目"} : null, searchInput, () => "project", () => {renders++;}, (f: () => void) => frames.push(f), taskList, () => {}) as {revealCurrentTaskInSidebar: () => void; openSidebar: () => void};
-  return {state, taskList, searchInput, api, frames, renders: () => renders, setKnown: (v: boolean) => {known = v;}, setTop: (v: number) => {top = v;}, flush: () => {for (const f of frames.splice(0)) f();}};
+  const create = new Function("state", "app", "window", "taskById", "searchInput", "taskGroupKey", "renderTasks", "requestAnimationFrame", "taskList", "closeTaskContextMenu", "revealActiveAdapter", `${CODEX_MOBILE_APP_JS.slice(start, end)}\nreturn {revealCurrentTaskInSidebar, openSidebar, closeSidebar};`);
+  const api = create(state, {classList: {contains: () => open, add: () => {open = true;}, remove: () => {open = false;}}}, {matchMedia: () => ({matches: mobile})}, () => known ? {title: "目标任务", projectName: "项目"} : null, searchInput, () => "project", () => {renders++;}, (f: () => void) => frames.push(f), taskList, () => {}, () => {agentReveals++;}) as {revealCurrentTaskInSidebar: () => void; openSidebar: () => void};
+  return {state, taskList, searchInput, api, frames, renders: () => renders, agentReveals: () => agentReveals, setKnown: (v: boolean) => {known = v;}, setTop: (v: number) => {top = v;}, flush: () => {for (const f of frames.splice(0)) f();}};
 }
 
 test("entering a task locates its desktop sidebar row without requiring an open drawer", () => {
@@ -29,6 +30,7 @@ test("mobile defers until the drawer opens; background renders do not keep pulli
   expect(h.taskList.scrollTop).toBe(0);
   expect(h.state.revealCurrentTaskOnSidebarOpen).toBe(true);
   h.api.openSidebar(); h.flush();
+  expect(h.agentReveals()).toBe(1);
   expect(h.taskList.scrollTop).toBeGreaterThan(0);
   h.taskList.scrollTop = 25; h.api.revealCurrentTaskInSidebar(); h.flush();
   expect(h.taskList.scrollTop).toBe(25);

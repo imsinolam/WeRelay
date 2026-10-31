@@ -38,6 +38,7 @@ import type { SessionOrganizerSnapshot } from "./session-organizer.ts";
 import { RemoteAccessError, type MobileRemoteAccessView } from "./mobile-remote-access.ts";
 import type { MobileProviderSettingsEntry } from "./mobile-provider-settings.ts";
 import type { MobileMessageOutboxStatus } from "./mobile-message-outbox.ts";
+import type { MessageRecords, MessageRecordPolicy } from "./message-records.ts";
 import {
   CODEX_MOBILE_CSS,
   CODEX_MOBILE_HTML,
@@ -82,6 +83,16 @@ import {
   decodeWeRelayTaskShortCode,
   encodeWeRelayTaskShortCode,
 } from "../relay/relay-task-short-code.ts";
+
+// A fixed entry needs no per-task alias registration and never selects an Agent task.
+export function resolveCodexMobileBoardRedirect(searchParams: URLSearchParams): string {
+  const query = new URLSearchParams({ view: "board", appv: CODEX_MOBILE_ASSET_VERSION });
+  for (const key of ["setup", "key"] as const) {
+    const value = searchParams.get(key)?.trim();
+    if (value) query.set(key, value);
+  }
+  return `/?${query}`;
+}
 
 export function resolveCodexMobileTaskShortRedirect(
   pathname: string,
@@ -441,6 +452,10 @@ export type StartCodexMobileServerOptions = {
   listAdapters?: () => Promise<CodexMobileAdapterList>;
   switchAdapter?: (adapter: string) => Promise<CodexMobileAdapterSwitchResult>;
   readSettings?: () => Promise<CodexMobileSettings>;
+  readMessageRecords?: (query: Parameters<MessageRecords["query"]>[0], exporting?: boolean) => ReturnType<MessageRecords["query"]> | ReturnType<MessageRecords["export"]>;
+  changeMessageRecords?: (patch: Partial<MessageRecordPolicy>) => ReturnType<MessageRecords["query"]>;
+  clearMessageRecords?: () => ReturnType<MessageRecords["query"]>;
+  recordRejectedMessage?: (input: { clientId: string; adapter?: string; threadId: string; text: string; imageCount: number; error: string }) => void;
   updateSettings?: (patch: {
     strictApproval?: boolean;
   }) => Promise<CodexMobileSettings>;
@@ -450,6 +465,19 @@ export type StartCodexMobileServerOptions = {
   ) => Promise<CodexMobileProviderInstallResult>;
   listTaskBoard?: () => Promise<CodexMobileTaskBoard>;
   listSessionOrganizer?: () => Promise<SessionOrganizerSnapshot>;
+  /**
+   * Stores a vendor push token supplied by the app. Optional: when absent the
+   * push endpoints report 409 and the app keeps its foreground monitor.
+   */
+  registerPushToken?: (input: {
+    provider: string;
+    token: string;
+    appId?: string;
+    deviceId?: string;
+    origin: string;
+  }) => Promise<{ ok: true }>;
+  /** Clears tokens for this origin, used when the app signs out or switches host. */
+  clearPushTokens?: (input: { origin: string }) => Promise<{ cleared: number }>;
   listTasks: (adapter?: string) => Promise<CodexMobileTask[]>;
   createTask?: (
     adapter?: string,
@@ -566,6 +594,7 @@ export type CodexMobileServerHandle = {
   port: number;
   lanAddress: string;
   buildTaskUrl: (threadId: string, adapter?: string) => string;
+  buildBoardUrl: () => string;
   updateRemoteAccess: (publicBaseUrl: string | undefined, prewarmToken?: string) => void;
   close: () => Promise<void>;
 };
@@ -840,6 +869,26 @@ function requestPublicClientAddress(request: IncomingMessage): string | null {
     return null;
   }
   return normalizeIpAddress(request.headers["x-real-ip"] as string);
+}
+
+/**
+ * Server origin for the request. Push tokens are scoped by origin so a phone
+ * cannot keep receiving another server's task notifications.
+ */
+function requestOrigin(request: IncomingMessage, publicBaseUrl: string | null): string {
+  if (isTrustedReverseProxyRequest(request) && request.headers["x-werelay-relay"] === "1") {
+    if (!publicBaseUrl) throw new HttpError(409, "公网推送地址尚未配置。");
+    return new URL(publicBaseUrl).origin;
+  }
+  const scheme = requestUsesHttps(request) ? "https" : "http";
+  const forwardedHost = isTrustedReverseProxyRequest(request)
+    ? request.headers["x-forwarded-host"]
+    : undefined;
+  const rawHost = typeof forwardedHost === "string"
+    ? forwardedHost.split(",", 1)[0]?.trim()
+    : request.headers.host;
+  const host = rawHost && /^[A-Za-z0-9.\-:[\]]+$/.test(rawHost) ? rawHost : "localhost";
+  return `${scheme}://${host}`;
 }
 
 function requestClientKey(request: IncomingMessage): string {
@@ -1374,6 +1423,16 @@ function createRequestHandler(
         sendJson(response, 200, { ok: true });
         return;
       }
+      if (method === "GET" && url.pathname === "/b") {
+        response.writeHead(302, {
+          location: resolveCodexMobileBoardRedirect(url.searchParams),
+          "cache-control": "no-store",
+          "x-content-type-options": "nosniff",
+          "referrer-policy": "no-referrer",
+        });
+        response.end();
+        return;
+      }
       if (method === "GET" && url.pathname.startsWith("/t/")) {
         const target = resolveCodexMobileTaskShortRedirect(url.pathname, url.searchParams);
         if (!target) {
@@ -1679,6 +1738,43 @@ function createRequestHandler(
         throw new HttpError(405, "不支持这种设置操作。");
       }
 
+      if (url.pathname === "/api/settings/message-records" || url.pathname === "/api/settings/message-records/export") {
+        if (!options.readMessageRecords) throw new HttpError(409, "当前电脑尚不支持消息记录，请更新电脑端 WeRelay。");
+        try {
+          if (method === "GET") {
+            const query = Object.fromEntries(["source", "adapter", "project", "status", "statusGroup", "kind", "from", "to", "search"].map(key => [key, url.searchParams.get(key) || undefined]));
+            const number = (key: string) => {
+              const raw = url.searchParams.get(key);
+              if (raw === null) return undefined;
+              if (!/^\d{1,5}$/.test(raw)) throw new Error("分页参数无效。");
+              return Number(raw);
+            };
+            const exporting = url.pathname.endsWith("/export");
+            sendJson(response, 200, options.readMessageRecords({ ...query, offset: number("offset"), limit: number("limit") }, exporting),
+              exporting ? { "content-disposition": 'attachment; filename="werelay-message-records.json"' } : {});
+            return;
+          }
+          if (method === "POST" && !url.pathname.endsWith("/export")) {
+            if (!request.headers["content-type"]?.includes("application/json")) throw new HttpError(415, "请使用 JSON 提交记录设置。");
+            const body = await readJsonBody(request, 4096);
+            if (body.action === "clear") {
+              if (!options.clearMessageRecords) throw new HttpError(409, "暂不支持清空记录。");
+              sendJson(response, 200, options.clearMessageRecords()); return;
+            }
+            if (!options.changeMessageRecords) throw new HttpError(409, "暂不支持修改记录设置。");
+            const patch: Partial<MessageRecordPolicy> = {};
+            for (const key of ["enabled", "textMode", "retentionDays", "maxRecords"] as const) {
+              if (key in body) Object.assign(patch, { [key]: body[key] });
+            }
+            sendJson(response, 200, options.changeMessageRecords(patch)); return;
+          }
+          throw new HttpError(405, "不支持这种记录操作。");
+        } catch (error) {
+          if (error instanceof HttpError) throw error;
+          throw new HttpError(400, error instanceof Error ? error.message : "消息记录请求无效。");
+        }
+      }
+
       if (method === "GET" && url.pathname === "/api/settings") {
         if (!options.readSettings) {
           throw new HttpError(409, "当前连接暂不支持读取设置。");
@@ -1735,6 +1831,43 @@ function createRequestHandler(
           throw new HttpError(409, "当前连接暂不支持任务看板。");
         }
         sendJson(response, 200, await options.listTaskBoard());
+        return;
+      }
+      // The app reports its vendor push token after login; the token identifies
+      // the install, so it is scoped to this server origin.
+      if (method === "POST" && url.pathname === "/api/push/registration") {
+        if (!options.registerPushToken) {
+          throw new HttpError(409, "当前连接暂不支持系统推送。");
+        }
+        const body = await readJsonBody(request, 4_096);
+        const provider = typeof body.provider === "string" ? body.provider.trim() : "";
+        const token = typeof body.token === "string" ? body.token.trim() : "";
+        if (provider !== "vivo") {
+          throw new HttpError(400, "暂不支持这个推送通道。");
+        }
+        if (!token || token.length > 512) {
+          throw new HttpError(400, "推送标识无效。");
+        }
+        const result = await options.registerPushToken({
+          provider,
+          token,
+          appId: typeof body.appId === "string" ? body.appId.trim() : undefined,
+          deviceId: typeof body.deviceId === "string" ? body.deviceId.trim() : undefined,
+          origin: requestOrigin(request, network.publicBaseUrl),
+        });
+        sendJson(response, 200, result);
+        return;
+      }
+
+      if (method === "DELETE" && url.pathname === "/api/push/registration") {
+        if (!options.clearPushTokens) {
+          throw new HttpError(409, "当前连接暂不支持系统推送。");
+        }
+        sendJson(
+          response,
+          200,
+          await options.clearPushTokens({ origin: requestOrigin(request, network.publicBaseUrl) }),
+        );
         return;
       }
       if (method === "GET" && url.pathname === "/api/session-organizer") {
@@ -2124,6 +2257,8 @@ function createRequestHandler(
               requestedAdapter,
             );
           } catch (error) {
+            try { options.recordRejectedMessage?.({ clientId, adapter: requestedAdapter, threadId, text, imageCount: images.length,
+              error: error instanceof Error ? error.message : "消息发送失败。" }); } catch { /* Diagnostics must not replace the original failure. */ }
             throw new HttpError(409, error instanceof Error ? error.message : "消息发送失败。");
           }
           sendJson(response, 202, { ok: true, ...result });
@@ -2354,6 +2489,16 @@ export async function startCodexMobileServer(
       publicBaseUrl = normalizePublicBaseUrl(nextUrl);
       networkContext.publicBaseUrl = publicBaseUrl;
       options.relayPrewarmToken = prewarmToken;
+    },
+    buildBoardUrl: () => {
+      const baseUrl = publicBaseUrl ?? `http://${lanAddress}:${port}`;
+      const query = new URLSearchParams();
+      if (!options.authStore) {
+        query.set("key", options.accessToken);
+      } else if (!options.authStore.isConfigured()) {
+        query.set("setup", options.accessToken);
+      }
+      return `${baseUrl}/b${query.size ? `?${query}` : ""}`;
     },
     buildTaskUrl: (threadId, adapter) => {
       const selector = threadId.trim();

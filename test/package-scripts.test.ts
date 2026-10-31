@@ -12,6 +12,18 @@ const packageJson = JSON.parse(
 };
 
 describe("package quality scripts", () => {
+  test("ships the Pi Desktop connector setup command without changing the Pi Agent entry", () => {
+    const root = path.resolve(import.meta.dir, "..");
+    const metadata = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
+    const lock = JSON.parse(fs.readFileSync(path.join(root, "package-lock.json"), "utf8"));
+    expect(metadata.bin["werelay-pi-desktop-enable"]).toBe("bin/werelay-pi-desktop-enable.mjs");
+    expect(lock.packages[""].bin["werelay-pi-desktop-enable"]).toBe(metadata.bin["werelay-pi-desktop-enable"]);
+    expect(metadata.bin["werelay-pi-enable"]).toBe("bin/werelay-pi-enable.mjs");
+    const source = fs.readFileSync(path.join(root, metadata.bin["werelay-pi-desktop-enable"]), "utf8");
+    expect(source.startsWith("#!/usr/bin/env node\n")).toBe(true);
+    expect(source).not.toContain("\r");
+  });
+
   test("uses Bun dependency updates for the committed Bun lockfile", () => {
     const config = fs.readFileSync(
       path.resolve(import.meta.dir, "..", ".github/dependabot.yml"),

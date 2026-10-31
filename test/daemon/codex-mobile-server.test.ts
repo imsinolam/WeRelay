@@ -422,11 +422,17 @@ describe("mobile terminal switcher status", () => {
     expect(label("error")).toBe("异常");
   });
 
-  test("keeps both menu columns on one line in a wider mobile menu", () => {
-    expect(CODEX_MOBILE_CSS).toContain("width: min(300px, calc(100vw - 16px))");
-    expect(CODEX_MOBILE_CSS).toContain(".adapter-menu-item > span:first-child");
-    expect(CODEX_MOBILE_CSS).toContain(".adapter-menu-state { flex: 0 0 auto; white-space: nowrap;");
-    expect(CODEX_MOBILE_JS).toContain("status.hidden = !status.textContent;");
+  test("moves Agent choices above the task views with a single horizontally scrollable icon row", () => {
+    const strip = CODEX_MOBILE_HTML.indexOf('id="adapter-menu"');
+    expect(strip).toBeGreaterThan(CODEX_MOBILE_HTML.indexOf('id="task-board-open"'));
+    expect(strip).toBeLessThan(CODEX_MOBILE_HTML.indexOf('class="task-view-switch"'));
+    expect(CODEX_MOBILE_HTML).toContain('aria-label="选择 Agent"');
+    expect(CODEX_MOBILE_CSS).toContain("overflow-x: auto; overflow-y: hidden;");
+    expect(CODEX_MOBILE_CSS).toContain("flex-wrap: nowrap;");
+    expect(CODEX_MOBILE_CSS).toContain(".adapter-menu-item.is-active");
+    expect(CODEX_MOBILE_CSS).toContain(".adapter-menu-item:focus-visible");
+    expect(CODEX_MOBILE_JS).toContain('button.setAttribute("aria-pressed", active ? "true" : "false")');
+    expect(CODEX_MOBILE_JS).toContain("AGENT_BRAND_ICON_DATA[adapter.id] || AGENT_BRAND_ICON_DATA.shell");
   });
 
   test("shows a breathing green dot for busy terminals and uses the full Harness name", () => {
@@ -554,7 +560,7 @@ describe("mobile boot connection states", () => {
     const positions = [
       ".boot-wordmark",
       ".auth-wordmark",
-      ".workspace-product",
+      ".sidebar-brand",
       ".empty-wordmark",
     ];
     for (const className of positions) {
@@ -5630,13 +5636,10 @@ describe("Codex mobile server", () => {
       expect(html).toContain("从手机继续任务");
       expect(html).toContain('id="boot-screen" aria-label="正在打开 WeRelay"');
       expect(html).not.toContain('class="brand-title"');
-      expect(html).toContain('id="workspace-switcher"');
-      expect(html).toContain('class="workspace-product brand-logo"');
-      expect(html.indexOf('id="active-adapter-label"')).toBeLessThan(html.indexOf('class="workspace-product brand-logo"'));
-      expect(html).toContain('--brand-logo-width: 64px');
-      expect(CODEX_MOBILE_CSS).toContain('.workspace-adapter {');
-      expect(CODEX_MOBILE_CSS).toContain('font-size: 19px; font-weight: 700;');
-      expect(html).toContain('class="workspace-divider" aria-hidden="true">·</span>');
+      expect(html).not.toContain('id="workspace-switcher"');
+      expect(html).not.toContain('id="active-adapter-label"');
+      expect(html).toContain('class="sidebar-brand brand-logo"');
+      expect(html).toContain('--brand-logo-width: 92px');
       expect(html).toContain('id="adapter-menu"');
       expect(html).not.toContain('id="composer-status"');
       expect(html).toContain('id="composer-queue"');
@@ -5647,11 +5650,12 @@ describe("Codex mobile server", () => {
       expect(html).toContain('id="task-view-recent"');
       expect(html).toContain("当前连接未启用 HTTPS");
       expect(html).not.toContain('class="product-connection"');
-      expect(html).toContain('id="workspace-menu"');
+      expect(html).not.toContain('id="workspace-menu"');
       expect(html).not.toContain('id="product-menu-button"');
       expect(html).not.toContain('id="adapter-switcher"');
-      expect(html).toContain('class="workspace-menu-divider"');
-      expect(html).toContain('class="workspace-menu-item" href="/about"');
+      expect(html).not.toContain('class="workspace-menu-divider"');
+      expect(html).toContain('class="settings-utilities" aria-label="应用操作"');
+      expect(html).toContain('<a href="/about">项目说明</a>');
       expect(html).not.toContain('class="sidebar-foot"');
       expect(html).not.toContain('id="jump-latest"');
       expect(html).toContain('id="previous-user-message"');
@@ -5700,16 +5704,13 @@ describe("Codex mobile server", () => {
       expect(html).toContain('id="task-board-body"');
       const sidebarHeadStart = html.indexOf('<div class="sidebar-head">');
       const sidebarHeadEnd = html.indexOf("</div>\n      <nav class=\"sidebar-primary-nav\"", sidebarHeadStart);
-      const workspaceSwitcherIndex = html.indexOf('id="workspace-switcher"');
-      const topbarCopyStart = html.indexOf('<div class="topbar-copy">');
-      const topbarCopyEnd = html.indexOf("</div>\n        <div class=\"topbar-actions\">", topbarCopyStart);
-      expect(workspaceSwitcherIndex).toBeGreaterThan(sidebarHeadStart);
-      expect(workspaceSwitcherIndex).toBeLessThan(sidebarHeadEnd);
-      expect(html.slice(topbarCopyStart, topbarCopyEnd)).not.toContain('id="workspace-switcher"');
-      const sidebarEnd = html.indexOf("</aside>", sidebarHeadStart);
-      const workspaceMenuIndex = html.indexOf('id="workspace-menu"');
-      expect(workspaceMenuIndex).toBeGreaterThan(sidebarEnd);
-      expect(workspaceMenuIndex).toBeLessThan(html.indexOf('<main class="main-panel">'));
+      const brandIndex = html.indexOf('class="sidebar-brand brand-logo"');
+      expect(brandIndex).toBeGreaterThan(sidebarHeadStart);
+      expect(brandIndex).toBeLessThan(sidebarHeadEnd);
+      const settingsStart = html.indexOf('id="settings-view"');
+      const settingsEnd = html.indexOf('<section class="messages"', settingsStart);
+      expect(html.indexOf('id="auth-logout"')).toBeGreaterThan(settingsStart);
+      expect(html.indexOf('id="auth-logout"')).toBeLessThan(settingsEnd);
 
       const aboutResponse = await fetch(`${root}/about`);
       const aboutHtml = await aboutResponse.text();
@@ -5813,9 +5814,8 @@ describe("Codex mobile server", () => {
       );
       expect(responsePendingRule).not.toContain("border");
       expect(css).toContain(".run-progress-item {");
-      expect(css).toContain(".workspace-switch-progress");
-      expect(css).toContain(".workspace-menu { position: fixed;");
-      expect(css).toContain("max-height: min(70vh, 520px);");
+      expect(css).toContain(".adapter-menu-item.is-switching .adapter-menu-icon::after");
+      expect(css).not.toContain(".workspace-menu { position: fixed;");
       expect(css).toContain("overflow-y: auto;");
       expect(css).toContain(".queued-followup-status");
       expect(css).toContain("calc(min(100%, var(--thread-max)) - 2 * var(--composer-radius))");
@@ -5847,7 +5847,7 @@ describe("Codex mobile server", () => {
       expect(js).toContain('openTaskRenameDialog');
       expect(js).toContain('closeTaskContextMenu');
       expect(js).toContain('nextUserMessage.addEventListener("click"');
-      expect(js).toContain("toggleWorkspaceMenu");
+      expect(js).not.toContain("toggleWorkspaceMenu");
       expect(js).toContain("var task = currentTask();");
       expect(js).toContain("? task.title");
       expect(js).toContain(': "WeRelay \\u00B7 " + currentAdapterName();');
@@ -5867,7 +5867,7 @@ describe("Codex mobile server", () => {
       expect(js).toContain("switchingAdapterId");
       expect(js).toContain("switchProgressLabel");
       expect(js.match(/switchProgressLabel\(state\.switchStartedAtMs, Date\.now\(\)\)/g)).toHaveLength(1);
-      expect(js).toContain("workspaceSwitchProgress.hidden = true;");
+      expect(js).not.toContain("workspaceSwitchProgress");
       expect(js).toContain("syncChildOrder(taskList, []);");
       expect(js).not.toContain('"正在连接 " + switchingAdapterName()');
       expect(js).not.toContain('showToast("正在连接 " + adapterName(adapterId) + "…")');
@@ -6029,9 +6029,8 @@ describe("Codex mobile server", () => {
       expect(js).toContain("isTaskContextMenuTriggerAllowed");
       expect(js).toContain("checkForAppUpdate");
       expect(js).toContain('window.addEventListener("pageshow"');
-      expect(js).toContain("function positionWorkspaceMenu()");
-      expect(js).toContain("workspaceSwitcher.getBoundingClientRect()");
-      expect(js).toContain("window.addEventListener(\"orientationchange\"");
+      expect(js).not.toContain("function positionWorkspaceMenu()");
+      expect(js).not.toContain("workspaceSwitcher.getBoundingClientRect()");
       expect(() => new Function(js)).not.toThrow();
 
       const taskUrl = new URL(server.buildTaskUrl(

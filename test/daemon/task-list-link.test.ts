@@ -22,14 +22,12 @@ const tasks = [
   task("pi", "older-pi", "2026-10-28T01:00:00Z"),
 ];
 
-function taskUrl(sessionId: string, adapter: string): string {
-  return `https://relay.example/${adapter}-${sessionId}`;
-}
+const boardUrl = "https://relay.example/b";
 
 function fixture(candidates = tasks, mobileEnabled = true) {
   candidates = candidates.map((candidate) => ({ ...candidate }));
   const sent: string[] = [];
-  const links: Array<{ adapter: string; sessionId: string }> = [];
+  const links: string[] = [];
   const daemon = Object.assign(Object.create(WeRelayDaemon.prototype), {
     globalTaskListSnapshot: buildGlobalTaskSnapshot(candidates),
     globalTaskAdapterFilter: null,
@@ -39,10 +37,11 @@ function fixture(candidates = tasks, mobileEnabled = true) {
     listWechatGlobalTaskCandidates: async () => candidates,
     activateExactGlobalTask: async () => { throw new Error("listing must not activate a task"); },
     codexMobileServer: mobileEnabled ? {
-      buildTaskUrl(sessionId: string, adapter: string) {
-        links.push({ adapter, sessionId });
-        return taskUrl(sessionId, adapter);
+      buildBoardUrl() {
+        links.push("board");
+        return boardUrl;
       },
+      buildTaskUrl() { throw new Error("task lists must not build a task-specific URL"); },
     } : undefined,
     queueWechatMessage: async (_sender: string, text: string) => { sent.push(text); return true; },
     queueWechatTextAction: async (operation: () => Promise<unknown>) => operation(),
@@ -61,41 +60,41 @@ function expectListLink(sent: string[], url: string) {
   expect(sent[1]).not.toContain("https://");
 }
 
-test("the aggregate list ends with one task-web link for the most recent visible adapter/session", async () => {
+test("the aggregate list ends with one board entry, not an individual task", async () => {
   const { daemon, sent, links } = fixture();
   await daemon.handleGlobalTaskCommand({ senderId: "u" }, { type: "resume", preserveTaskSnapshot: true });
-  expectListLink(sent, taskUrl("shared", "codex"));
-  expect(links).toEqual([{ adapter: "codex", sessionId: "shared" }]);
+  expectListLink(sent, boardUrl);
+  expect(links).toEqual(["board"]);
 });
 
-test("filtered lists preserve global numbers and link to that terminal even for colliding session IDs", async () => {
+test("filtered lists preserve global numbers and open the unfiltered board", async () => {
   const { daemon, sent, links } = fixture();
   await daemon.handleGlobalTaskCommand({ senderId: "u" }, {
     type: "resume", preserveTaskSnapshot: true,
   }, { adapterFilter: "pi" });
-  expectListLink(sent, taskUrl("shared", "pi"));
+  expectListLink(sent, boardUrl);
   expect(sent[0]).toContain("2、[Pi]");
   expect(sent[0]).toContain("3、[Pi]");
-  expect(links).toEqual([{ adapter: "pi", sessionId: "shared" }]);
+  expect(links).toEqual(["board"]);
 });
 
-test("pagination links to a task on the actual rendered page, not a hidden first-page task", async () => {
+test("pagination uses the same board entry without selecting a task", async () => {
   const { daemon, sent, links } = fixture();
   await daemon.handleGlobalTaskCommand({ senderId: "u" }, {
     type: "resume", preserveTaskSnapshot: true,
     taskListPosition: { startIndex: 2, pageSize: 1 },
   });
-  expectListLink(sent, taskUrl("older-pi", "pi"));
+  expectListLink(sent, boardUrl);
   expect(sent[0]).toContain("3、[Pi]");
-  expect(links).toEqual([{ adapter: "pi", sessionId: "older-pi" }]);
+  expect(links).toEqual(["board"]);
 });
 
-test("stable-number snapshots still choose the most recently updated visible task for the link", async () => {
+test("board entry does not depend on recency or stable-number ordering", async () => {
   const { daemon, sent } = fixture();
   // Stable numbering can keep an updated task below an older first entry.
   daemon.globalTaskListSnapshot.candidates[2].lastUpdatedAt = "2026-10-28T04:00:00Z";
   await daemon.handleGlobalTaskCommand({ senderId: "u" }, { type: "resume", preserveTaskSnapshot: true });
-  expectListLink(sent, taskUrl("older-pi", "pi"));
+  expectListLink(sent, boardUrl);
   expect(sent[0]!.indexOf("1、[Codex]")).toBeLessThan(sent[0]!.indexOf("3、[Pi]"));
 });
 
@@ -103,9 +102,9 @@ test("search results carry one link while their short instructions remain a sepa
   const { daemon, sent, links } = fixture();
   await daemon.handleGlobalTaskCommand({ senderId: "u" }, { type: "resume", target: "示例" });
   expect(sent).toHaveLength(2);
-  expect(sent[0]).toEndWith(`\n\n${taskUrl("shared", "codex")}`);
+  expect(sent[0]).toEndWith(`\n\n${boardUrl}`);
   expect(sent[1]).toBe("回复序号进入；补充关键词可缩小范围");
-  expect(links).toEqual([{ adapter: "codex", sessionId: "shared" }]);
+  expect(links).toEqual(["board"]);
 });
 
 test("empty, end-of-list and failed searches do not invent a task link", async () => {
@@ -143,34 +142,26 @@ test("long lists keep the link after all entries and before the standalone guide
   });
   expect(sent.length).toBeGreaterThan(2);
   expect(sent.every((part) => part.length <= 1200)).toBe(true);
-  expect(sent.at(-2)).toEndWith(`\n\n${taskUrl("d0", "deepseek")}`);
+  expect(sent.at(-2)).toEndWith(`\n\n${boardUrl}`);
   expect(sent.at(-1)).toBe(formatTaskListInstructions());
-  expect(sent.join("\n").split(taskUrl("d0", "deepseek"))).toHaveLength(2);
-  expect(links).toEqual([{ adapter: "deepseek", sessionId: "d0" }]);
+  expect(sent.join("\n").split(boardUrl)).toHaveLength(2);
+  expect(links).toEqual(["board"]);
 });
 
-test("outbound preparation confirms the existing public short link before sending the task list", async () => {
+test("board entry needs no task-link registration, even when registration is offline", async () => {
   const { daemon, sent } = fixture();
-  const registrations: unknown[] = [];
+  let registrations = 0;
   const client = new WeRelayRelayTaskLinkClient({
     relayUrl: "https://relay.example", deviceId: "fixture-device", deviceToken: "fixture-secret",
-    fetchImpl: async (_url, init) => {
-      registrations.push(JSON.parse(String(init?.body)));
-      return Response.json({ ok: true });
-    },
+    fetchImpl: async () => { registrations++; throw new Error("offline"); },
   });
   daemon.deskRelayRelayTaskLinks = client;
-  daemon.codexMobileServer.buildTaskUrl = (sessionId: string, adapter: string) =>
-    client.buildTaskUrl(sessionId, adapter, new URLSearchParams());
   try {
     await daemon.handleGlobalTaskCommand({ senderId: "u" }, { type: "resume", preserveTaskSnapshot: true }, {
       adapterFilter: "pi",
     });
-    expect(registrations).toHaveLength(1);
-    expect(registrations[0]).toMatchObject({ adapter: "pi", threadId: "shared" });
-    const url = sent[0]!.split("\n").at(-1)!;
-    expect(url).toMatch(/^https:\/\/relay\.example\/[A-Za-z0-9]{10}$/);
-    expectListLink(sent, url);
+    expect(registrations).toBe(0);
+    expectListLink(sent, boardUrl);
     expect(sent[0]).not.toContain("/t/");
   } finally {
     await client.close();
@@ -192,7 +183,7 @@ test("partial delivery of a linked list still stops the batch and never announce
     expect(sent).toHaveLength(failAt);
     expect(attempts).toBe(failAt + 1);
     expect(backlogReminders).toBe(0);
-    if (failAt === 1) expect(sent[0]).toEndWith(`\n\n${taskUrl("shared", "codex")}`);
+    if (failAt === 1) expect(sent[0]).toEndWith(`\n\n${boardUrl}`);
   }
 });
 
@@ -209,8 +200,8 @@ test("legacy terminal lists and search results use the same task-web entry witho
     await daemon.handleSystemCommand({ senderId: "u" }, slot, {
       type: "resume", preserveTaskSnapshot: true, ...(search ? { target: "示例" } : {}),
     });
-    expect(sent[0]).toEndWith(`\n\n${taskUrl("shared", "pi")}`);
+    expect(sent[0]).toEndWith(`\n\n${boardUrl}`);
     expect(sent).toHaveLength(2);
-    expect(links).toEqual([{ adapter: "pi", sessionId: "shared" }]);
+    expect(links).toEqual(["board"]);
   }
 });

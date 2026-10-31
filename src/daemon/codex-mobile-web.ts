@@ -1,4 +1,5 @@
 import { CHAT_COMPONENTS_JS, renderChatComposerHtml } from "../web/chat-components/index.ts";
+import { MESSAGE_RECORD_SETTINGS_JS, MESSAGE_RECORD_SETTINGS_CSS } from "../web/message-record-settings.ts";
 import { MESSAGE_BUBBLE_CSS, MESSAGE_MEDIA_CSS, CHAT_PROGRESS_CSS, CHAT_PENDING_CSS, CHAT_TEXT_CSS, CHAT_COMPOSER_CSS, CHAT_MOBILE_CSS, CHAT_SMALL_CSS, CHAT_DARK_CSS } from "../web/chat-components/styles.ts";
 import { AGENT_BRAND_ICON_DATA } from "./agent-brand-icons.ts";
 import { normalizeMobileMessageText } from "./mobile-message-text.ts";
@@ -50,15 +51,7 @@ export const CODEX_MOBILE_HTML = `<!doctype html>
     <div class="sidebar-overlay" id="sidebar-overlay"></div>
     <aside class="sidebar" id="sidebar" aria-label="任务列表">
       <div class="sidebar-head">
-        <div class="workspace-area">
-          <button class="workspace-switcher" id="workspace-switcher" type="button" aria-label="切换终端或打开 WeRelay 菜单" aria-expanded="false">
-            <span class="workspace-adapter" id="active-adapter-label">Codex</span>
-            <span class="workspace-divider" aria-hidden="true">·</span>
-            <span class="workspace-product brand-logo" role="img" aria-label="WeRelay" style="--brand-logo-width: 64px"></span>
-            <span class="workspace-switch-progress" id="workspace-switch-progress" aria-hidden="true" hidden></span>
-            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 6.25 8 9.75l3.5-3.5"/></svg>
-          </button>
-        </div>
+        <div class="sidebar-brand brand-logo" role="img" aria-label="WeRelay" style="--brand-logo-width: 92px"></div>
         <button class="icon-button sidebar-close" id="sidebar-close" type="button" aria-label="关闭任务列表">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
         </button>
@@ -70,6 +63,7 @@ export const CODEX_MOBILE_HTML = `<!doctype html>
           <span class="sidebar-primary-count" id="task-board-count" hidden></span>
         </button>
       </nav>
+      <nav class="adapter-menu" id="adapter-menu" aria-label="选择 Agent"></nav>
       <div class="task-view-switch" role="tablist" aria-label="任务列表视图">
         <button class="task-view-button is-active" id="task-view-projects" type="button" role="tab" aria-selected="true">项目</button>
         <button class="task-view-button" id="task-view-recent" type="button" role="tab" aria-selected="false">最近</button>
@@ -89,14 +83,6 @@ export const CODEX_MOBILE_HTML = `<!doctype html>
         </button>
       </div>
     </aside>
-
-    <div class="workspace-menu" id="workspace-menu" role="menu" hidden>
-      <div class="adapter-menu" id="adapter-menu"></div>
-      <div class="workspace-menu-divider" role="separator"></div>
-      <a class="workspace-menu-item" href="/about" role="menuitem">项目说明</a>
-      <a class="workspace-menu-item" href="/organizer" role="menuitem">整理会话</a>
-      <button class="workspace-menu-item" id="auth-logout" type="button" role="menuitem">退出</button>
-    </div>
 
     <main class="main-panel">
       <header class="topbar">
@@ -161,6 +147,12 @@ export const CODEX_MOBILE_HTML = `<!doctype html>
           <button type="button" data-settings-tab="remote" aria-pressed="true">远程访问</button>
           <button type="button" data-settings-tab="tasks" aria-pressed="false">任务与审批</button>
           <button type="button" data-settings-tab="providers" aria-pressed="false">电脑终端</button>
+          <button type="button" data-settings-tab="records" aria-pressed="false">消息记录</button>
+        </nav>
+        <nav class="settings-utilities" aria-label="应用操作">
+          <a href="/about">项目说明</a>
+          <a href="/organizer">整理会话</a>
+          <button id="auth-logout" type="button">退出登录</button>
         </nav>
         <div class="settings-body" id="settings-body">
           <div class="settings-loading" id="settings-loading">正在读取设置…</div>
@@ -340,7 +332,7 @@ export const WE_RELAY_ABOUT_HTML = `<!doctype html>
 </body>
 </html>`;
 
-export const CODEX_MOBILE_CSS = String.raw`
+export const CODEX_MOBILE_CSS = MESSAGE_RECORD_SETTINGS_CSS + String.raw`
 :root {
   color-scheme: light;
   --page: #ffffff;
@@ -474,9 +466,7 @@ svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.75; stro
   z-index: 20;
 }
 .sidebar-head { min-height: 44px; flex: 0 0 auto; display: flex; align-items: center; gap: 4px; padding: 0 2px 4px; }
-.sidebar-head .workspace-area { min-width: 0; flex: 1; }
-.sidebar-head .workspace-switcher { max-width: 100%; }
-.sidebar-head .workspace-adapter { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar-brand { flex: 0 0 auto; margin-left: 9px; }
 .icon-button {
   display: grid;
   place-items: center;
@@ -713,33 +703,23 @@ svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.75; stro
 }
 .menu-button { display: none; }
 .topbar-copy { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; }
-.workspace-area { position: relative; flex: 0 0 auto; }
-.workspace-switcher { min-height: 32px; max-width: min(420px, calc(100vw - 96px)); display: flex; align-items: center; gap: 5px; padding: 0 7px; border: 0; border-radius: 8px; background: transparent; color: var(--muted-strong); font: inherit; white-space: nowrap; cursor: pointer; }
-.workspace-switcher:hover { background: var(--surface-hover); color: var(--text); }
-.workspace-product { flex: 0 0 auto; color: var(--text); font-size: 16px; font-weight: 620; letter-spacing: -0.015em; white-space: nowrap; }
-.sidebar-head .workspace-product.brand-logo { flex: 0 0 auto; width: 64px; }
-.workspace-divider { flex: 0 0 auto; color: var(--muted); font-size: 13px; white-space: nowrap; }
-.workspace-adapter { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 19px; font-weight: 700; color: var(--text); }
-.workspace-switch-progress { width: 12px; height: 12px; flex: 0 0 auto; margin-left: 2px; border: 1.5px solid var(--border-strong); border-top-color: var(--green); border-radius: 50%; animation: switch-spin .8s linear infinite; }
-.workspace-switcher svg { width: 13px; height: 13px; margin-left: 1px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
-.workspace-switcher[aria-expanded="true"] svg { transform: rotate(180deg); }
-.workspace-switcher.is-switching > svg { display: none; }
 @keyframes switch-spin { to { transform: rotate(360deg); } }
-.workspace-menu { position: fixed; top: 0; left: 0; width: min(300px, calc(100vw - 16px)); max-height: min(70vh, 520px); overflow-y: auto; padding: 4px; border: 1px solid var(--border); border-radius: 12px; background: var(--page); box-shadow: var(--shadow); z-index: 40; }
-.adapter-menu { display: block; }
-.adapter-menu-item { width: 100%; min-height: 36px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 10px; border: 0; border-radius: 8px; background: transparent; color: var(--text); font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
-.adapter-menu-item > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.adapter-menu-label { display: inline-flex; align-items: center; gap: 7px; }
-.adapter-menu-running-dot { width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: var(--green); animation: task-dot-breathe 1.6s ease-in-out infinite; }
-.adapter-menu-item:hover { background: var(--surface-hover); }
-.adapter-menu-item.is-active { font-weight: 620; }
-.adapter-menu-state { flex: 0 0 auto; white-space: nowrap; color: var(--muted); font-size: 11px; font-weight: 430; }
-.workspace-menu-divider { height: 1px; margin: 4px 6px; background: var(--border); }
-.workspace-menu-item { width: 100%; min-height: 34px; display: flex; align-items: center; padding: 0 10px; border: 0; border-radius: 8px; background: transparent; color: var(--text); font: inherit; font-size: 13px; text-align: left; text-decoration: none; cursor: pointer; }
-.workspace-menu-item:hover { background: var(--surface-hover); }
-.topbar-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 12px; font-weight: 420; }
-.topbar-meta { display: none; }
-.topbar-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 4px; }
+.adapter-menu { display: flex; flex: 0 0 auto; flex-wrap: nowrap; gap: 4px; min-width: 0; margin: 0 2px 10px; padding: 3px 1px 7px; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
+.adapter-menu.has-more { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 36px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 36px), transparent); }
+.adapter-menu-item { position: relative; flex: 0 0 calc((100% - 12px) / 3.5); min-width: 0; min-height: 72px; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 8px 4px 6px; border: 0; border-radius: 10px; background: transparent; color: var(--muted-strong); font: inherit; cursor: pointer; }
+.adapter-menu-icon { position: relative; display: grid; place-items: center; width: 38px; height: 38px; flex: 0 0 auto; border-radius: 8px; background: #fff; }
+.adapter-menu-icon img { display: block; width: 34px; height: 34px; object-fit: contain; }
+.adapter-menu-label { display: block; width: calc(100% + 8px); margin-inline: -4px; white-space: normal; word-break: normal; overflow-wrap: normal; hyphens: none; text-align: center; font-size: 11px; line-height: 14px; }
+.adapter-menu-running-dot { position: absolute; right: -2px; bottom: -2px; width: 6px; height: 6px; border-radius: 50%; background: var(--green); animation: task-dot-breathe 1.6s ease-in-out infinite; }
+.adapter-menu-item:hover { background: var(--surface-hover); color: var(--text); }
+.adapter-menu-item.is-active { color: var(--text); font-weight: 620; }
+.adapter-menu-item.is-active::before { content: ""; position: absolute; inset: 4px 4px 2px; border: 1px solid var(--green); border-radius: 8px; background: rgba(16,163,127,.08); }
+.adapter-menu-item.is-active > * { position: relative; z-index: 1; }
+.adapter-menu-item.is-active:hover { background: transparent; }
+.adapter-menu-item:focus-visible { outline: 2px solid var(--green); outline-offset: 1px; }
+.adapter-menu-item:disabled { cursor: wait; }
+.adapter-menu-item.is-switching .adapter-menu-icon::after { content: ""; position: absolute; inset: -3px; border: 1.5px solid var(--border); border-top-color: var(--green); border-radius: 50%; animation: switch-spin .8s linear infinite; }
+@media (prefers-reduced-motion: reduce) { .adapter-menu-item.is-switching .adapter-menu-icon::after { animation: none; } }
 .cache-sync-indicator { min-height: 24px; display: inline-flex; align-items: center; gap: 5px; padding: 0 7px; border-radius: 999px; color: var(--muted); background: var(--surface); font-size: 11px; white-space: nowrap; }
 .cache-sync-indicator[hidden] { display: none; }
 .cache-sync-icon { width: 10px; height: 10px; flex: 0 0 auto; border: 1.4px solid var(--border-strong); border-top-color: var(--green); border-radius: 50%; animation: switch-spin .8s linear infinite; }
@@ -791,6 +771,9 @@ svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.75; stro
 .settings-menu-button { display: none; }
 .settings-view-header h1 { margin: 0; color: var(--text); font-size: 24px; font-weight: 650; letter-spacing: -.035em; line-height: 1.2; }
 .settings-view-header p { margin: 5px 0 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
+.settings-utilities { display: flex; flex: 0 0 auto; flex-wrap: wrap; gap: 6px 16px; padding: 8px max(24px, calc((100% - 820px) / 2)); }
+.settings-utilities a, .settings-utilities button { display: inline-flex; align-items: center; min-height: 32px; padding: 0; border: 0; background: transparent; color: var(--muted-strong); font: inherit; font-size: 12px; text-decoration: none; cursor: pointer; }
+.settings-utilities a:hover, .settings-utilities button:hover { color: var(--text); text-decoration: underline; text-underline-offset: 3px; }
 .settings-tabs { display: flex; gap: 5px; padding: 10px max(24px, calc((100% - 820px) / 2)); border-bottom: 1px solid var(--border); }
 .settings-tabs button { flex: 1; min-height: 40px; border: 0; border-radius: 9px; background: transparent; color: var(--muted); font: inherit; font-size: 13px; cursor: pointer; }
 .settings-tabs button[aria-pressed="true"] { background: var(--surface); color: var(--text); font-weight: 650; }
@@ -1209,7 +1192,6 @@ ${CHAT_MOBILE_CSS}
   .topbar { position: absolute; top: 0; left: 0; right: 0; min-height: 52px; padding: max(8px, env(safe-area-inset-top)) 8px 8px; background: rgba(255,255,255,.86); z-index: 12; }
   .menu-button { border-radius: 8px; }
   .topbar-copy { gap: 7px; }
-  .sidebar-head .workspace-product { font-size: 15px; }
   .task-board-header { padding: max(12px, env(safe-area-inset-top)) 16px 14px; }
   .task-board-heading-row { gap: 8px; }
   .task-board-menu-button { display: grid; margin-left: -4px; }
@@ -1290,6 +1272,8 @@ export const CODEX_MOBILE_APP_JS = String.raw`
 (function () {
   "use strict";
 
+${MESSAGE_RECORD_SETTINGS_JS}
+
   var AGENT_BRAND_ICON_DATA = ${JSON.stringify(AGENT_BRAND_ICON_DATA)};
   var normalizeMobileMessageText = ${normalizeMobileMessageText.toString()};
 
@@ -1329,11 +1313,7 @@ export const CODEX_MOBILE_APP_JS = String.raw`
   var statusEl = document.getElementById("current-status");
   var cacheSyncIndicator = document.getElementById("cache-sync-indicator");
   var newTaskButton = document.getElementById("new-task-button");
-  var workspaceSwitcher = document.getElementById("workspace-switcher");
-  var workspaceMenu = document.getElementById("workspace-menu");
   var adapterMenu = document.getElementById("adapter-menu");
-  var activeAdapterLabel = document.getElementById("active-adapter-label");
-  var workspaceSwitchProgress = document.getElementById("workspace-switch-progress");
   var composerForm = document.getElementById("composer-form");
   var chatText = WeRelayChatUI.createText({ resolveLink: function (target) {
     var local = isLocalPreviewTarget(target);
@@ -1346,6 +1326,7 @@ export const CODEX_MOBILE_APP_JS = String.raw`
   } });
   var composerView = WeRelayChatUI.createComposer(composerForm, { actions: {
     onSubmit: submitComposer,
+    onNoticeRetry: function () { void retryAdapterConnection(); },
     onInput: function () {
       state.composerRevision += 1;
       if (state.nativeComposerDraft) state.nativeComposerDraft.awaitingValidation = false;
@@ -1400,6 +1381,7 @@ export const CODEX_MOBILE_APP_JS = String.raw`
   var settingsMenuButton = document.getElementById("settings-menu-button");
   var settingsRefreshTimer = null;
   var settingsTab = "remote";
+  var messageRecordSettings = null;
   var settingsEpoch = 0;
   var settingsExpandedProviders = Object.create(null);
   var remoteRefreshTimer = null;
@@ -1418,6 +1400,8 @@ export const CODEX_MOBILE_APP_JS = String.raw`
     switchingAdapterId: "",
     switchStartedAtMs: 0,
     adapterError: "",
+    adapterConnectionNotice: null,
+    adapterReconnectInFlight: false,
     tasks: [],
     loadingTasks: false,
     taskView: "projects",
@@ -2679,6 +2663,8 @@ export const CODEX_MOBILE_APP_JS = String.raw`
   async function fetchJson(path, options) {
     options = options || {};
     var requestOptions = Object.assign({ credentials: "same-origin" }, options);
+    var onResponse = requestOptions.onResponse;
+    delete requestOptions.onResponse;
     var method = String(requestOptions.method || "GET").toUpperCase();
     delete requestOptions.retryNetwork;
     var response = null;
@@ -2701,6 +2687,7 @@ export const CODEX_MOBILE_APP_JS = String.raw`
       error.status = response.status;
       throw error;
     }
+    if (onResponse) onResponse(response);
     return payload;
   }
 
@@ -3042,12 +3029,26 @@ export const CODEX_MOBILE_APP_JS = String.raw`
   }
 
   async function api(path, options) {
+    var requestUrl = new URL(path, window.location.origin);
+    var requestedAdapter = requestUrl.searchParams.get("adapter") || state.currentAdapter;
+    var noticeAtStart = state.adapterConnectionNotice;
+    var responseFromCache = false;
     try {
-      return await fetchJson(path, options);
+      var payload = await fetchJson(path, Object.assign({}, options, { onResponse: function (response) {
+        responseFromCache = Boolean(response.headers.get("x-werelay-cache"));
+      } }));
+      // Catalog/history responses can succeed from cache while the live owner is offline.
+      if (!responseFromCache && state.adapterConnectionNotice === noticeAtStart && !(noticeAtStart && noticeAtStart.retrying) &&
+        /\/api\/tasks\/[^/]+\/messages$/.test(requestUrl.pathname) &&
+        !requestUrl.searchParams.has("history") && !requestUrl.searchParams.has("before")) {
+        clearAdapterConnectionNotice(requestedAdapter);
+      }
+      return payload;
     } catch (error) {
       if (error.status === 401) {
         showAuthentication("login", "登录已过期，请重新输入访问密码。");
       }
+      if (error.status !== 401) reportAdapterConnectionError(error.message, requestedAdapter);
       throw error;
     }
   }
@@ -3145,48 +3146,73 @@ export const CODEX_MOBILE_APP_JS = String.raw`
   }
 
   function renderAdapterMenu() {
-    activeAdapterLabel.textContent = state.switchingAdapter
-      ? switchingAdapterName()
-      : currentAdapterName();
-    workspaceSwitcher.classList.remove("is-switching");
-    workspaceSwitcher.setAttribute("aria-busy", state.switchingAdapter ? "true" : "false");
-    workspaceSwitchProgress.hidden = true;
     updateActiveDocumentTitle();
-    adapterMenu.innerHTML = "";
-    state.adapters.forEach(function (adapter) {
-      var button = document.createElement("button");
-      button.type = "button";
-      button.className = "adapter-menu-item" +
-        (adapter.id === state.currentAdapter ? " is-active" : "") +
-        (state.switchingAdapter && adapter.id === state.switchingAdapterId ? " is-switching" : "");
-      button.disabled = state.switchingAdapter || state.creatingTask;
-      button.setAttribute("role", "menuitem");
-      var label = document.createElement("span");
-      label.className = "adapter-menu-label";
-      var runningDot = document.createElement("span");
-      runningDot.className = "adapter-menu-running-dot";
-      runningDot.setAttribute("aria-hidden", "true");
-      runningDot.hidden = adapter.status !== "busy";
-      var labelText = document.createElement("span");
-      labelText.textContent = adapter.label;
-      label.appendChild(runningDot);
-      label.appendChild(labelText);
-      var status = document.createElement("span");
-      status.className = "adapter-menu-state";
-      var adapterStatus = adapterStateLabel(adapter.status);
-      status.textContent = state.switchingAdapter && adapter.id === state.switchingAdapterId
-        ? "切换中"
-        : adapter.id === state.currentAdapter
-          ? "当前" + (adapterStatus ? " · " + adapterStatus : "")
-          : adapterStatus;
-      status.hidden = !status.textContent;
-      button.appendChild(label);
-      button.appendChild(status);
-      button.addEventListener("click", function () {
-        void switchAdapter(adapter.id);
-      });
-      adapterMenu.appendChild(button);
+    var previousAdapter = adapterMenu.dataset.activeAdapter;
+    var focusedId = document.activeElement && document.activeElement.dataset.adapterId;
+    var buttons = Object.create(null);
+    Array.from(adapterMenu.children).forEach(function (button) {
+      buttons[button.dataset.adapterId] = button;
+      if (!state.adapters.some(function (adapter) { return adapter.id === button.dataset.adapterId; })) button.remove();
     });
+    state.adapters.forEach(function (adapter, index) {
+      var active = adapter.id === state.currentAdapter;
+      var switching = state.switchingAdapter && adapter.id === state.switchingAdapterId;
+      var button = buttons[adapter.id];
+      if (!button) {
+        button = document.createElement("button");
+        button.type = "button";
+        button.dataset.adapterId = adapter.id;
+        var icon = document.createElement("span");
+        icon.className = "adapter-menu-icon";
+        icon.setAttribute("aria-hidden", "true");
+        var image = document.createElement("img");
+        image.src = AGENT_BRAND_ICON_DATA[adapter.id] || AGENT_BRAND_ICON_DATA.shell;
+        image.alt = "";
+        var runningDot = document.createElement("span");
+        runningDot.className = "adapter-menu-running-dot";
+        icon.appendChild(image);
+        icon.appendChild(runningDot);
+        var label = document.createElement("span");
+        label.className = "adapter-menu-label";
+        button.appendChild(icon);
+        button.appendChild(label);
+        button.addEventListener("click", function () {
+          void switchAdapter(adapter.id);
+        });
+      }
+      button.className = "adapter-menu-item" + (active ? " is-active" : "") + (switching ? " is-switching" : "");
+      button.disabled = state.switchingAdapter || state.creatingTask;
+      button.setAttribute("aria-pressed", active ? "true" : "false");
+      button.setAttribute("aria-busy", switching ? "true" : "false");
+      var status = switching ? "切换中" : adapterStateLabel(adapter.status);
+      button.title = adapter.label + (active ? " · 当前" : "") + (status ? " · " + status : "");
+      button.setAttribute("aria-label", button.title);
+      button.querySelector(".adapter-menu-label").textContent = adapter.label;
+      var runningDot = button.querySelector(".adapter-menu-running-dot");
+      runningDot.hidden = adapter.status !== "busy";
+      if (adapterMenu.children[index] !== button) adapterMenu.insertBefore(button, adapterMenu.children[index] || null);
+    });
+    if (focusedId && buttons[focusedId] && document.activeElement !== buttons[focusedId] && !buttons[focusedId].disabled) {
+      buttons[focusedId].focus({ preventScroll: true });
+    }
+    adapterMenu.dataset.activeAdapter = state.currentAdapter;
+    if (previousAdapter !== state.currentAdapter) requestAnimationFrame(revealActiveAdapter);
+    updateAdapterScrollFade();
+  }
+
+  function updateAdapterScrollFade() {
+    adapterMenu.classList.toggle("has-more", adapterMenu.scrollWidth - adapterMenu.clientWidth - adapterMenu.scrollLeft > 1);
+  }
+
+  function revealActiveAdapter() {
+    var button = adapterMenu.querySelector(".is-active");
+    if (!button || !adapterMenu.clientWidth) return;
+    var left = button.offsetLeft - adapterMenu.offsetLeft;
+    if (left < adapterMenu.scrollLeft) adapterMenu.scrollLeft = left;
+    else if (left + button.offsetWidth > adapterMenu.scrollLeft + adapterMenu.clientWidth) {
+      adapterMenu.scrollLeft = left + button.offsetWidth - adapterMenu.clientWidth;
+    }
+    updateAdapterScrollFade();
   }
 
   async function loadAdapters() {
@@ -3733,6 +3759,7 @@ export const CODEX_MOBILE_APP_JS = String.raw`
     state.pendingApproval = null;
     state.approvalResults = [];
     state.adapterError = "";
+    state.adapterConnectionNotice = null;
     state.pendingImages = [];
     composerInput.value = "";
     composerInput.placeholder = "有问题，尽管问";
@@ -3751,7 +3778,6 @@ export const CODEX_MOBILE_APP_JS = String.raw`
       selectedAdapter && ["stopped", "open", "error"].includes(selectedAdapter.status)
     );
     if (adapterId === state.currentAdapter && !initial && !reconnectCurrent) {
-      toggleWorkspaceMenu(false);
       return true;
     }
     saveCurrentConversationSnapshot();
@@ -3770,7 +3796,6 @@ export const CODEX_MOBILE_APP_JS = String.raw`
     renderTasks();
     renderMessages(false);
     updateHeader();
-    toggleWorkspaceMenu(false);
     try {
       var result = await api(
         "/api/adapters/" + encodeURIComponent(adapterId) + "/switch",
@@ -4079,7 +4104,21 @@ export const CODEX_MOBILE_APP_JS = String.raw`
       Boolean(pendingApproval);
   }
 
+  function shouldBlockComposerForDelivery(hasContent, visibleSummary) {
+    // Delivery belongs to the saved message, not to the composer. New input
+    // can be saved behind it even while a POST/receipt is still outstanding.
+    if (hasContent || visibleSummary && ["completed", "failed", "interrupted"].includes(visibleSummary.status)) return false;
+    var active = state.activeMessageSubmission;
+    var sendingThisTask = active && active.pending.threadId === state.currentThreadId &&
+      (active.pending.adapter || state.currentAdapter) === state.currentAdapter;
+    return Boolean(
+      sendingThisTask || currentPendingDelivery() ||
+      visibleSummary && ["submitting", "syncing"].includes(visibleSummary.status)
+    );
+  }
+
   function updateHeader() {
+    renderAdapterConnectionNotice();
     var task = currentTask();
     var visibleSummary = currentVisibleRunSummary();
     var capabilityLimited = isAdapterCapabilityError();
@@ -4145,10 +4184,7 @@ export const CODEX_MOBILE_APP_JS = String.raw`
             ? capabilityLimited ? "已连接" : "未连接"
             : "未选择";
     var stopRequested = state.stopRequestedThreadId === state.currentThreadId;
-    var sendingAction = Boolean(
-      state.sending || currentPendingDelivery() ||
-      visibleSummary && ["submitting", "syncing"].includes(visibleSummary.status)
-    );
+    var sendingAction = shouldBlockComposerForDelivery(hasComposerContent, visibleSummary);
     composerView.updateAction({
       stopMode: stopMode, stopRequested: stopRequested, sending: sendingAction,
       enabled: Boolean(task), hasContent: hasComposerContent, queueBusy: Boolean(state.queueActionMessageId),
@@ -4224,7 +4260,6 @@ export const CODEX_MOBILE_APP_JS = String.raw`
   function openTaskContextMenu(threadId, clientX, clientY, sourceButton) {
     var task = taskById(threadId);
     if (!task || isTemporaryTask(task)) return;
-    toggleWorkspaceMenu(false);
     state.contextTaskId = threadId;
     taskContextRename.hidden = task.canRename !== true;
     taskContextMenu.hidden = false;
@@ -4456,6 +4491,7 @@ export const CODEX_MOBILE_APP_JS = String.raw`
     state.revealCurrentTaskOnSidebarOpen = true;
     app.classList.add("sidebar-open");
     revealCurrentTaskInSidebar();
+    revealActiveAdapter();
   }
 
   function closeSidebar() {
@@ -5271,43 +5307,6 @@ export const CODEX_MOBILE_APP_JS = String.raw`
     }
   }
 
-  function positionWorkspaceMenu() {
-    if (workspaceMenu.hidden) return;
-    var anchor = workspaceSwitcher.getBoundingClientRect();
-    var viewportWidth = window.innerWidth || document.documentElement.clientWidth;
-    var viewportHeight = window.innerHeight || document.documentElement.clientHeight;
-    var edge = 8;
-    var gap = 7;
-    var menuWidth = Math.min(300, Math.max(0, viewportWidth - edge * 2));
-    workspaceMenu.style.width = menuWidth + "px";
-    var menuHeight = Math.min(
-      workspaceMenu.scrollHeight || workspaceMenu.getBoundingClientRect().height,
-      Math.min(viewportHeight * 0.7, 520),
-    );
-    var maxLeft = Math.max(edge, viewportWidth - menuWidth - edge);
-    var left = Math.min(Math.max(anchor.left, edge), maxLeft);
-    var belowTop = anchor.bottom + gap;
-    var aboveTop = anchor.top - menuHeight - gap;
-    var top = belowTop + menuHeight <= viewportHeight - edge || aboveTop < edge
-      ? belowTop
-      : aboveTop;
-    var maxTop = Math.max(edge, viewportHeight - menuHeight - edge);
-    workspaceMenu.style.left = Math.round(left) + "px";
-    workspaceMenu.style.top = Math.round(Math.min(Math.max(top, edge), maxTop)) + "px";
-  }
-
-  function toggleWorkspaceMenu(forceOpen) {
-    var nextOpen = typeof forceOpen === "boolean"
-      ? forceOpen
-      : workspaceMenu.hidden;
-    workspaceMenu.hidden = !nextOpen;
-    workspaceSwitcher.setAttribute("aria-expanded", nextOpen ? "true" : "false");
-    if (nextOpen) {
-      positionWorkspaceMenu();
-      void loadAdapters().then(positionWorkspaceMenu).catch(function () {});
-    }
-  }
-
   function setSettingsOpen(open, updateUrl) {
     var nextOpen = Boolean(open);
     if (nextOpen && state.boardOpen) setTaskBoardOpen(false, false);
@@ -5316,7 +5315,6 @@ export const CODEX_MOBILE_APP_JS = String.raw`
     settingsView.hidden = !state.settingsOpen;
     settingsOpen.classList.toggle("is-active", state.settingsOpen);
     settingsOpen.setAttribute("aria-pressed", state.settingsOpen ? "true" : "false");
-    toggleWorkspaceMenu(false);
     closeTaskContextMenu();
     closeModelMenu();
     closeSessionMenu();
@@ -5334,6 +5332,7 @@ export const CODEX_MOBILE_APP_JS = String.raw`
       closeSidebar();
       selectSettingsTab(settingsTab);
     } else {
+      if (messageRecordSettings) { messageRecordSettings.destroy(); messageRecordSettings = null; }
       settingsEpoch++;
       clearTimeout(settingsRefreshTimer);
       clearTimeout(remoteRefreshTimer);
@@ -5345,6 +5344,7 @@ export const CODEX_MOBILE_APP_JS = String.raw`
   }
 
   function selectSettingsTab(tab) {
+    if (messageRecordSettings) { messageRecordSettings.destroy(); messageRecordSettings = null; }
     settingsTab = tab;
     var epoch = ++settingsEpoch;
     clearTimeout(settingsRefreshTimer);
@@ -5354,6 +5354,15 @@ export const CODEX_MOBILE_APP_JS = String.raw`
     });
     settingsBody.innerHTML = '<div class="settings-loading">正在读取设置…</div>';
     if (tab === "remote") void loadRemoteAccess(epoch);
+    else if (tab === "records") {
+      messageRecordSettings = createMessageRecordSettings({ root: settingsBody, api: api, escape: escapeHtml, agentName: adapterName,
+        chatUI: WeRelayChatUI, chatText: chatText,
+        readTask: function (adapter, threadId) {
+          return api(adapterApiPath("/api/tasks/" + encodeURIComponent(threadId) + "/messages?limit=30", adapter));
+        }
+      });
+      void messageRecordSettings.load();
+    }
     else void loadSettings();
   }
 
@@ -5796,6 +5805,7 @@ export const CODEX_MOBILE_APP_JS = String.raw`
   }
 
   async function loadSettings() {
+    if (settingsTab === "records" && messageRecordSettings) return messageRecordSettings.load();
     var epoch = settingsEpoch;
     var tab = settingsTab;
     try {
@@ -7031,6 +7041,7 @@ export const CODEX_MOBILE_APP_JS = String.raw`
     (Array.isArray(outboundMessages) ? outboundMessages : []).forEach(function (remote) {
       if (!remote || !remote.clientId) return;
       if (remote.status === "cancelled") {
+        acknowledgePendingMessageSubmission(Object.assign({ adapter: state.currentAdapter, threadId: state.currentThreadId }, remote));
         state.pendingMessages = state.pendingMessages.filter(function (pending) { return pending.clientId !== remote.clientId; });
         if (Array.isArray(state.outboundMessages)) state.outboundMessages = state.outboundMessages.filter(function (pending) { return pending.clientId !== remote.clientId; });
         return;
@@ -7049,6 +7060,7 @@ export const CODEX_MOBILE_APP_JS = String.raw`
         if (Array.isArray(remote.images) && remote.images.length) pending.images = remote.images;
       }
       pending.serverAcknowledged = true;
+      acknowledgePendingMessageSubmission(pending);
       if (["failed", "queued", "waiting_task_retry"].includes(pending.status) && state.localRunSummary && state.localRunSummary.clientId === pending.clientId) {
         state.localRunSummary = null;
         state.optimisticProgressTurnId = null;
@@ -7123,6 +7135,7 @@ export const CODEX_MOBILE_APP_JS = String.raw`
       }
       used[matchIndex] = true;
       pending.deliveryConfirmed = true;
+      acknowledgePendingMessageSubmission(pending);
       matchedMessage.clientId = pending.clientId;
       if (state.localRunSummary && state.localRunSummary.clientId === pending.clientId) {
         state.localRunSummary.turnId = matchedMessage.turnId || pending.turnId || "";
@@ -7197,8 +7210,23 @@ export const CODEX_MOBILE_APP_JS = String.raw`
         pending.deliveryConfirmed = true;
         pending.status = "delivered";
         delete pending.lastError;
+        acknowledgePendingMessageSubmission(pending);
       }
     });
+  }
+
+  function acknowledgePendingMessageSubmission(pending) {
+    var active = state.activeMessageSubmission;
+    if (!active || !pending || active.pending.clientId !== pending.clientId ||
+      active.pending.threadId !== pending.threadId ||
+      (active.pending.adapter || state.currentAdapter) !== (pending.adapter || state.currentAdapter)) return;
+    // Snapshot restores clone pending objects. Resolve by stable identity,
+    // without letting a receipt for another task release this request.
+    active.pending.serverAcknowledged = true;
+    ["status", "turnId", "queuedMessageId", "deliveryConfirmed"].forEach(function (key) {
+      if (pending[key] !== undefined) active.pending[key] = pending[key];
+    });
+    active.acknowledge();
   }
 
   function runHeaderInsertIndex(messages, summary) {
@@ -7650,7 +7678,9 @@ export const CODEX_MOBILE_APP_JS = String.raw`
           escapeHtml(state.adapterError) + '<br>' +
           (capabilityLimited
             ? '可从上方菜单切换到其他终端。'
-            : '点击上方「WeRelay · ' + escapeHtml(currentAdapterName()) + '」重新连接。') +
+            : state.adapterConnectionNotice
+              ? '点击输入框上方的「重试」重新连接，已有消息和输入内容会保留。'
+              : '请从上方终端菜单重新连接，已有消息和输入内容会保留。') +
           '</p></div>';
       } else {
         messagesEl.innerHTML = '<div class="empty-state"><div class="empty-wordmark brand-logo" role="img" aria-label="WeRelay" style="--brand-logo-width: 150px"></div><h1>还没有消息</h1><p>可以从手机继续这个任务。</p></div>';
@@ -7778,6 +7808,7 @@ export const CODEX_MOBILE_APP_JS = String.raw`
         showToast("任务当前没有运行");
         renderMessages(false);
         updateHeader();
+        void loadMessages(false);
       }
     } catch (error) {
       if (threadId === state.currentThreadId) {
@@ -8518,7 +8549,69 @@ export const CODEX_MOBILE_APP_JS = String.raw`
     }
   }
 
+  function isAdapterConnectionUnavailableMessage(text) {
+    return /(?:Codex|Claude(?: Code)?|TClaude|Grok(?: CLI)?|CodeBuddy|reasonix|Pi(?: Agent| Desktop)?|WorkBuddy(?: Desktop| ACP)?|DeepSeek(?: Harness)?|OpenCode|终端|桌面端)(?:\s*[^。\n]{0,16})?\s*(?:尚未接入|尚未连接|尚未链接|暂未连接|未连接|无法连接)/i.test(String(text || ""));
+  }
+
+  function renderAdapterConnectionNotice() {
+    var notice = state.adapterConnectionNotice;
+    var visible = Boolean(notice && notice.adapter === state.currentAdapter);
+    composerView.renderNotice({
+      visible: visible,
+      text: visible ? notice.retrying ? "正在重新连接 " + currentAdapterName() + "…" : notice.message : "",
+      retrying: visible && notice.retrying
+    });
+  }
+
+  function reportAdapterConnectionError(message, adapter) {
+    if (adapter !== state.currentAdapter || !isAdapterConnectionUnavailableMessage(message)) return false;
+    var previous = state.adapterConnectionNotice;
+    state.adapterConnectionNotice = { adapter: adapter, message: String(message),
+      retrying: Boolean(previous && previous.adapter === adapter && previous.retrying) };
+    renderAdapterConnectionNotice();
+    return true;
+  }
+
+  function clearAdapterConnectionNotice(adapter) {
+    if (!state.adapterConnectionNotice || state.adapterConnectionNotice.adapter !== adapter) return;
+    state.adapterConnectionNotice = null;
+    renderAdapterConnectionNotice();
+  }
+
+  async function retryAdapterConnection() {
+    var notice = state.adapterConnectionNotice;
+    if (!state.authenticated || !notice || notice.adapter !== state.currentAdapter || state.adapterReconnectInFlight || state.switchingAdapter) return;
+    var adapter = state.currentAdapter;
+    var threadId = state.currentThreadId;
+    state.adapterReconnectInFlight = true;
+    notice.retrying = true;
+    renderAdapterConnectionNotice();
+    try {
+      // Reconnect the owner without resetting the selected task, queue or draft.
+      await api("/api/adapters/" + encodeURIComponent(adapter) + "/switch", { method: "POST" });
+      if (adapter !== state.currentAdapter) return;
+      state.adapterError = "";
+      await loadAdapters();
+      if (adapter !== state.currentAdapter) return;
+      await loadTasks(false);
+      if (adapter === state.currentAdapter && threadId === state.currentThreadId) {
+        await Promise.all([loadMessages(false, false, false), loadCurrentTaskModel(true), loadCurrentTaskPermission(true)]);
+      }
+      if (adapter === state.currentAdapter && state.adapterConnectionNotice === notice) clearAdapterConnectionNotice(adapter);
+    } catch (error) {
+      if (adapter === state.currentAdapter && error.status !== 401) {
+        state.adapterConnectionNotice = { adapter: adapter, message: error.message || "暂时无法连接，请重试。", retrying: false };
+      }
+    } finally {
+      state.adapterReconnectInFlight = false;
+      if (state.adapterConnectionNotice && state.adapterConnectionNotice.adapter === adapter) state.adapterConnectionNotice.retrying = false;
+      renderAdapterConnectionNotice();
+      updateHeader();
+    }
+  }
+
   function showToast(text) {
+    if (reportAdapterConnectionError(text, state.currentAdapter)) return;
     if (isMobileConnectionUnavailableMessage(text)) {
       setCacheSyncState(
         state.connectionMode === "unknown" ? "server-retry" : "waiting-computer"
@@ -8785,7 +8878,7 @@ export const CODEX_MOBILE_APP_JS = String.raw`
     if (next) void submitPendingMessage(next);
   }
 
-  async function confirmPendingTaskSettings(pending, requestedAdapter, requestedThreadId) {
+  async function confirmPendingTaskSettings(pending, requestedAdapter, requestedThreadId, isActive) {
     var required = pending.requiredTaskSettings;
     if (!required || (!required.model && !required.reasoningEffort)) return;
     var path = adapterApiPath(
@@ -8810,6 +8903,7 @@ export const CODEX_MOBILE_APP_JS = String.raw`
         try {
           payload = await sync.promise;
         } catch (requestError) {
+          if (isActive && !isActive()) return;
           // A lost PUT response does not mean the desktop rejected the change.
           payload = await api(path, { cache: "no-store" });
           if (!matches(payload)) throw requestError;
@@ -8817,6 +8911,7 @@ export const CODEX_MOBILE_APP_JS = String.raw`
       } else {
         payload = await api(path, { cache: "no-store" });
       }
+      if (isActive && !isActive()) return;
       if (!matches(payload) && !sameRequest) {
         payload = await api(path, {
           method: "PUT",
@@ -8824,6 +8919,7 @@ export const CODEX_MOBILE_APP_JS = String.raw`
           body: JSON.stringify(required)
         });
       }
+      if (isActive && !isActive()) return;
       if (!matches(payload)) throw new Error("电脑尚未确认所选模型设置");
       delete pending.requiredTaskSettings;
       pending.status = "sending";
@@ -8863,47 +8959,53 @@ export const CODEX_MOBILE_APP_JS = String.raw`
     if (targetVisible()) renderMessages(true);
     updateHeader();
     try {
-      var retainedByServer = pending.manualRetry && (state.outboundMessages || []).some(function (message) {
-        return message.clientId === pending.clientId;
+      var result = await waitForPendingMessageAcceptance(pending, async function (isActive, signal) {
+        var retainedByServer = pending.manualRetry && (state.outboundMessages || []).some(function (message) {
+          return message.clientId === pending.clientId;
+        });
+        if (!retainedByServer) {
+          await restorePendingMessageImages(pending);
+          if (!isActive()) return null;
+          await persistPendingMessageImages(pending);
+        }
+        if (!isActive()) return null;
+        saveCurrentConversationSnapshot();
+        persistMobileCacheNow();
+        if (pending.deliveryConfirmed || pending.serverAcknowledged) return null;
+        await confirmPendingTaskSettings(pending, requestedAdapter, requestedThreadId, isActive);
+        if (!isActive() || pending.deliveryConfirmed || pending.serverAcknowledged) return null;
+        if (targetVisible()) renderMessages(true);
+        var images = (pending.images || []).map(function (image) {
+          return {
+            fileName: image.fileName,
+            mimeType: image.mimeType,
+            dataBase64: image.dataBase64
+          };
+        });
+        var body = JSON.stringify({
+          clientId: pending.clientId,
+          createdAtMs: pending.createdAtMs,
+          text: pending.text,
+          composerDraftRevision: pending.composerDraftRevision || undefined,
+          images: images,
+          retry: Boolean(pending.manualRetry),
+          newTaskSettings: String(requestedThreadId).startsWith("local-new-") ? pending.newTaskSettings : undefined,
+          createTaskSourceThreadId: pending.waitingForTaskCreation
+            ? pending.createTaskSourceThreadId || ""
+            : undefined
+        });
+        return api(adapterApiPath(
+          "/api/tasks/" + encodeURIComponent(requestedThreadId) + "/messages",
+          requestedAdapter
+        ), {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: body,
+          signal: signal,
+          keepalive: body.length < 60 * 1024
+        });
       });
-      if (!retainedByServer) {
-        await restorePendingMessageImages(pending);
-        await persistPendingMessageImages(pending);
-      }
-      saveCurrentConversationSnapshot();
-      persistMobileCacheNow();
       if (pending.deliveryConfirmed || pending.serverAcknowledged) return;
-      await confirmPendingTaskSettings(pending, requestedAdapter, requestedThreadId);
-      if (targetVisible()) renderMessages(true);
-      var images = (pending.images || []).map(function (image) {
-        return {
-          fileName: image.fileName,
-          mimeType: image.mimeType,
-          dataBase64: image.dataBase64
-        };
-      });
-      var body = JSON.stringify({
-        clientId: pending.clientId,
-        createdAtMs: pending.createdAtMs,
-        text: pending.text,
-        composerDraftRevision: pending.composerDraftRevision || undefined,
-        images: images,
-        retry: Boolean(pending.manualRetry),
-        newTaskSettings: String(requestedThreadId).startsWith("local-new-") ? pending.newTaskSettings : undefined,
-        createTaskSourceThreadId: pending.waitingForTaskCreation
-          ? pending.createTaskSourceThreadId || ""
-          : undefined
-      });
-      var result = await api(adapterApiPath(
-        "/api/tasks/" + encodeURIComponent(requestedThreadId) + "/messages",
-        requestedAdapter
-      ), {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: body,
-        keepalive: body.length < 60 * 1024
-      });
-      if (pending.deliveryConfirmed) return;
       pending.serverAcknowledged = true;
       pending.manualRetry = false;
       pending.browserAttempts = 0;
@@ -8954,6 +9056,31 @@ export const CODEX_MOBILE_APP_JS = String.raw`
       saveCurrentConversationSnapshot();
       submitNextWaitingMessage();
     }
+  }
+
+  function waitForPendingMessageAcceptance(pending, request) {
+    return new Promise(function (resolve, reject) {
+      var settled = false;
+      var controller = new AbortController();
+      var active = { pending: pending, acknowledge: function () { finish(null, null); } };
+      state.activeMessageSubmission = active;
+      var timer = setTimeout(function () {
+        finish(new Error("提交响应暂未返回，消息已保留，将用原消息编号核对接收状态。"));
+      }, 30_000);
+      function finish(error, result) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (state.activeMessageSubmission === active) state.activeMessageSubmission = null;
+        if (error || result === null) controller.abort();
+        if (error) reject(error);
+        else resolve(result);
+      }
+      // Polling can prove acceptance before this HTTP response. Consuming both
+      // branches also ensures a late response cannot mutate a later send lock.
+      Promise.resolve().then(function () { return request(function () { return !settled; }, controller.signal); })
+        .then(function (result) { finish(null, result); }, function (error) { finish(error); });
+    });
   }
 
   function beginOptimisticRunIfNeeded(pending) {
@@ -9204,7 +9331,6 @@ export const CODEX_MOBILE_APP_JS = String.raw`
   }
 
   authLogout.addEventListener("click", async function () {
-    toggleWorkspaceMenu(false);
     closeTaskContextMenu();
     closeTaskRenameDialog(true);
     setSettingsOpen(false, false);
@@ -9233,6 +9359,7 @@ export const CODEX_MOBILE_APP_JS = String.raw`
     state.queueActionMessageId = "";
     state.adapters = [];
     state.currentAdapter = "codex";
+    state.adapterConnectionNotice = null;
     state.switchingAdapter = false;
     state.switchingAdapterId = "";
     state.switchStartedAtMs = 0;
@@ -9281,13 +9408,11 @@ export const CODEX_MOBILE_APP_JS = String.raw`
   taskViewProjects.addEventListener("click", function () { setTaskView("projects"); });
   taskViewRecent.addEventListener("click", function () { setTaskView("recent"); });
   searchInput.addEventListener("input", renderTasks);
+  adapterMenu.addEventListener("scroll", updateAdapterScrollFade, { passive: true });
   window.addEventListener("resize", function () {
+    updateAdapterScrollFade();
     syncComposerInset();
     closeTaskContextMenu();
-    positionWorkspaceMenu();
-  });
-  window.addEventListener("orientationchange", function () {
-    requestAnimationFrame(positionWorkspaceMenu);
   });
   taskList.addEventListener("scroll", closeTaskContextMenu, { passive: true });
   messagesEl.addEventListener("scroll", function () {
@@ -9305,7 +9430,6 @@ export const CODEX_MOBILE_APP_JS = String.raw`
     cancelConversationEntryFocus();
     navigateToUserMessage(Number(nextUserMessage.dataset.messageIndex));
   });
-  workspaceSwitcher.addEventListener("click", function () { toggleWorkspaceMenu(); });
   taskBoardOpen.addEventListener("click", function () {
     setTaskBoardOpen(!state.boardOpen, true);
   });
@@ -9365,9 +9489,6 @@ export const CODEX_MOBILE_APP_JS = String.raw`
     }
   });
   document.addEventListener("click", function (event) {
-    if (!workspaceMenu.hidden && !workspaceMenu.contains(event.target) && !workspaceSwitcher.contains(event.target)) {
-      toggleWorkspaceMenu(false);
-    }
     if (!taskContextMenu.hidden && !taskContextMenu.contains(event.target)) {
       closeTaskContextMenu();
     }
@@ -9407,7 +9528,6 @@ export const CODEX_MOBILE_APP_JS = String.raw`
       }
       closeModelMenu();
       closeSessionMenu();
-      toggleWorkspaceMenu(false);
     }
   });
   document.getElementById("menu-button").addEventListener("click", openSidebar);
@@ -9469,7 +9589,11 @@ export const CODEX_MOBILE_APP_JS = String.raw`
       void (async function () {
         if (await checkForAppUpdate(true)) return;
         state.nextTaskRefreshAtMs = 0;
-        if (state.settingsOpen) await Promise.all([loadTasks(false), loadSettings()]);
+        if (state.settingsOpen) {
+          // Native select/date pickers can briefly hide the page. Do not replace
+          // the records form and discard unsubmitted filters when they close.
+          if (settingsTab !== "records") await Promise.all([loadTasks(false), loadSettings()]);
+        }
         else if (state.boardOpen) await loadTaskBoard(true);
         else await Promise.all([
           loadTasks(false),

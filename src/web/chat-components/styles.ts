@@ -103,6 +103,16 @@ export const CHAT_COMPOSER_CSS = String.raw`
 .composer-wrap { --composer-radius: 28px; }
 .composer-queue { box-sizing: border-box; width: max(0px, calc(min(100%, var(--thread-max)) - 2 * var(--composer-radius))); min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; max-height: 190px; overflow: hidden auto; overscroll-behavior: contain; scrollbar-width: thin; margin: 0 auto; border: 1px solid var(--border); border-bottom: 0; border-radius: 14px 14px 0 0; background: var(--page); }
 .composer-queue[hidden], .composer-media[hidden] { display: none; }
+.composer-notice { box-sizing: border-box; width: max(0px, calc(min(100%, var(--thread-max)) - 2 * var(--composer-radius))); min-width: 0; display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; align-items: center; gap: 8px; margin: 0 auto; padding: 8px; border: 1px solid var(--border); border-bottom: 0; border-radius: 14px 14px 0 0; background: var(--page); color: var(--text); }
+.composer-notice[hidden] { display: none; }
+.composer-notice:not([hidden]) + .composer-queue { border-radius: 0; }
+.composer-notice-icon { display: grid; place-items: center; color: var(--muted-strong); }
+.composer-notice-icon svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.composer-notice-text { min-width: 0; overflow-wrap: anywhere; font-size: 13px; line-height: 1.5; }
+.composer-notice-retry { min-height: 36px; min-width: 44px; padding: 0 8px; border: 0; border-radius: 9px; background: transparent; color: var(--text); font: inherit; font-size: 13px; cursor: pointer; }
+.composer-notice-retry:hover { background: var(--surface); }
+.composer-notice-retry:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
+.composer-notice-retry:disabled { color: var(--muted-strong); cursor: default; }
 .composer-media { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; padding: 2px 2px 4px; }
 .composer-media-item { position: relative; width: 72px; height: 72px; flex: 0 0 auto; }
 .composer-media-preview { width: 100%; height: 100%; display: block; padding: 0; border: 0; border-radius: 12px; background: transparent; cursor: zoom-in; }

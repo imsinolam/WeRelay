@@ -1,5 +1,10 @@
 /** Default IDs keep the taskboard integration stable; use a prefix for multiple instances. */
 const template = `      <form class="composer-wrap" id="composer-form" data-chat-part="composer-form">
+        <div class="composer-notice" id="composer-notice" data-chat-part="composer-notice" hidden>
+          <span class="composer-notice-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8 9V5m8 4V5M6 9h12v3a6 6 0 0 1-12 0V9Zm6 9v3"/></svg></span>
+          <span class="composer-notice-text" id="composer-notice-text" data-chat-part="composer-notice-text" role="status" aria-live="polite"></span>
+          <button class="composer-notice-retry" id="composer-notice-retry" data-chat-part="composer-notice-retry" type="button">重试</button>
+        </div>
         <div class="composer-queue" id="composer-queue" data-chat-part="composer-queue" aria-live="polite" hidden></div>
         <input id="composer-image-input" data-chat-part="composer-image-input" type="file" hidden accept="image/png,image/jpeg,image/webp,image/gif" multiple>
         <div class="composer">

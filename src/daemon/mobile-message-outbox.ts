@@ -94,6 +94,7 @@ type MobileMessageOutboxOptions = {
   cwd?: string;
   stateFile?: string;
   now?: () => number;
+  onChange?: (entry: MobileMessageOutboxEntry) => void;
 };
 
 const MAX_OUTBOX_ENTRIES = 500;
@@ -348,6 +349,8 @@ export class MobileMessageOutbox {
   private entries: MobileMessageOutboxEntry[] = [];
   private nextSequence = 1;
   private composerDraftReceipts = new Set<string>();
+  private readonly onChange?: (entry: MobileMessageOutboxEntry) => void;
+  private readonly recordedSignatures = new Map<string, string>();
 
   constructor(options: MobileMessageOutboxOptions) {
     this.cwd = options.cwd ? normalizeWorkspacePath(options.cwd) : undefined;
@@ -357,7 +360,11 @@ export class MobileMessageOutbox {
     );
     this.now = options.now ?? Date.now;
     this.load();
+    this.onChange = options.onChange;
+    for (const entry of this.entries) this.recordedSignatures.set(entry.adapter + ":" + entry.clientId, JSON.stringify(entry));
   }
+
+  snapshot(): MobileMessageOutboxEntry[] { return this.entries.map(cloneEntry); }
 
   accept(input: MobileMessageOutboxAcceptInput): {
     entry: MobileMessageOutboxEntry;
@@ -951,5 +958,15 @@ export class MobileMessageOutbox {
     writePrivateFileAtomic(this.stateFile, `${JSON.stringify(state, null, 2)}\n`, {
       encoding: "utf8",
     });
+    for (const entry of this.entries) {
+      const key = entry.adapter + ":" + entry.clientId;
+      const signature = JSON.stringify(entry);
+      if (this.recordedSignatures.get(key) === signature) continue;
+      this.recordedSignatures.set(key, signature);
+      // Diagnostics must never change the outbox's delivery semantics.
+      try { this.onChange?.(cloneEntry(entry)); } catch { /* The sender still owns this persisted message. */ }
+    }
+    const retained = new Set(this.entries.map(entry => entry.adapter + ":" + entry.clientId));
+    for (const key of this.recordedSignatures.keys()) if (!retained.has(key)) this.recordedSignatures.delete(key);
   }
 }

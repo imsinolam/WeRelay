@@ -45,6 +45,17 @@ function createChatComposer(root, options) {
     composerInput.style.height = Math.min(composerInput.scrollHeight, 168) + "px";
     resized();
   }
+  function renderNotice(view) {
+    var notice = part("composer-notice");
+    var text = part("composer-notice-text");
+    var retry = part("composer-notice-retry");
+    notice.hidden = !view.visible;
+    if (text.textContent !== (view.text || "")) text.textContent = view.text || "";
+    retry.disabled = Boolean(view.retrying);
+    retry.textContent = view.retrying ? "连接中…" : "重试";
+    retry.setAttribute("aria-busy", view.retrying ? "true" : "false");
+    resized();
+  }
   function updateControl(kind, view) {
     var control = part("composer-" + kind + "-control");
     var button = part("composer-" + kind + "-button");
@@ -478,6 +489,9 @@ function createChatComposer(root, options) {
   ["model", "session"].forEach(function (kind) {
     on(part("composer-" + kind + "-button"), "click", function () { if (actions.onToggleMenu) actions.onToggleMenu(kind); });
   });
+  on(part("composer-notice-retry"), "click", function () {
+    if (!part("composer-notice-retry").disabled && actions.onNoticeRetry) actions.onNoticeRetry();
+  });
   on(document, "click", function (event) {
     ["model", "session"].forEach(function (kind) {
       var control = part("composer-" + kind + "-control");
@@ -494,7 +508,7 @@ function createChatComposer(root, options) {
   composerOrbAnimation.setup();
   return {
     root: root, part: part, resize: resize, renderQueue: renderQueue, renderImages: renderImages,
-    renderModel: renderModel, renderSession: renderSession, updateAction: updateAction, closeMenu: closeMenu,
+    renderModel: renderModel, renderSession: renderSession, renderNotice: renderNotice, updateAction: updateAction, closeMenu: closeMenu,
     getValue: function () { return composerInput.value; },
     setValue: function (value) { composerInput.value = value; resize(); },
     destroy: function () {

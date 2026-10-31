@@ -1,7 +1,8 @@
 import path from "node:path";
 import type { AdapterOptions, EventSink } from "./bridge-adapters.shared.ts";
 import type { BridgeAdapter, BridgeAdapterState, BridgeResumeSessionCandidate, BridgeSessionMessage, BridgeSessionSendResult, BridgeSessionRunSummary, BridgeSessionMessagePage, BridgeSessionMessagePageOptions } from "./bridge-types.ts";
-import { PiDesktopClient, PiDesktopUncertainError, type PiDesktopControl } from "./pi-desktop-client.ts";
+import { PiDesktopClient, PiDesktopUncertainError, PI_DESKTOP_UNAVAILABLE, type PiDesktopControl } from "./pi-desktop-client.ts";
+import { preparePiDesktopPlugin } from "./pi-desktop-plugin.ts";
 import { nowIso } from "./bridge-utils.ts";
 
 type RecordValue = Record<string, unknown>;
@@ -56,7 +57,15 @@ export class PiDesktopAdapter implements BridgeAdapter {
     this.state.status = status; this.sink({ type: "status", status, message, timestamp: nowIso() });
   }
   async start(): Promise<void> {
-    await this.client.invoke("app/health");
+    try { await this.client.invoke("app/health"); }
+    catch (error) {
+      // Only explicit connection prepares files owned by WeRelay. Background
+      // catalog reads remain read-only and never load/authorize a plugin.
+      if (!this.dependencies.client && error instanceof Error && error.message === PI_DESKTOP_UNAVAILABLE) {
+        throw new Error(preparePiDesktopPlugin().message, { cause: error });
+      }
+      throw error;
+    }
     this.disposed = false; this.status("idle");
     const interval = this.dependencies.pollIntervalMs ?? 2_000;
     if (interval > 0 && !this.timer) { this.timer = setInterval(() => { void this.poll(); }, interval); this.timer.unref(); }

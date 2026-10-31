@@ -15,6 +15,7 @@ import {
 import {
   CODEX_MOBILE_ASSET_VERSION,
   resolveCodexMobileTaskShortRedirect,
+  resolveCodexMobileBoardRedirect,
 } from "../daemon/codex-mobile-server.ts";
 import { SESSION_ORGANIZER_CSS, SESSION_ORGANIZER_HTML, SESSION_ORGANIZER_JS } from "../daemon/session-organizer-web.ts";
 import {
@@ -1063,6 +1064,16 @@ export async function startWeRelayRelayServer(
             lastDeviceSeenAtMs && now() - lastDeviceSeenAtMs <= deviceOfflineMs,
           ),
         });
+        return;
+      }
+      if (method === "GET" && url.pathname === "/b") {
+        response.writeHead(302, {
+          location: resolveCodexMobileBoardRedirect(url.searchParams),
+          "cache-control": "no-store",
+          "x-content-type-options": "nosniff",
+          "referrer-policy": "no-referrer",
+        });
+        response.end();
         return;
       }
       const rootTaskAlias = method === "GET"

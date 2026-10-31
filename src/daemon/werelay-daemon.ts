@@ -209,6 +209,13 @@ import {
   type DaemonWechatTaskTarget,
   type DaemonWorkspaceState,
 } from "./daemon-state.ts";
+import { PushRegistrationStore } from "./push-registration-store.ts";
+import {
+  createPushDispatch,
+  createVivoPushProvider,
+  readVivoCredentials,
+  type PushDispatch,
+} from "./vendor-push.ts";
 import {
   CodexCompletionDeliveryQueue,
   CODEX_COMPLETION_DELIVERABLE_WINDOW_MS,
@@ -236,6 +243,7 @@ import {
   shouldRetryMobileMessage,
 } from "./mobile-message-recovery.ts";
 import { MobileMessageImageStore } from "./mobile-message-image-store.ts";
+import { MessageRecords, clawbotMessageRecordKey, messageRecordProject, type MessageRecordInput } from "./message-records.ts";
 import {
   MobileMessageOutbox,
   computeMobileMessageRetryDelayMs,
@@ -286,7 +294,6 @@ import {
   resolveGlobalTaskTargetedMessage,
   searchGlobalTaskCandidates,
   selectRunningGlobalTaskAdapters,
-  sortGlobalTaskCandidates,
   updateGlobalTaskSnapshot,
   type GlobalTaskCandidate,
   type GlobalTaskSnapshot,
@@ -3081,6 +3088,7 @@ export class WeRelayDaemon {
   private readonly mobileMessageImageStore: MobileMessageImageStore;
   private readonly wechatImageDrafts = new WechatImageDraftCollector();
   private readonly mobileMessageOutbox: MobileMessageOutbox;
+  private readonly messageRecords: MessageRecords;
   private readonly allowDesktopApplicationLaunch: boolean;
   private readonly mobileProviderInstallManager = new MobileProviderInstallManager();
   private readonly slots = new Map<DaemonAdapterKind, DaemonSlot>();
@@ -3200,7 +3208,117 @@ export class WeRelayDaemon {
   });
   private readonly mobileConversationRevisions = new MobileConversationRevisionStore();
   private readonly openAgentLogHistory = new OpenAgentLogHistoryProvider();
+  private pushStoreInstance: PushRegistrationStore | null = null;
+  private pushDispatchInstance: PushDispatch | null = null;
   private codexWechatReplyMode: CodexWechatReplyMode;
+
+  /** Lazily created so a daemon that never sees a push token pays nothing. */
+  private pushStore(): PushRegistrationStore {
+    if (!this.pushStoreInstance) {
+      this.pushStoreInstance = new PushRegistrationStore(
+        path.join(ensureWorkspaceChannelDir(this.cwd).workspaceDir, "push-registrations.json"),
+      );
+    }
+    return this.pushStoreInstance;
+  }
+
+  private pushDispatch(): PushDispatch {
+    if (!this.pushDispatchInstance) {
+      this.pushDispatchInstance = createPushDispatch({
+        providers: [createVivoPushProvider({ credentials: readVivoCredentials() })],
+      });
+    }
+    return this.pushDispatchInstance;
+  }
+
+  /**
+   * Push notifications for the phone lock screen.
+   *
+   * This is a best-effort side channel: it runs alongside the existing WeChat
+   * completion/approval delivery and never throws into the task flow. Vendors
+   * can rate limit or drop messages, so callers must not treat a successful
+   * send as user acknowledgement.
+   */
+  private async deliverVendorPush(params: {
+    origin: string;
+    title: string;
+    content: string;
+    data: Record<string, string>;
+    collapseKey?: string;
+  }): Promise<void> {
+    try {
+      const registrations = this.pushStore().active(params.origin);
+      if (registrations.length === 0) return;
+      const results = await this.pushDispatch().send(registrations, {
+        title: params.title,
+        content: params.content,
+        data: params.data,
+        collapseKey: params.collapseKey,
+      });
+      results.forEach((result, index) => {
+        if (result.ok) return;
+        if (result.reason === "invalid-token") {
+          const registration = registrations[index];
+          if (registration) {
+            this.pushStore().invalidate(registration.provider, registration.token);
+          }
+          return;
+        }
+        appendDaemonLog(
+          `vendor_push_failed: reason=${result.reason} detail=${truncatePreview(result.message ?? "", 120)}`,
+        );
+      });
+    } catch (error) {
+      appendDaemonLog(
+        `vendor_push_error: ${truncatePreview(error instanceof Error ? error.message : String(error), 160)}`,
+      );
+    }
+  }
+
+  /**
+   * Origin used to look up push registrations. Registrations are stored per
+   * server origin, so the daemon needs the same public origin the app used.
+   */
+  private vendorPushOrigin(): string {
+    const configured = process.env.WERELAY_PUBLIC_BASE_URL?.trim();
+    if (configured) return configured.replace(/\/+$/, "");
+    return "http://localhost";
+  }
+
+  /** Stable notification slot per task so an update replaces the earlier row. */
+  private pushCollapseKey(adapter: string, threadId: string): string {
+    const digest = createHash("sha1").update(`${adapter}\u0000${threadId}`).digest();
+    // notifyId must be a positive int32.
+    return String((digest.readUInt32BE(0) % 2_147_483_646) + 1);
+  }
+
+  /** Approval summary that names the task without leaking command text. */
+  private approvalPushContent(
+    slot: DaemonSlot,
+    threadId: string,
+  ): string {
+    const title = this.mobileTaskTitleFor(slot, threadId);
+    if (title) return title;
+    return `${formatDaemonAdapterLabel(slot.adapter)} 任务需要确认`;
+  }
+
+  /** Best-effort task title from the cached catalog; never blocks a push. */
+  private mobileTaskTitleFor(slot: DaemonSlot, threadId: string): string {
+    try {
+      const cached = this.globalTaskCatalogCache.read(slot.adapter);
+      const match = cached?.find((task) => task.sessionId === threadId);
+      return match?.title?.trim() ? match.title.trim() : "";
+    } catch {
+      return "";
+    }
+  }
+
+  /** Task name only; the reply body stays in WeChat and the app. */
+  private completionPushContent(delivery: { title?: string; threadId?: string } | undefined): string {
+    const title = delivery?.title?.trim();
+    if (title) return title;
+    return "有一个任务刚刚完成，打开 WeRelay 查看结果";
+  }
 
   constructor(params: {
     cwd: string;
@@ -3224,7 +3342,18 @@ export class WeRelayDaemon {
       params.allowDesktopApplicationLaunch === true;
     this.deferredInputStore = new CodexDeferredInputStore(params.cwd);
     this.mobileMessageImageStore = new MobileMessageImageStore(params.cwd);
-    this.mobileMessageOutbox = new MobileMessageOutbox({ cwd: params.cwd });
+    this.messageRecords = new MessageRecords({ cwd: params.cwd, resolveProject: (adapter, threadId) => {
+      const slot = this.slots.get(adapter as DaemonAdapterKind);
+      const candidates = [
+        ...(slot?.taskCandidatesCache ?? []), ...(slot?.taskListSnapshot?.candidates ?? []),
+        ...(this.globalTaskListSnapshot?.candidates.filter(item => item.adapter === adapter) ?? []),
+        ...(this.globalTaskCatalogCache.read(adapter) ?? []),
+      ];
+      const candidate = candidates.find(item => item.sessionId === threadId && (item.cwd || item.projectId));
+      return messageRecordProject(adapter, candidate);
+    } });
+    this.mobileMessageOutbox = new MobileMessageOutbox({ cwd: params.cwd, onChange: entry => this.messageRecords.recordWeb(entry) });
+    this.messageRecords.importWebHistory(this.mobileMessageOutbox.snapshot());
     this.codexCompletionDeliveries = new CodexCompletionDeliveryQueue({
       initial: params.stateStore.getCodexCompletionDeliveryState(),
       persist: (state) => params.stateStore.setCodexCompletionDeliveryState(state),
@@ -3406,9 +3535,46 @@ export class WeRelayDaemon {
         switchAdapter: (adapter) => this.switchMobileAdapter(adapter),
         readSettings: () => this.buildMobileSettings(),
         updateSettings: (patch) => this.updateMobileSettings(patch),
+        readMessageRecords: (query, exporting) => {
+          const payload = exporting ? this.messageRecords.export(query) : this.messageRecords.query(query);
+          for (const row of payload.records) {
+            if (row.kind !== "task" || !row.threadId) continue;
+            const slot = this.slots.get(row.adapter as DaemonAdapterKind);
+            const candidate = slot?.taskCandidatesCache?.find(item => item.sessionId === row.threadId);
+            row.taskTitle = candidate?.title;
+            const status = slot ? this.resolveMobileTaskStatus(slot, row.threadId, candidate?.runtimeStatus) : "unknown";
+            row.taskState = status === "idle" && !candidate && slot && this.getSlotThreadId(slot) !== row.threadId ? "unknown" : status;
+          }
+          return payload;
+        },
+        changeMessageRecords: (patch) => this.messageRecords.configure(patch),
+        clearMessageRecords: () => this.messageRecords.clear(),
+        recordRejectedMessage: input => {
+          const adapter = this.resolveMobileAdapter(input.adapter);
+          const previous = this.messageRecords.get("web", adapter + ":" + input.clientId);
+          if (previous && ["submitted", "queued", "delivered"].includes(previous.status)) return;
+          this.messageRecords.record({ key: adapter + ":" + input.clientId, source: "web", adapter,
+            threadId: input.threadId, text: input.text, imageCount: input.imageCount, status: "failed",
+            attempts: (previous?.attempts ?? 0) + 1, error: input.error });
+        },
         installProviderDependency: (providerId, dependencyId) =>
           Promise.resolve(this.installMobileProviderDependency(providerId, dependencyId)),
         listTaskBoard: () => this.listMobileTaskBoard(),
+        registerPushToken: async (input) => {
+          this.pushStore().upsert({
+            provider: "vivo",
+            token: input.token,
+            origin: input.origin,
+            appId: input.appId,
+            deviceId: input.deviceId,
+          });
+          return { ok: true as const };
+        },
+        clearPushTokens: async (input) => {
+          const before = this.pushStore().active(input.origin).length;
+          this.pushStore().clearOrigin(input.origin);
+          return { cleared: before };
+        },
         listSessionOrganizer: async () => buildSessionOrganizerSnapshot((await this.listMobileTaskBoard()).tasks),
         listTasks: (adapter) => this.listMobileTasks(adapter),
         createTask: (adapter, options) =>
@@ -3516,7 +3682,12 @@ export class WeRelayDaemon {
     if (!config) return;
     const workspaceDir = ensureWorkspaceChannelDir(this.cwd).workspaceDir;
     this.mobileRemoteAccess?.setConnectionStatus("connecting");
-    this.deskRelayRelayTaskLinks = new WeRelayRelayTaskLinkClient(config);
+    this.deskRelayRelayTaskLinks = new WeRelayRelayTaskLinkClient({
+      ...config,
+      onRegistrationFailure: ({ reason, status }) => appendDaemonLog(
+        `relay_task_link_registration_failed: reason=${reason}${status === undefined ? "" : ` status=${status}`}`,
+      ),
+    });
     this.deskRelayRelayClient = startWeRelayRelayClient({
       ...config,
       localBaseUrl: `http://127.0.0.1:${this.codexMobileServer.port}`,
@@ -4504,6 +4675,15 @@ export class WeRelayDaemon {
           if (result.status === "delivered") {
             slot.notifiedApprovalKeys.add(notificationKey);
           }
+          // Phone lock-screen copy of the same approval request. Best effort:
+          // the WeChat delivery above stays the authoritative channel.
+          void this.deliverVendorPush({
+            origin: this.vendorPushOrigin(),
+            title: "等待审批",
+            content: this.approvalPushContent(slot, threadId),
+            data: { adapter: slot.adapter, threadId, kind: "approval" },
+            collapseKey: this.pushCollapseKey(slot.adapter, threadId),
+          });
         }));
         break;
       case "user_input_required": {
@@ -4766,6 +4946,42 @@ export class WeRelayDaemon {
     initialMessage: InboundWechatMessage,
     receivedTaskTarget: GlobalTaskCandidate | null = this.latestWechatTaskTarget,
   ): Promise<void> {
+    if (initialMessage.senderId !== this.authorizedUserId) return this.handleInboundMessageImpl(initialMessage, receivedTaskTarget);
+    const message = Object.assign({}, initialMessage, { relayRecordKey: clawbotMessageRecordKey(initialMessage) });
+    if (!this.messageRecords.get("clawbot", message.relayRecordKey)) this.recordClawbotMessage(message, { status: "received", attempts: 0, kind: "control" });
+    try {
+      await this.handleInboundMessageImpl(message, receivedTaskTarget);
+      const row = this.messageRecords.get("clawbot", message.relayRecordKey);
+      if (row?.status === "received") this.recordClawbotMessage(message, {
+        status: row.kind === "task" ? "unconfirmed" : "handled", attempts: row.attempts, kind: row.kind,
+        ...(row.kind === "task" ? { error: "本次处理未取得 Agent 提交确认，请查看对应任务或微信提示。" } : {})
+      });
+    } catch (error) {
+      const row = this.messageRecords.get("clawbot", message.relayRecordKey);
+      if (!row || !["submitted", "queued", "delivered"].includes(row.status)) {
+        this.recordClawbotMessage(message, { status: "failed", attempts: row?.attempts ?? 0,
+          kind: row?.kind ?? "control", error: error instanceof Error ? error.message : String(error) });
+      }
+      throw error;
+    }
+  }
+
+  private recordClawbotMessage(message: InboundWechatMessage, update: Pick<MessageRecordInput, "status" | "attempts"> & Partial<MessageRecordInput>): void {
+    const key = (message as InboundWechatMessage & { relayRecordKey?: string }).relayRecordKey ?? clawbotMessageRecordKey(message);
+    const previous = this.messageRecords.get("clawbot", key);
+    // Routing/notification errors after acceptance are not a failed send. An
+    // actual dispatch failure supplies its non-zero attempt count below.
+    if (update.status === "failed" && update.attempts === 0 && previous &&
+      ["submitted", "queued", "delivered"].includes(previous.status)) return;
+    this.messageRecords.record({ key, source: "clawbot", adapter: previous?.adapter || this.activeAdapter || "", threadId: previous?.threadId ?? "",
+      text: message.text, imageCount: message.attachments.length, createdAtMs: message.createdAtMs,
+      ...update });
+  }
+
+  private async handleInboundMessageImpl(
+    initialMessage: InboundWechatMessage,
+    receivedTaskTarget: GlobalTaskCandidate | null = this.latestWechatTaskTarget,
+  ): Promise<void> {
     let message = initialMessage;
     // Debug acknowledgement: prove the message arrived and which build is
     // running before any slow command handling begins.
@@ -4993,6 +5209,9 @@ export class WeRelayDaemon {
 
     const slot = this.getActiveSlot();
     if (!slot) {
+      if (!message.text.trim().startsWith("/")) this.recordClawbotMessage(message, {
+        status: "failed", kind: "task", attempts: 0, error: "尚未选择可用终端，消息未提交给 Agent。"
+      });
       await this.queueWechatMessage(message.senderId, formatNoActiveAdapterMessage());
       return;
     }
@@ -5058,10 +5277,13 @@ export class WeRelayDaemon {
         })
       : null;
     if (globalTargetedTaskMessage) {
+      this.recordClawbotMessage(message, { status: "received", kind: "task", attempts: 0,
+        adapter: globalTargetedTaskMessage.candidate.adapter, threadId: globalTargetedTaskMessage.candidate.sessionId });
       try {
         await this.handleGlobalTaskTargetedMessage(message, globalTargetedTaskMessage);
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
+        this.recordClawbotMessage(message, { status: "failed", kind: "task", attempts: 0, error: detail });
         appendDaemonLog(
           `global_task_targeted_send_error: adapter=${globalTargetedTaskMessage.candidate.adapter} thread=${globalTargetedTaskMessage.candidate.sessionId} error=${truncatePreview(detail, 400)}`,
         );
@@ -5078,6 +5300,7 @@ export class WeRelayDaemon {
         })
       : null;
     if (targetedTaskMessage) {
+      this.recordClawbotMessage(message, { status: "received", kind: "task", attempts: 0, adapter: slot.adapter });
       await this.handleDaemonTaskTargetedMessage(message, slot, targetedTaskMessage);
       return;
     }
@@ -5163,6 +5386,7 @@ export class WeRelayDaemon {
       return;
     }
     slot.awaitingBareTaskSelection = false;
+    this.recordClawbotMessage(message, { status: "received", kind: "task", attempts: 0, adapter: slot.adapter });
     const initialAdapterState = slot.runtime.getState();
     const currentThreadId =
       initialAdapterState.sharedThreadId ?? initialAdapterState.sharedSessionId;
@@ -5186,6 +5410,8 @@ export class WeRelayDaemon {
         replySlot = await this.activateExactGlobalTask(receivedTaskTarget);
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
+        this.recordClawbotMessage(message, { status: "failed", kind: "task", attempts: 0, error: detail,
+          adapter: receivedTaskTarget.adapter, threadId: receivedTaskTarget.sessionId });
         appendDaemonLog(
           `latest_wechat_task_restore_error: adapter=${receivedTaskTarget.adapter} thread=${receivedTaskTarget.sessionId} error=${truncatePreview(detail, 400)}`,
         );
@@ -5345,6 +5571,8 @@ export class WeRelayDaemon {
     if (command || !message.text.trim() || !receivedTaskTarget) {
       return false;
     }
+    this.recordClawbotMessage(message, { status: "received", kind: "task", attempts: 0,
+      adapter: receivedTaskTarget.adapter, threadId: receivedTaskTarget.sessionId });
     try {
       await this.handleGlobalTaskTargetedMessage(message, {
         candidate: receivedTaskTarget,
@@ -5352,6 +5580,8 @@ export class WeRelayDaemon {
       });
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
+      this.recordClawbotMessage(message, { status: "failed", kind: "task", attempts: 0, error: detail,
+        adapter: receivedTaskTarget.adapter, threadId: receivedTaskTarget.sessionId });
       appendDaemonLog(
         `latest_wechat_task_restore_error: adapter=${receivedTaskTarget.adapter} thread=${receivedTaskTarget.sessionId} error=${truncatePreview(detail, 400)}`,
       );
@@ -7443,6 +7673,7 @@ export class WeRelayDaemon {
       threadId: activeThreadId,
     });
     const queuedMessages = slot.runtime.getQueuedTaskInputs?.(activeThreadId);
+    this.messageRecords.confirmClawbotReceipts(slot.adapter, activeThreadId, enrichedMessages);
     // Older pages also provide valid execution evidence for retained failures.
     this.mobileMessageOutbox.reconcileFailedExecution(slot.adapter, {threadId: activeThreadId}, [],
       this.mobileMessageImageStore.enrich(visibleMessages, {adapter: slot.adapter, threadId: activeThreadId, requireTurnMatch: true}));
@@ -9424,6 +9655,10 @@ export class WeRelayDaemon {
       `forwarded_input: adapter=${slot.adapter} thread=${initialThreadId ?? "unknown"} text=${truncatePreview(preview)}`,
     );
     let sendResult: BridgeSessionSendResult | void = undefined;
+    const recordKey = (message as InboundWechatMessage & { relayRecordKey?: string }).relayRecordKey ?? clawbotMessageRecordKey(message);
+    const previousRecord = this.messageRecords.get("clawbot", recordKey);
+    const attempts = (previousRecord?.attempts ?? 0) + 1;
+    this.recordClawbotMessage(message, { status: "sending", kind: "task", attempts, adapter: slot.adapter, threadId: initialThreadId ?? "" });
     try {
       const input = buildWechatInboundPrompt(message.text, message.attachments);
       if (targetThreadId && slot.runtime.sendInputToSession) {
@@ -9443,6 +9678,8 @@ export class WeRelayDaemon {
         }
       }
     } catch (error) {
+      this.recordClawbotMessage(message, { status: "failed", kind: "task", attempts, adapter: slot.adapter,
+        threadId: initialThreadId ?? "", error: error instanceof Error ? error.message : String(error) });
       if (previousActiveTask) {
         this.setSlotActiveTask(slot, previousActiveTask, initialThreadId);
       } else {
@@ -9455,6 +9692,8 @@ export class WeRelayDaemon {
       slot.runtime.getState().sharedThreadId ??
       slot.runtime.getState().sharedSessionId ??
       initialThreadId;
+    this.recordClawbotMessage(message, { status: sendResult?.queued ? "queued" : "submitted", kind: "task", attempts,
+      adapter: slot.adapter, threadId: resolvedThreadId ?? "", turnId: sendResult?.turnId });
     if (
       resolvedThreadId !== initialThreadId &&
       !sendResult?.queued &&
@@ -9840,6 +10079,24 @@ export class WeRelayDaemon {
       },
     );
     if (result.status === "delivered") this.notificationPolicy?.sent();
+    if (result.status === "delivered") {
+      // Same event, second channel: a phone lock-screen row that survives the
+      // app being killed. Approval of the completion is not implied by this.
+      const delivery = result.delivery;
+      void this.deliverVendorPush({
+        origin: this.vendorPushOrigin(),
+        title: "任务已完成",
+        content: this.completionPushContent(delivery),
+        data: {
+          adapter: delivery?.adapter ?? "codex",
+          threadId: delivery?.threadId ?? "",
+          kind: "completed",
+        },
+        collapseKey: delivery?.threadId
+          ? this.pushCollapseKey(delivery.adapter ?? "codex", delivery.threadId)
+          : undefined,
+      });
+    }
     return result;
   }
 
@@ -10179,13 +10436,12 @@ export class WeRelayDaemon {
     candidates: GlobalTaskCandidate[] = [],
   ): Promise<number> {
     const messages = splitTaskListMessages(text);
-    // The stable numbering snapshot may no longer be in recency order. Pick
-    // from the actual visible page without reordering it or activating a task.
-    const latestTask = sortGlobalTaskCandidates(candidates)[0];
-    if (latestTask && messages[0]) {
+    // Lists always open the board, never a task selected from this page.
+    // No per-task registration or active owner is needed for this fixed entry.
+    if (candidates.length > 0 && messages[0]) {
       messages[0] = appendCodexMobileTaskLink(
         messages[0],
-        this.codexMobileServer?.buildTaskUrl(latestTask.sessionId, latestTask.adapter),
+        this.codexMobileServer?.buildBoardUrl?.(),
       );
     }
     const parts = messages.flatMap((part) => splitWechatTextIntoChunks(part));

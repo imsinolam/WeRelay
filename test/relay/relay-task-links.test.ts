@@ -23,6 +23,156 @@ afterEach(() => {
 });
 
 describe("relay task links", () => {
+  test("a stuck registration is bounded and retries successfully within the same confirmation request", async () => {
+    let calls = 0;
+    let firstSignal: AbortSignal | undefined;
+    const client = new WeRelayRelayTaskLinkClient({
+      relayUrl: "https://werelay.example", deviceId: "device", deviceToken: "device-secret",
+      requestTimeoutMs: 20,
+      fetchImpl: async (_url, init) => {
+        calls++;
+        if (calls === 1) {
+          firstSignal = init?.signal ?? undefined;
+          // Simulate a transport which ignores abort; no pending entry may hang forever.
+          return await new Promise<Response>(() => {});
+        }
+        return Response.json({ ok: true });
+      },
+    });
+    try {
+      const url = await client.buildConfirmedTaskUrl("task", "pi", new URLSearchParams(), { timeoutMs: 2_000 });
+      expect(url).toMatch(/^https:\/\/werelay\.example\/[A-Z0-9]{10}$/);
+      expect(firstSignal?.aborted).toBe(true);
+      expect(calls).toBe(2);
+    } finally { await client.close(); }
+  });
+
+  test("a real user confirmation bypasses background retry backoff without duplicating an active attempt", async () => {
+    let calls = 0;
+    let recovered = false;
+    const client = new WeRelayRelayTaskLinkClient({
+      relayUrl: "https://werelay.example", deviceId: "device", deviceToken: "device-secret",
+      fetchImpl: async () => {
+        calls++;
+        return recovered ? Response.json({ ok: true }) : new Response("unavailable", { status: 503 });
+      },
+    });
+    try {
+      client.buildTaskUrl("same", "deepseek", new URLSearchParams());
+      await Bun.sleep(0);
+      expect(calls).toBe(1);
+      recovered = true;
+      const urls = await Promise.all(Array.from({ length: 5 }, () => client.buildConfirmedTaskUrl(
+        "same", "deepseek", new URLSearchParams(), { timeoutMs: 100 },
+      )));
+      expect(new Set(urls).size).toBe(1);
+      expect(calls).toBe(2);
+    } finally { await client.close(); }
+  });
+
+  test("HTTP success without a Relay acknowledgement never confirms a dead short link", async () => {
+    const client = new WeRelayRelayTaskLinkClient({
+      relayUrl: "https://werelay.example", deviceId: "device", deviceToken: "device-secret",
+      fetchImpl: async () => new Response("<html>proxy login</html>", { status: 200 }),
+    });
+    try {
+      await expect(client.buildConfirmedTaskUrl("task", "pi", new URLSearchParams(), { timeoutMs: 25 }))
+        .rejects.toThrow("短链接暂时无法生成");
+    } finally { await client.close(); }
+  });
+
+  test("bounded acknowledgement reads and failure diagnostics contain no credentials or task text", async () => {
+    const failures: unknown[] = [];
+    let signal: AbortSignal | undefined;
+    const client = new WeRelayRelayTaskLinkClient({
+      relayUrl: "https://werelay.example", deviceId: "private-device", deviceToken: "private-token",
+      requestTimeoutMs: 10, onRegistrationFailure: (failure) => failures.push(failure),
+      fetchImpl: async (_url, init) => {
+        signal = init?.signal ?? undefined;
+        const response = Response.json({ ok: true });
+        response.json = async () => await new Promise(() => {});
+        return response;
+      },
+    });
+    try {
+      await expect(client.buildConfirmedTaskUrl("private-task", "pi", new URLSearchParams("setup=private-setup"), { timeoutMs: 60 }))
+        .rejects.toThrow("短链接暂时无法生成");
+      expect(signal?.aborted).toBe(true);
+      expect(failures).toEqual([{ reason: "timeout" }]);
+      expect(JSON.stringify(failures)).not.toContain("private");
+    } finally { await client.close(); }
+  });
+
+  test("closing the client aborts registration and settles waiters without a late retry or confirmation", async () => {
+    let signal: AbortSignal | undefined;
+    let resolve!: (response: Response) => void;
+    const client = new WeRelayRelayTaskLinkClient({
+      relayUrl: "https://werelay.example", deviceId: "device", deviceToken: "device-secret",
+      fetchImpl: async (_url, init) => {
+        signal = init?.signal ?? undefined;
+        return await new Promise<Response>((done) => { resolve = done; });
+      },
+    });
+    const pending = client.buildConfirmedTaskUrl("task", "pi", new URLSearchParams(), { timeoutMs: 500 });
+    const outcome = pending.then(() => "unexpected success", () => "closed");
+    await Bun.sleep(0);
+    await client.close();
+    expect(signal?.aborted).toBe(true);
+    expect(await Promise.race([outcome, Bun.sleep(100).then(() => "still waiting")])).toBe("closed");
+    resolve(Response.json({ ok: true }));
+    await Bun.sleep(0);
+    expect(() => client.buildTaskUrl("task", "pi", new URLSearchParams())).toThrow("短链接暂时无法生成");
+    await expect(client.buildConfirmedTaskUrl("task", "pi", new URLSearchParams())).rejects.toThrow("短链接暂时无法生成");
+  });
+
+  test("reports safe HTTP/network/protocol categories without logging server error bodies", async () => {
+    for (const reason of ["http", "network", "protocol"] as const) {
+      const failures: unknown[] = [];
+      const client = new WeRelayRelayTaskLinkClient({
+        relayUrl: "https://werelay.example", deviceId: "private-device", deviceToken: "private-token",
+        onRegistrationFailure: failure => failures.push(failure),
+        fetchImpl: async () => {
+          if (reason === "network") throw new Error("private connection details");
+          return reason === "http" ? new Response("private server error", { status: 401 })
+            : Response.json({ ok: false, secret: "private" });
+        },
+      });
+      try {
+        await expect(client.buildConfirmedTaskUrl("private-task", "pi", new URLSearchParams(), { timeoutMs: 30 }))
+          .rejects.toThrow("短链接暂时无法生成");
+        expect(failures).toEqual([reason === "http" ? { reason, status: 401 } : { reason }]);
+        expect(JSON.stringify(failures)).not.toContain("private");
+      } finally { await client.close(); }
+    }
+  });
+
+  test("a late response from a timed-out attempt cannot confirm or overwrite the retry", async () => {
+    let finishFirst!: (response: Response) => void;
+    let finishRetry!: (response: Response) => void;
+    let calls = 0;
+    const client = new WeRelayRelayTaskLinkClient({
+      relayUrl: "https://werelay.example", deviceId: "device", deviceToken: "device-secret",
+      requestTimeoutMs: 20,
+      fetchImpl: async () => {
+        calls++;
+        return await new Promise<Response>((resolve) => {
+          if (calls === 1) finishFirst = resolve; else finishRetry = resolve;
+        });
+      },
+    });
+    try {
+      client.buildTaskUrl("task", "pi", new URLSearchParams());
+      await Bun.sleep(35);
+      const pending = client.buildConfirmedTaskUrl("task", "pi", new URLSearchParams(), { timeoutMs: 200 });
+      finishFirst(Response.json({ ok: true }));
+      await Bun.sleep(0);
+      expect(client.buildTaskUrl("task", "pi", new URLSearchParams())).toContain("/t/");
+      finishRetry(Response.json({ ok: true }));
+      expect(await pending).not.toContain("/t/");
+      expect(calls).toBe(2);
+    } finally { await client.close(); }
+  });
+
   test("creates stable ten-character aliases without cross-adapter collisions", () => {
     const threadId = "0000000a-0000-7000-8000-00000000000a";
     const codex = createWeRelayRelayTaskLinkAlias("device-secret", "codex", threadId);

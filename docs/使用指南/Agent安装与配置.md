@@ -316,9 +316,18 @@ Pi Desktop 自建任务使用单独的 **Pi Desktop** 入口（见下节），�
 
 #### 首次连接
 
-本接入按照 PI-Desktop 0.21.0 的本机 MCP 控制协议实现。安装应用并配置好模型后，需要**由用户主动启用本机控制**；WeRelay 不修改应用、不注入插件、不自动退出或重新启动它。
+本接入按照 PI-Desktop 0.21.0 的官方桌面控制协议实现。**普通方式打开 Pi Desktop 并不会开启 MCP 接口**；只装了应用就尝试连接，旧版会一直提示接口不可用。这不是模型或公网服务器的问题。
 
-若当前版本没有设置页开关，可先保存工作并正常退出 Pi Desktop，再在终端按实际应用路径手动启动：
+推荐使用官方插件机制接入，**无需退出或重启 Pi Desktop**：
+
+1. 在电脑终端运行 `werelay-pi-desktop-enable`。命令只在 WeRelay 自有目录准备连接插件，不修改 Pi Desktop 配置，不读取会话数据库。首次明确连接 Pi Desktop 时也会自动准备好同一目录。
+2. 在 Pi Desktop 的**插件管理**选择“从目录安装”（或“加载开发插件”），选择命令输出的绝对目录，默认是 `~/.werelay/plugins/pi-desktop-connector`。
+3. 按桌面提示确认该插件的**桌面控制**权限。WeRelay 不会替用户点击授权或开启免审。插件只开放读取任务、文字消息、新建、改名与停止，不开放删除任务、修改权限或通用命令执行。
+4. 再在微信发送 `/pi-d`，或在网页终端菜单选择 Pi Desktop。应能读到原桌面任务；选择任务后继续原上下文，不会另起 Pi CLI。连接插件随 Desktop 正常启动；停用或卸载插件会断开连接。
+
+插件只监听当前电脑回环地址，凭据文件保持仅当前用户可读；不需要复制 token、不开放公网端口。如果 daemon 设置了 `WERELAY_DATA_DIR`，准备命令也要使用同一个目录。更新插件后，在 Pi Desktop 的插件管理中点“重载”，无需重启应用。
+
+已经启用了本机 MCP 的用户无需安装插件，原方式继续支持。若需手动启用 MCP，可先保存工作并正常退出 Pi Desktop，再在终端按实际应用路径启动：
 
 ```bash
 PI_DESKTOP_MCP_CONTROL=1 /Applications/PI-Desktop.app/Contents/MacOS/PI-Desktop
@@ -334,7 +343,7 @@ PI_DESKTOP_MCP_CONTROL=1 /Applications/PI-Desktop.app/Contents/MacOS/PI-Desktop
 WERELAY_PI_DESKTOP_DATA_DIR=/实际桌面数据目录 werelay --adapter pi-desktop
 ```
 
-已有 daemon 时只在微信发送 `/pi-d`，不要另起同工作区 daemon。没有控制文件时，WeRelay 会显示准备提示，不会回退到 `pi` 或打开替代任务。
+已有 daemon 时只在微信发送 `/pi-d`，不要另起同工作区 daemon。没有控制文件时，WeRelay 会显示一次性安装与授权的具体目录，不会回退到 `pi` 或打开替代任务。后台任务枚举保持只读，不会安装插件或触发桌面授权。
 
 #### 本版能力与边界
 
@@ -343,7 +352,7 @@ WERELAY_PI_DESKTOP_DATA_DIR=/实际桌面数据目录 werelay --adapter pi-deskt
 | 列出本机桌面任务、分页读取文字历史 | 支持；读取与选择不调用桌面打开任务接口 |
 | 继续原任务、收到文字完成回复 | 支持协议接入；由原桌面主进程处理，不启动独立 CLI |
 | 新建项目任务、重命名、停止 | 支持；仅用户明确操作时调用 |
-| 桌面同步 | 使用 Desktop 自带控制接口；发送／新建会触发 Desktop 自身的界面刷新或任务选择，不是后台定时切屏 |
+| 桌面同步 | 使用官方插件 gateway 或 Desktop 自带 MCP 控制接口；原主进程处理消息并刷新界面，不是独立 CLI。MCP 发送／新建可能触发 Desktop 自身的任务选择，不是后台定时切屏 |
 | 审批、补充问题 | **仍在桌面处理**；当前 MCP 目录没有完整的待请求读取能力，不自动批准、不修改权限 |
 | 图片、队列、模型设置、未发送草稿、远程 Host 任务 | 本入口暂不支持 |
 | 超时后的发送 | 不自动重放；保留原任务等待回读。无法确认时先检查桌面，不要连续重发 |
