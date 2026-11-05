@@ -1,5 +1,6 @@
 import { CHAT_COMPONENTS_JS, renderChatComposerHtml } from "../web/chat-components/index.ts";
 import { MESSAGE_RECORD_SETTINGS_JS, MESSAGE_RECORD_SETTINGS_CSS } from "../web/message-record-settings.ts";
+import { CHILD_TASK_LINKS_JS, CHILD_TASK_LINKS_CSS } from "../web/child-task-links.ts";
 import { MESSAGE_BUBBLE_CSS, MESSAGE_MEDIA_CSS, CHAT_PROGRESS_CSS, CHAT_PENDING_CSS, CHAT_TEXT_CSS, CHAT_COMPOSER_CSS, CHAT_MOBILE_CSS, CHAT_SMALL_CSS, CHAT_DARK_CSS } from "../web/chat-components/styles.ts";
 import { AGENT_BRAND_ICON_DATA } from "./agent-brand-icons.ts";
 import { normalizeMobileMessageText } from "./mobile-message-text.ts";
@@ -94,9 +95,11 @@ export const CODEX_MOBILE_HTML = `<!doctype html>
           <div class="topbar-meta" id="current-meta"></div>
         </div>
         <div class="topbar-actions">
-          <div class="cache-sync-indicator" id="cache-sync-indicator" role="status" aria-live="polite" hidden>
-            <span class="cache-sync-icon" aria-hidden="true"></span>
-            <span class="cache-sync-text"></span>
+          <div class="cache-sync-slot" aria-hidden="false">
+            <div class="cache-sync-indicator" id="cache-sync-indicator" role="status" aria-live="polite" hidden>
+              <span class="cache-sync-icon" aria-hidden="true"></span>
+              <span class="cache-sync-text"></span>
+            </div>
           </div>
           <div class="status-label" id="current-status">未选择</div>
           <button class="new-task-button" id="new-task-button" type="button" aria-label="新建任务" title="新建任务">
@@ -332,7 +335,7 @@ export const WE_RELAY_ABOUT_HTML = `<!doctype html>
 </body>
 </html>`;
 
-export const CODEX_MOBILE_CSS = MESSAGE_RECORD_SETTINGS_CSS + String.raw`
+export const CODEX_MOBILE_CSS = MESSAGE_RECORD_SETTINGS_CSS + CHILD_TASK_LINKS_CSS + String.raw`
 :root {
   color-scheme: light;
   --page: #ffffff;
@@ -691,42 +694,49 @@ svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.75; stro
 
 .main-panel { position: relative; min-width: 0; display: flex; flex-direction: column; height: 100dvh; overflow: hidden; background: var(--page); }
 .topbar {
-  min-height: 52px;
+  height: 52px;
   flex: 0 0 auto;
   display: flex;
+  flex-wrap: nowrap;
   align-items: center;
   gap: 8px;
-  padding: max(8px, env(safe-area-inset-top)) 14px 8px;
+  padding: 0 14px;
   background: rgba(255, 255, 255, 0.92);
   backdrop-filter: blur(16px);
   z-index: 10;
 }
 .menu-button { display: none; }
-.topbar-copy { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; }
+.topbar-copy { flex: 1 1 auto; min-width: 0; min-height: 0; overflow: hidden; display: flex; align-items: center; gap: 7px; }
+.topbar-title { min-width: 0; overflow: hidden; color: var(--text); font-size: 13px; font-weight: 600; line-height: 1.25; text-overflow: ellipsis; white-space: nowrap; }
+.topbar-meta { min-width: 0; overflow: hidden; color: var(--muted); font-size: 11px; line-height: 1.25; text-overflow: ellipsis; white-space: nowrap; }
+.topbar-meta[hidden] { display: none; }
+.topbar-title + .topbar-meta::before { content: "·"; margin-right: 7px; color: var(--border-strong); }
 @keyframes switch-spin { to { transform: rotate(360deg); } }
-.adapter-menu { display: flex; flex: 0 0 auto; flex-wrap: nowrap; gap: 4px; min-width: 0; margin: 0 2px 10px; padding: 3px 1px 7px; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
+.adapter-menu { display: flex; flex: 0 0 auto; flex-wrap: nowrap; align-items: flex-start; gap: 4px; min-width: 0; margin: 0 2px 10px; padding: 3px 1px 7px; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
 .adapter-menu.has-more { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 36px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 36px), transparent); }
-.adapter-menu-item { position: relative; flex: 0 0 calc((100% - 12px) / 3.5); min-width: 0; min-height: 72px; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 8px 4px 6px; border: 0; border-radius: 10px; background: transparent; color: var(--muted-strong); font: inherit; cursor: pointer; }
+.adapter-menu-item { position: relative; flex: 0 0 calc((100% - 12px) / 3.5); min-width: 0; min-height: 0; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 7px 4px 8px; border: 0; border-radius: 9px; background: transparent; color: var(--muted-strong); font: inherit; cursor: pointer; }
 .adapter-menu-icon { position: relative; display: grid; place-items: center; width: 38px; height: 38px; flex: 0 0 auto; border-radius: 8px; background: #fff; }
 .adapter-menu-icon img { display: block; width: 34px; height: 34px; object-fit: contain; }
-.adapter-menu-label { display: block; width: calc(100% + 8px); margin-inline: -4px; white-space: normal; word-break: normal; overflow-wrap: normal; hyphens: none; text-align: center; font-size: 11px; line-height: 14px; }
+.adapter-menu-label { display: block; width: calc(100% + 8px); margin-inline: -4px; white-space: normal; word-break: normal; overflow-wrap: normal; hyphens: none; text-align: center; font-size: 10px; font-weight: 500; line-height: 13px; }
 .adapter-menu-running-dot { position: absolute; right: -2px; bottom: -2px; width: 6px; height: 6px; border-radius: 50%; background: var(--green); animation: task-dot-breathe 1.6s ease-in-out infinite; }
 .adapter-menu-item:hover { background: var(--surface-hover); color: var(--text); }
-.adapter-menu-item.is-active { color: var(--text); font-weight: 620; }
-.adapter-menu-item.is-active::before { content: ""; position: absolute; inset: 4px 4px 2px; border: 1px solid var(--green); border-radius: 8px; background: rgba(16,163,127,.08); }
-.adapter-menu-item.is-active > * { position: relative; z-index: 1; }
-.adapter-menu-item.is-active:hover { background: transparent; }
+.adapter-menu-item.is-active { color: var(--text); }
+.adapter-menu-item.is-active .adapter-menu-icon { background: var(--surface-selected); box-shadow: inset 0 0 0 1px var(--border); }
+.adapter-menu-item.is-active .adapter-menu-label { font-weight: 600; }
+.adapter-menu-item.is-active:hover { background: var(--surface-hover); }
 .adapter-menu-item:focus-visible { outline: 2px solid var(--green); outline-offset: 1px; }
 .adapter-menu-item:disabled { cursor: wait; }
 .adapter-menu-item.is-switching .adapter-menu-icon::after { content: ""; position: absolute; inset: -3px; border: 1.5px solid var(--border); border-top-color: var(--green); border-radius: 50%; animation: switch-spin .8s linear infinite; }
 @media (prefers-reduced-motion: reduce) { .adapter-menu-item.is-switching .adapter-menu-icon::after { animation: none; } }
-.cache-sync-indicator { min-height: 24px; display: inline-flex; align-items: center; gap: 5px; padding: 0 7px; border-radius: 999px; color: var(--muted); background: var(--surface); font-size: 11px; white-space: nowrap; }
+.topbar-actions { flex: 0 0 auto; height: 100%; display: flex; flex-wrap: nowrap; align-items: center; gap: 4px; }
+.cache-sync-slot { width: 0; height: 100%; flex: 0 0 auto; display: flex; align-items: center; justify-content: flex-end; overflow: hidden; }
+.cache-sync-indicator { height: 24px; display: inline-flex; align-items: center; gap: 5px; padding: 0 7px; border-radius: 999px; color: var(--muted); background: var(--surface); font-size: 11px; line-height: 1; white-space: nowrap; }
 .cache-sync-indicator[hidden] { display: none; }
 .cache-sync-icon { width: 10px; height: 10px; flex: 0 0 auto; border: 1.4px solid var(--border-strong); border-top-color: var(--green); border-radius: 50%; animation: switch-spin .8s linear infinite; }
 .cache-sync-indicator.is-current .cache-sync-icon { border: 0; animation: none; }
 .cache-sync-indicator.is-current .cache-sync-icon::before { content: ""; display: block; width: 8px; height: 4px; margin: 1px 0 0 1px; border-left: 1.5px solid var(--green); border-bottom: 1.5px solid var(--green); transform: rotate(-45deg); }
 .cache-sync-indicator.is-updating { color: var(--muted-strong); }
-.status-label { flex: 0 0 auto; display: flex; align-items: center; gap: 7px; min-height: 32px; padding: 0 8px; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.status-label { height: 32px; flex: 0 0 auto; display: flex; align-items: center; gap: 7px; padding: 0 8px; color: var(--muted); font-size: 12px; line-height: 1; white-space: nowrap; }
 .new-task-button { width: 34px; height: 34px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 9px; background: transparent; color: var(--text); cursor: pointer; }
 .new-task-button:hover { background: var(--surface-hover); }
 .task-board {
@@ -1189,7 +1199,7 @@ ${CHAT_MOBILE_CSS}
   .settings-view-header p { max-width: 68vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
   .settings-body { padding: 22px 18px max(32px, env(safe-area-inset-bottom)); }
   .sidebar-close, .menu-button { display: grid; }
-  .topbar { position: absolute; top: 0; left: 0; right: 0; min-height: 52px; padding: max(8px, env(safe-area-inset-top)) 8px 8px; background: rgba(255,255,255,.86); z-index: 12; }
+  .topbar { position: absolute; top: 0; left: 0; right: 0; height: calc(52px + env(safe-area-inset-top)); min-height: calc(52px + env(safe-area-inset-top)); padding: env(safe-area-inset-top) 8px 0; overflow: hidden; background: rgba(255,255,255,.86); z-index: 12; }
   .menu-button { border-radius: 8px; }
   .topbar-copy { gap: 7px; }
   .task-board-header { padding: max(12px, env(safe-area-inset-top)) 16px 14px; }
@@ -1214,10 +1224,11 @@ ${CHAT_MOBILE_CSS}
   .task-board-completed-title { white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
   .task-board-skeleton { width: 100%; min-width: 0; grid-template-columns: minmax(0, 1fr); gap: 20px; }
   .task-board-skeleton-column:nth-child(n + 3) { display: none; }
-  .topbar-title { max-width: 46vw; font-size: 11px; }
+  .topbar-title { max-width: none; font-size: 13px; }
+  .topbar-meta { font-size: 11px; }
   .status-label { width: 28px; padding: 0; justify-content: center; font-size: 0; }
   .topbar-actions { gap: 1px; }
-  .cache-sync-indicator { min-width: 24px; padding: 0 6px; justify-content: center; }
+  .cache-sync-indicator { height: 24px; min-width: 24px; padding: 0 6px; justify-content: center; }
   .cache-sync-text { display: none; }
   .new-task-button { width: 34px; height: 34px; }
   .messages { padding: calc(64px + env(safe-area-inset-top)) 16px 116px; }
@@ -1273,6 +1284,7 @@ export const CODEX_MOBILE_APP_JS = String.raw`
   "use strict";
 
 ${MESSAGE_RECORD_SETTINGS_JS}
+${CHILD_TASK_LINKS_JS}
 
   var AGENT_BRAND_ICON_DATA = ${JSON.stringify(AGENT_BRAND_ICON_DATA)};
   var normalizeMobileMessageText = ${normalizeMobileMessageText.toString()};
@@ -1324,6 +1336,18 @@ ${MESSAGE_RECORD_SETTINGS_JS}
     onCopy: function (text) { void copyMessageText(text); },
     onOpenImage: openImageViewer
   } });
+  var childTaskPreview = createTaskConversationPreview({ document: document, escape: escapeHtml, agentName: adapterName,
+    chatUI: WeRelayChatUI, chatText: chatText,
+    readTask: function (adapter, threadId) {
+      return api(adapterApiPath("/api/tasks/" + encodeURIComponent(threadId) + "/messages?limit=30&history=1", adapter));
+    }
+  });
+  var childTaskLinks = createChildTaskLinks({ document: document, preview: childTaskPreview,
+    readChildren: function (adapter, parentThreadId) {
+      return api(adapterApiPath("/api/tasks/" + encodeURIComponent(parentThreadId) + "/children", adapter));
+    },
+    onChange: function () { if (state && state.authenticated) renderMessages(false); }
+  });
   var composerView = WeRelayChatUI.createComposer(composerForm, { actions: {
     onSubmit: submitComposer,
     onNoticeRetry: function () { void retryAdapterConnection(); },
@@ -1422,12 +1446,16 @@ ${MESSAGE_RECORD_SETTINGS_JS}
     boardLastLoadedAtMs: 0,
     currentThreadId: "",
     taskModels: Object.create(null),
+    nextTaskSettings: Object.create(null),
+    nextTaskSettingsOrder: [],
+    sentTaskSettings: Object.create(null),
     modelRequestId: 0,
-    modelChanging: false,
-    taskSettingSync: null,
+    modelRequestInFlight: false,
+    modelRequestKey: "",
+    permissionRequestInFlight: false,
+    permissionRequestKey: "",
     modelMenuOpen: false,
     activeModelGroup: null,
-    reasoningChanging: false,
     sessionMenuOpen: false,
     taskPermissions: Object.create(null),
     permissionRequestId: 0,
@@ -1448,6 +1476,7 @@ ${MESSAGE_RECORD_SETTINGS_JS}
     pendingMessages: [],
     transcriptSignature: "",
     contentRevision: "",
+    conversationSnapshotSavedAtMs: Object.create(null),
     lastLiveMessageRefreshAtMs: 0,
     cacheSyncState: "idle",
     cacheSyncResetTimer: null,
@@ -1466,6 +1495,7 @@ ${MESSAGE_RECORD_SETTINGS_JS}
     trailingMessageRefresh: null,
     taskRequestId: 0,
     nextTaskRefreshAtMs: 0,
+    lastTaskRefreshAtMs: 0,
     messageRequestId: 0,
     messageRenderRevision: 0,
     scrollIntentRevision: 0,
@@ -1489,6 +1519,25 @@ ${MESSAGE_RECORD_SETTINGS_JS}
     suppressTaskClickUntil: 0,
     toastTimer: null,
     liveRefreshTimer: null,
+    liveSocket: null,
+    liveConnected: false,
+    liveHelloReceived: false,
+    liveConnecting: false,
+    liveReconnectAttempts: 0,
+    liveRetryTimer: null,
+    livePingTimer: null,
+    liveWatchdogTimer: null,
+    liveHelloTimer: null,
+    liveLastFrameAtMs: 0,
+    liveHiddenTimer: null,
+    liveUnsupportedUntilMs: 0,
+    liveSubscriptionKey: "",
+    liveRefreshInFlight: false,
+    liveRefreshTrailing: false,
+    liveTasksRefreshTimer: null,
+    prewarmTimer: null,
+    prewarmIdleHandle: null,
+    prewarmRunId: 0,
     runClockTimer: null,
     appUpdateChecking: false,
     lastAppVersionCheckAtMs: 0,
@@ -1511,6 +1560,19 @@ ${MESSAGE_RECORD_SETTINGS_JS}
   var MESSAGE_PAGE_SIZE = 40;
   var LIVE_MESSAGE_PAGE_SIZE = 5;
   var TASK_REFRESH_INTERVAL_MS = 8000;
+  var LIVE_MESSAGE_REFRESH_INTERVAL_MS = 15000;
+  var LIVE_TASK_REFRESH_INTERVAL_MS = 30000;
+  var LIVE_PING_INTERVAL_MS = 25000;
+  var LIVE_WATCHDOG_TIMEOUT_MS = 45000;
+  var LIVE_HELLO_TIMEOUT_MS = 45000;
+  var LIVE_HIDDEN_DISCONNECT_MS = 30000;
+  var LIVE_RECONNECT_BASE_MS = 1000;
+  var LIVE_RECONNECT_MAX_MS = 30000;
+  var LIVE_UNSUPPORTED_COOLDOWN_MS = 10 * 60 * 1000;
+  var PREWARM_IDLE_DELAY_MS = 800;
+  var PREWARM_GAP_MS = 400;
+  var PREWARM_SNAPSHOT_MAX_AGE_MS = 60000;
+  var PREWARM_MAX_TASKS = 6;
   var TASK_LONG_PRESS_MS = 520;
   var TASK_LONG_PRESS_MOVE_PX = 8;
   var LAN_REDIRECT_ATTEMPT_KEY = "werelayLanRedirectAttemptedAt";
@@ -1519,6 +1581,7 @@ ${MESSAGE_RECORD_SETTINGS_JS}
   var DEVICE_CONNECTION_RETRY_MS = 1500;
   var MAX_CONVERSATION_SNAPSHOTS = 12;
   var MAX_COMPOSER_DRAFTS = 40;
+  var PERMISSION_CACHE_TTL_MS = 60 * 1000;
 
   function taskRecencyMs(task) {
     var parsed = Date.parse(task && task.lastUpdatedAt || "");
@@ -1676,7 +1739,7 @@ ${MESSAGE_RECORD_SETTINGS_JS}
   var PERSISTENT_MOBILE_CACHE_SCHEMA_VERSION = 1;
   // Old lists did not carry origins and may contain internal reviews. Invalidate
   // only those indexes once, preserving conversation cache and unsent drafts.
-  var PERSISTENT_TASK_LIST_POLICY_VERSION = 1;
+  var PERSISTENT_TASK_LIST_POLICY_VERSION = 2;
   var PERSISTENT_MOBILE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
   var PERSISTENT_MOBILE_CACHE_WRITE_DELAY_MS = 120;
   var MAX_PERSISTENT_TASK_SNAPSHOTS = 8;
@@ -1899,10 +1962,31 @@ ${MESSAGE_RECORD_SETTINGS_JS}
       "status", "pending", "clientId", "imageCount", "attempts", "browserAttempts",
       "lastError", "waitingForTaskCreation", "createTaskSourceThreadId", "displayInTranscript",
       "adapter", "threadId", "imageStoreKey", "retryAtMs", "retryBlocked", "serverAcknowledged",
-      "deliveryConfirmed", "queuedMessageId", "queueMissing", "baselineUserKeys", "baselineUserCount", "sourceMessageId", "newTaskSettings", "requiredTaskSettings", "composerDraftRevision"
+      "deliveryConfirmed", "queuedMessageId", "queueMissing", "baselineUserKeys", "baselineUserCount", "sourceMessageId", "newTaskSettings", "taskSettings", "composerDraftRevision"
     ].forEach(function (key) {
       if (message[key] !== undefined) sanitized[key] = message[key];
     });
+    if (!sanitized.taskSettings && message.requiredTaskSettings &&
+        typeof message.requiredTaskSettings === "object") {
+      sanitized.taskSettings = message.requiredTaskSettings;
+    }
+    if (sanitized.taskSettings && typeof sanitized.taskSettings === "object") {
+      sanitized.taskSettings = {
+        model: typeof sanitized.taskSettings.model === "string"
+          ? sanitized.taskSettings.model
+          : undefined,
+        reasoningEffort: typeof sanitized.taskSettings.reasoningEffort === "string"
+          ? sanitized.taskSettings.reasoningEffort
+          : undefined
+      };
+      if (!sanitized.taskSettings.model && !sanitized.taskSettings.reasoningEffort) {
+        delete sanitized.taskSettings;
+      } else {
+        Object.keys(sanitized.taskSettings).forEach(function (key) {
+          if (sanitized.taskSettings[key] === undefined) delete sanitized.taskSettings[key];
+        });
+      }
+    }
     if (message.role === "task" && message.sourceTask &&
         typeof message.sourceTask.adapter === "string" && typeof message.sourceTask.sessionId === "string") {
       sanitized.sourceTask = { adapter: message.sourceTask.adapter, sessionId: message.sourceTask.sessionId };
@@ -2038,6 +2122,23 @@ ${MESSAGE_RECORD_SETTINGS_JS}
         composerDrafts[key] = Object.assign({}, draft);
         return true;
       });
+    var nextTaskSettings = Object.create(null);
+    var nextTaskSettingsOrder = state.nextTaskSettingsOrder
+      .slice(-MAX_CONVERSATION_SNAPSHOTS)
+      .filter(function (key) {
+        var settings = state.nextTaskSettings[key];
+        if (!settings || (!settings.model && !settings.reasoningEffort)) return false;
+        nextTaskSettings[key] = {
+          model: typeof settings.model === "string" ? settings.model : undefined,
+          reasoningEffort: typeof settings.reasoningEffort === "string"
+            ? settings.reasoningEffort
+            : undefined
+        };
+        Object.keys(nextTaskSettings[key]).forEach(function (field) {
+          if (nextTaskSettings[key][field] === undefined) delete nextTaskSettings[key][field];
+        });
+        return true;
+      });
     return {
       schemaVersion: PERSISTENT_MOBILE_CACHE_SCHEMA_VERSION,
       taskListPolicyVersion: PERSISTENT_TASK_LIST_POLICY_VERSION,
@@ -2057,6 +2158,8 @@ ${MESSAGE_RECORD_SETTINGS_JS}
       conversationSnapshotOrder: conversationOrder,
       composerDrafts: composerDrafts,
       composerDraftOrder: composerOrder,
+      nextTaskSettings: nextTaskSettings,
+      nextTaskSettingsOrder: nextTaskSettingsOrder,
       nativeComposerDraftConsumed: state.nativeComposerDraftConsumed,
       taskBoard: {
         tasks: (Array.isArray(state.boardTasks) ? state.boardTasks : [])
@@ -2167,11 +2270,13 @@ ${MESSAGE_RECORD_SETTINGS_JS}
       : [];
     state.conversationSnapshots = Object.create(null);
     state.conversationSnapshotOrder = [];
+    state.conversationSnapshotSavedAtMs = Object.create(null);
     conversationSnapshotOrder.forEach(function (key) {
       var snapshot = sanitizePersistentConversationSnapshot(conversationSnapshotSource[key]);
       if (!snapshot) return;
       state.conversationSnapshots[key] = snapshot;
       state.conversationSnapshotOrder.push(key);
+      state.conversationSnapshotSavedAtMs[key] = Math.max(0, Number(payload.savedAtMs) || 0);
     });
     var composerDraftSource = payload.composerDrafts && typeof payload.composerDrafts === "object"
       ? payload.composerDrafts
@@ -2188,6 +2293,33 @@ ${MESSAGE_RECORD_SETTINGS_JS}
       if (!draft || typeof draft.text !== "string" || !draft.text && !draft.nativeRevision) return;
       state.composerDrafts[key] = Object.assign({}, draft);
       state.composerDraftOrder.push(key);
+    });
+    var nextTaskSettingsSource = payload.nextTaskSettings &&
+      typeof payload.nextTaskSettings === "object"
+      ? payload.nextTaskSettings
+      : Object.create(null);
+    var nextTaskSettingsOrder = Array.isArray(payload.nextTaskSettingsOrder)
+      ? payload.nextTaskSettingsOrder.filter(function (key) {
+          return typeof key === "string" && nextTaskSettingsSource[key];
+        }).slice(-MAX_CONVERSATION_SNAPSHOTS)
+      : [];
+    state.nextTaskSettings = Object.create(null);
+    state.nextTaskSettingsOrder = [];
+    nextTaskSettingsOrder.forEach(function (key) {
+      var settings = nextTaskSettingsSource[key];
+      if (!settings || typeof settings !== "object") return;
+      var sanitized = {
+        model: typeof settings.model === "string" ? settings.model : undefined,
+        reasoningEffort: typeof settings.reasoningEffort === "string"
+          ? settings.reasoningEffort
+          : undefined
+      };
+      if (!sanitized.model && !sanitized.reasoningEffort) return;
+      Object.keys(sanitized).forEach(function (field) {
+        if (sanitized[field] === undefined) delete sanitized[field];
+      });
+      state.nextTaskSettings[key] = sanitized;
+      state.nextTaskSettingsOrder.push(key);
     });
 
     state.nativeComposerDraftConsumed = Object.create(null);
@@ -2314,9 +2446,14 @@ ${MESSAGE_RECORD_SETTINGS_JS}
     state.localTaskDrafts[state.currentAdapter] = task;
   }
 
-  function forgetLocalTaskDraft(adapterId, threadId) {
+  function forgetLocalTaskDraft(adapterId, threadId, previousThreadId) {
     var task = state.localTaskDrafts[adapterId];
-    if (!task || threadId && task.threadId !== threadId) return;
+    if (
+      !task ||
+      threadId &&
+        task.threadId !== threadId &&
+        (!previousThreadId || task.threadId !== previousThreadId)
+    ) return;
     delete state.localTaskDrafts[adapterId];
   }
 
@@ -2473,6 +2610,7 @@ ${MESSAGE_RECORD_SETTINGS_JS}
     if (!state.currentThreadId) return;
     saveComposerDraft(state.currentAdapter, state.currentThreadId, true);
     var key = conversationStateKey(state.currentAdapter, state.currentThreadId);
+    var existingSnapshot = state.conversationSnapshots[key];
     setBoundedConversationValue(
       state.conversationSnapshots,
       state.conversationSnapshotOrder,
@@ -2506,10 +2644,18 @@ ${MESSAGE_RECORD_SETTINGS_JS}
         approvalResults: state.approvalResults.slice(),
         stopRequestedThreadId: state.stopRequestedThreadId,
         scrollTop: messagesEl.scrollTop,
-        nearBottom: isNearBottom()
+        nearBottom: isNearBottom(),
+        staleRevision: existingSnapshot && existingSnapshot.staleRevision || ""
       },
       MAX_CONVERSATION_SNAPSHOTS
     );
+    if (!state.conversationSnapshotSavedAtMs) state.conversationSnapshotSavedAtMs = Object.create(null);
+    state.conversationSnapshotSavedAtMs[key] = Date.now();
+    Object.keys(state.conversationSnapshotSavedAtMs).forEach(function (entryKey) {
+      if (!Object.prototype.hasOwnProperty.call(state.conversationSnapshots, entryKey)) {
+        delete state.conversationSnapshotSavedAtMs[entryKey];
+      }
+    });
     if (!suppressPersistentWrite) schedulePersistentMobileCacheWrite();
   }
 
@@ -2520,20 +2666,22 @@ ${MESSAGE_RECORD_SETTINGS_JS}
       conversationStateKey(adapterId, threadId)
     );
     if (!snapshot) return false;
-    state.serverMessages = snapshot.serverMessages.slice();
+    state.serverMessages = Array.isArray(snapshot.serverMessages) ? snapshot.serverMessages.slice() : [];
     state.deliveredClientIds = sanitizeDeliveredClientIds(snapshot.deliveredClientIds);
     state.outboundMessages = Array.isArray(snapshot.outboundMessages)
       ? snapshot.outboundMessages.slice()
       : [];
-    state.historyMessages = snapshot.historyMessages.slice();
-    state.latestMessages = snapshot.latestMessages.slice();
+    state.historyMessages = Array.isArray(snapshot.historyMessages) ? snapshot.historyMessages.slice() : [];
+    state.latestMessages = Array.isArray(snapshot.latestMessages)
+      ? snapshot.latestMessages.slice()
+      : state.serverMessages.slice();
     state.oldestMessageCursor = snapshot.oldestMessageCursor;
     state.hasOlderMessages = snapshot.hasOlderMessages;
     state.historySource = snapshot.historySource || "";
     state.historyCaughtUp = snapshot.historyCaughtUp !== false;
-    state.progressItems = snapshot.progressItems.slice();
+    state.progressItems = Array.isArray(snapshot.progressItems) ? snapshot.progressItems.slice() : [];
     state.optimisticProgressTurnId = snapshot.optimisticProgressTurnId || null;
-    state.pendingMessages = snapshot.pendingMessages.map(function (message) {
+    state.pendingMessages = (Array.isArray(snapshot.pendingMessages) ? snapshot.pendingMessages : []).map(function (message) {
       return Object.assign({}, message, { adapter: message.adapter || adapterId, threadId: message.threadId || threadId, inFlight: false });
     });
     state.pendingMessages.forEach(function (pending) {
@@ -2544,13 +2692,13 @@ ${MESSAGE_RECORD_SETTINGS_JS}
     state.transcriptSignature = snapshot.transcriptSignature || "";
     state.contentRevision = snapshot.contentRevision || "";
     state.queueSignature = snapshot.queueSignature || "";
-    state.queuedMessages = snapshot.queuedMessages.slice();
+    state.queuedMessages = Array.isArray(snapshot.queuedMessages) ? snapshot.queuedMessages.slice() : [];
     state.editingQueuedMessageId = snapshot.editingQueuedMessageId || "";
     state.editingQueuedImageCount = Math.max(0, Number(snapshot.editingQueuedImageCount) || 0);
     state.runSummary = snapshot.runSummary || null;
     state.localRunSummary = snapshot.localRunSummary || null;
     state.pendingApproval = snapshot.pendingApproval || null;
-    state.approvalResults = snapshot.approvalResults.slice();
+    state.approvalResults = Array.isArray(snapshot.approvalResults) ? snapshot.approvalResults.slice() : [];
     state.stopRequestedThreadId = snapshot.stopRequestedThreadId === threadId ? threadId : "";
     state.messageNodes = Object.create(null);
     state.pendingImages = Array.isArray(snapshot.pendingImages)
@@ -3060,6 +3208,420 @@ ${MESSAGE_RECORD_SETTINGS_JS}
     return url.pathname + url.search;
   }
 
+  function liveChannelUrl() {
+    var url = new URL("/api/live", window.location.origin);
+    if (url.protocol === "http:") url.protocol = "ws:";
+    else if (url.protocol === "https:") url.protocol = "wss:";
+    return url.toString();
+  }
+
+  function liveSubscriptionTarget() {
+    var threadId = String(state.currentThreadId || "");
+    if (
+      !state.currentAdapter ||
+      !threadId ||
+      isTemporaryTask(currentTask()) ||
+      threadId.startsWith("local-new-")
+    ) return null;
+    return {
+      adapter: state.currentAdapter,
+      threadId: threadId
+    };
+  }
+
+  function sendLiveFrame(type, target) {
+    if (!state.liveSocket || state.liveSocket.readyState !== 1) return false;
+    var frame = { v: 1, type: type };
+    if (target) {
+      frame.adapter = target.adapter;
+      frame.threadId = target.threadId;
+    }
+    try {
+      state.liveSocket.send(JSON.stringify(frame));
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function clearLiveTimers() {
+    if (state.liveRetryTimer) clearTimeout(state.liveRetryTimer);
+    if (state.livePingTimer) clearInterval(state.livePingTimer);
+    if (state.liveWatchdogTimer) clearInterval(state.liveWatchdogTimer);
+    if (state.liveHelloTimer) clearTimeout(state.liveHelloTimer);
+    if (state.liveTasksRefreshTimer) clearTimeout(state.liveTasksRefreshTimer);
+    state.liveRetryTimer = null;
+    state.livePingTimer = null;
+    state.liveWatchdogTimer = null;
+    state.liveHelloTimer = null;
+    state.liveTasksRefreshTimer = null;
+  }
+
+  function stopLiveChannel(markUnsupported) {
+    var wasConnected = state.liveConnected && state.liveHelloReceived;
+    clearLiveTimers();
+    if (state.liveSocket) {
+      var socket = state.liveSocket;
+      state.liveSocket = null;
+      try { socket.close(); } catch (_) {}
+    }
+    state.liveConnected = false;
+    state.liveHelloReceived = false;
+    state.liveConnecting = false;
+    state.liveSubscriptionKey = "";
+    if (markUnsupported) state.liveUnsupportedUntilMs = Date.now() + LIVE_UNSUPPORTED_COOLDOWN_MS;
+    if (wasConnected && state.authenticated) {
+      state.nextTaskRefreshAtMs = Date.now() + TASK_REFRESH_INTERVAL_MS;
+      state.lastTaskRefreshAtMs = 0;
+      scheduleLiveRefresh(document.hidden ? 10000 : 2200);
+    }
+  }
+
+  function liveReconnectDelay() {
+    var base = Math.min(
+      LIVE_RECONNECT_MAX_MS,
+      LIVE_RECONNECT_BASE_MS * Math.pow(2, Math.max(0, state.liveReconnectAttempts - 1))
+    );
+    return Math.round(base * (0.8 + Math.random() * 0.4));
+  }
+
+  function scheduleLiveReconnect() {
+    if (
+      !state.authenticated ||
+      document.hidden ||
+      Date.now() < state.liveUnsupportedUntilMs ||
+      state.liveRetryTimer
+    ) return;
+    var delay = liveReconnectDelay();
+    state.liveRetryTimer = setTimeout(function () {
+      state.liveRetryTimer = null;
+      startLiveChannel();
+    }, delay);
+  }
+
+  function noteLiveFailureBeforeHello() {
+    state.liveReconnectAttempts += 1;
+    if (state.liveReconnectAttempts >= 3) {
+      stopLiveChannel(true);
+      return;
+    }
+    scheduleLiveReconnect();
+  }
+
+  function syncLiveSubscriptions() {
+    if (!state.liveConnected || !state.liveHelloReceived) return;
+    var target = liveSubscriptionTarget();
+    var nextKey = target ? target.adapter + "\u0000" + target.threadId : "";
+    if (nextKey === state.liveSubscriptionKey) return;
+    var previous = state.liveSubscriptionKey.split("\u0000");
+    if (state.liveSubscriptionKey && previous.length === 2) {
+      sendLiveFrame("unsubscribe", { adapter: previous[0], threadId: previous[1] });
+    }
+    state.liveSubscriptionKey = nextKey;
+    if (target) sendLiveFrame("subscribe", target);
+  }
+
+  function markConversationSnapshotStale(adapter, threadId, revision) {
+    var key = conversationStateKey(adapter, threadId);
+    var snapshot = state.conversationSnapshots[key];
+    if (snapshot && revision !== undefined) snapshot.staleRevision = typeof revision === "string" ? revision : "";
+  }
+
+  function refreshCurrentMessagesFromLive() {
+    if (!state.authenticated || state.cachePreviewMode || document.hidden) return;
+    if (state.liveRefreshInFlight || state.loadingMessages) {
+      state.liveRefreshTrailing = true;
+      return;
+    }
+    state.liveRefreshInFlight = true;
+    void refreshMessagesIfChanged(false, false).catch(function () {}).finally(function () {
+      state.liveRefreshInFlight = false;
+      if (state.liveRefreshTrailing) {
+        state.liveRefreshTrailing = false;
+        refreshCurrentMessagesFromLive();
+      }
+    });
+  }
+
+  function handleLiveFrame(frame) {
+    if (!frame || frame.v !== 1 || typeof frame.type !== "string") return;
+    state.liveLastFrameAtMs = Date.now();
+    if (frame.type === "hello") {
+      state.liveConnected = true;
+      state.liveHelloReceived = true;
+      state.liveReconnectAttempts = 0;
+      if (state.liveHelloTimer) clearTimeout(state.liveHelloTimer);
+      state.liveHelloTimer = null;
+      syncLiveSubscriptions();
+      return;
+    }
+    if (frame.type === "changed") {
+      if (typeof frame.adapter !== "string" || typeof frame.threadId !== "string") return;
+      if (
+        frame.adapter !== state.currentAdapter ||
+        frame.threadId !== state.currentThreadId
+      ) {
+        markConversationSnapshotStale(frame.adapter, frame.threadId, frame.revision);
+        return;
+      }
+      if (frame.revision === state.contentRevision) return;
+      markConversationSnapshotStale(frame.adapter, frame.threadId, frame.revision);
+      refreshCurrentMessagesFromLive();
+      return;
+    }
+    if (frame.type === "tasks-changed") {
+      if (frame.adapter !== state.currentAdapter) return;
+      if (state.liveTasksRefreshTimer) clearTimeout(state.liveTasksRefreshTimer);
+      state.liveTasksRefreshTimer = setTimeout(function () {
+        state.liveTasksRefreshTimer = null;
+        if (state.authenticated && !document.hidden) void loadTasks(false);
+      }, 300);
+    }
+  }
+
+  function startLiveChannel() {
+    if (
+      !state.authenticated ||
+      document.hidden ||
+      state.cachePreviewMode ||
+      Date.now() < state.liveUnsupportedUntilMs ||
+      state.liveConnecting ||
+      state.liveSocket
+    ) return;
+    if (typeof window.WebSocket !== "function") return;
+    state.liveConnecting = true;
+    state.liveHelloReceived = false;
+    var socket;
+    try {
+      socket = new window.WebSocket(liveChannelUrl());
+    } catch (_) {
+      state.liveConnecting = false;
+      noteLiveFailureBeforeHello();
+      return;
+    }
+    state.liveSocket = socket;
+    socket.addEventListener("open", function () {
+      if (state.liveSocket !== socket) return;
+      state.liveConnecting = false;
+      state.liveLastFrameAtMs = Date.now();
+      if (state.liveHelloTimer) clearTimeout(state.liveHelloTimer);
+      state.liveHelloTimer = setTimeout(function () {
+        if (state.liveSocket !== socket || state.liveHelloReceived) return;
+        stopLiveChannel(false);
+        noteLiveFailureBeforeHello();
+      }, LIVE_HELLO_TIMEOUT_MS);
+      if (state.livePingTimer) clearInterval(state.livePingTimer);
+      state.livePingTimer = setInterval(function () {
+        if (state.liveSocket === socket && state.liveHelloReceived) sendLiveFrame("ping");
+      }, LIVE_PING_INTERVAL_MS);
+      if (state.liveWatchdogTimer) clearInterval(state.liveWatchdogTimer);
+      state.liveWatchdogTimer = setInterval(function () {
+        if (
+          state.liveSocket === socket &&
+          Date.now() - state.liveLastFrameAtMs >= LIVE_WATCHDOG_TIMEOUT_MS
+        ) stopLiveChannel(false);
+        if (!state.liveSocket) scheduleLiveReconnect();
+      }, 5000);
+    });
+    socket.addEventListener("message", function (event) {
+      if (state.liveSocket !== socket) return;
+      var frame;
+      try { frame = JSON.parse(String(event.data || "")); } catch (_) { return; }
+      handleLiveFrame(frame);
+    });
+    socket.addEventListener("close", function () {
+      if (state.liveSocket !== socket) return;
+      var hadHello = state.liveHelloReceived;
+      stopLiveChannel(false);
+      if (!hadHello) {
+        noteLiveFailureBeforeHello();
+        return;
+      }
+      scheduleLiveReconnect();
+    });
+    socket.addEventListener("error", function () {
+      if (state.liveSocket !== socket) return;
+      try { socket.close(); } catch (_) {}
+    });
+  }
+
+  function liveMessagePollingInterval() {
+    return state.liveConnected && state.liveHelloReceived
+      ? LIVE_MESSAGE_REFRESH_INTERVAL_MS
+      : 2200;
+  }
+
+  function liveTaskPollingInterval() {
+    return state.liveConnected && state.liveHelloReceived
+      ? LIVE_TASK_REFRESH_INTERVAL_MS
+      : TASK_REFRESH_INTERVAL_MS;
+  }
+
+  function recentTaskPrewarmCandidates(tasks, adapter, currentThreadId) {
+    return (Array.isArray(tasks) ? tasks : [])
+      .filter(function (task) {
+        return task && task.threadId &&
+          !isTemporaryTask(task) &&
+          !String(task.threadId).startsWith("local-new-") &&
+          (task.adapter === undefined || task.adapter === adapter) &&
+          task.threadId !== currentThreadId;
+      })
+      .map(function (task, index) {
+        return { task: task, index: index };
+      })
+      .sort(function (left, right) {
+        var leftPriority = isTaskBoardInProgress(left.task) ? 1 : 0;
+        var rightPriority = isTaskBoardInProgress(right.task) ? 1 : 0;
+        return rightPriority - leftPriority ||
+          taskRecencyMs(right.task) - taskRecencyMs(left.task) ||
+          left.index - right.index;
+      })
+      .slice(0, PREWARM_MAX_TASKS)
+      .map(function (entry) { return entry.task; });
+  }
+
+  function recentTaskSnapshotFresh(adapter, threadId, nowMs) {
+    var key = conversationStateKey(adapter, threadId);
+    var snapshot = state.conversationSnapshots[key];
+    if (!snapshot || snapshot.staleRevision) return false;
+    var savedAtMs = Number(state.conversationSnapshotSavedAtMs[key]) || 0;
+    return savedAtMs > 0 && nowMs - savedAtMs < PREWARM_SNAPSHOT_MAX_AGE_MS;
+  }
+
+  function prewarmConversationSnapshot(adapter, threadId, payload) {
+    var messages = filterVisibleConversationMessages(payload.messages || []);
+    var page = normalizeMessagePage(payload, messages);
+    var key = conversationStateKey(adapter, threadId);
+    var existing = state.conversationSnapshots[key] || null;
+    var nowMs = Date.now();
+    setBoundedConversationValue(
+      state.conversationSnapshots,
+      state.conversationSnapshotOrder,
+      key,
+      {
+        serverMessages: messages,
+        outboundMessages: existing && Array.isArray(existing.outboundMessages)
+          ? existing.outboundMessages
+          : [],
+        deliveredClientIds: existing && Array.isArray(existing.deliveredClientIds)
+          ? existing.deliveredClientIds
+          : [],
+        historyMessages: [],
+        latestMessages: messages,
+        oldestMessageCursor: page.nextBefore,
+        hasOlderMessages: page.hasMore,
+        historySource: page.source,
+        historyCaughtUp: true,
+        progressItems: existing && Array.isArray(existing.progressItems)
+          ? existing.progressItems
+          : [],
+        optimisticProgressTurnId: existing && existing.optimisticProgressTurnId || null,
+        pendingMessages: existing && Array.isArray(existing.pendingMessages)
+          ? existing.pendingMessages
+          : [],
+        transcriptSignature: "",
+        contentRevision: typeof payload.revision === "string" ? payload.revision : "",
+        queueSignature: existing && existing.queueSignature || "",
+        queuedMessages: existing && Array.isArray(existing.queuedMessages)
+          ? existing.queuedMessages
+          : [],
+        editingQueuedMessageId: existing && existing.editingQueuedMessageId || "",
+        editingQueuedImageCount: existing && Math.max(
+          0,
+          Number(existing.editingQueuedImageCount) || 0
+        ) || 0,
+        editingQueuedText: existing && existing.editingQueuedText || "",
+        pendingImages: existing && Array.isArray(existing.pendingImages)
+          ? existing.pendingImages
+          : [],
+        runSummary: existing && existing.runSummary || null,
+        localRunSummary: existing && existing.localRunSummary || null,
+        pendingApproval: existing && existing.pendingApproval || null,
+        approvalResults: existing && Array.isArray(existing.approvalResults)
+          ? existing.approvalResults
+          : [],
+        stopRequestedThreadId: existing && existing.stopRequestedThreadId || "",
+        scrollTop: existing && Math.max(0, Number(existing.scrollTop) || 0) || 0,
+        nearBottom: !existing || existing.nearBottom !== false
+      },
+      MAX_CONVERSATION_SNAPSHOTS
+    );
+    state.conversationSnapshotSavedAtMs[key] = nowMs;
+    Object.keys(state.conversationSnapshotSavedAtMs).forEach(function (entryKey) {
+      if (!Object.prototype.hasOwnProperty.call(state.conversationSnapshots, entryKey)) {
+        delete state.conversationSnapshotSavedAtMs[entryKey];
+      }
+    });
+    schedulePersistentMobileCacheWrite();
+  }
+
+  function scheduleRecentTaskPrewarm() {
+    if (state.prewarmTimer || state.prewarmIdleHandle) return;
+    var run = function () {
+      state.prewarmTimer = null;
+      state.prewarmIdleHandle = null;
+      void prewarmRecentTasks();
+    };
+    if (typeof window.requestIdleCallback === "function") {
+      state.prewarmIdleHandle = window.requestIdleCallback(run, { timeout: PREWARM_IDLE_DELAY_MS });
+    } else {
+      state.prewarmTimer = setTimeout(run, PREWARM_IDLE_DELAY_MS);
+    }
+  }
+
+  async function prewarmRecentTasks() {
+    if (!state.authenticated || document.hidden) return;
+    var runId = state.prewarmRunId;
+    var adapter = state.currentAdapter;
+    var candidates = recentTaskPrewarmCandidates(state.tasks, adapter, state.currentThreadId);
+    var lastPrewarmRequestAtMs = 0;
+    for (var index = 0; index < candidates.length; index += 1) {
+      if (
+        !state.authenticated ||
+        document.hidden ||
+        adapter !== state.currentAdapter ||
+        runId !== state.prewarmRunId
+      ) return;
+      while (state.loadingMessages) {
+        await new Promise(function (resolve) { setTimeout(resolve, PREWARM_GAP_MS); });
+        if (
+          !state.authenticated ||
+          document.hidden ||
+          adapter !== state.currentAdapter ||
+          runId !== state.prewarmRunId
+        ) return;
+      }
+      var task = candidates[index];
+      if (task.threadId === state.currentThreadId) continue;
+      if (!recentTaskSnapshotFresh(adapter, task.threadId, Date.now())) {
+        var remainingGapMs = PREWARM_GAP_MS - (Date.now() - lastPrewarmRequestAtMs);
+        if (remainingGapMs > 0) {
+          await new Promise(function (resolve) { setTimeout(resolve, remainingGapMs); });
+          if (
+            !state.authenticated ||
+            document.hidden ||
+            adapter !== state.currentAdapter ||
+            runId !== state.prewarmRunId
+          ) return;
+        }
+        lastPrewarmRequestAtMs = Date.now();
+        try {
+          var payload = await api(adapterApiPath(
+            "/api/tasks/" + encodeURIComponent(task.threadId) + "/messages?limit=40&history=1",
+            adapter
+          ));
+          if (
+            !state.authenticated ||
+            document.hidden ||
+            adapter !== state.currentAdapter ||
+            runId !== state.prewarmRunId
+          ) return;
+          prewarmConversationSnapshot(adapter, task.threadId, payload);
+        } catch (_) {}
+      }
+    }
+  }
+
   function currentAdapterEntry() {
     return state.adapters.find(function (adapter) {
       return adapter.id === state.currentAdapter;
@@ -3148,6 +3710,9 @@ ${MESSAGE_RECORD_SETTINGS_JS}
   function renderAdapterMenu() {
     updateActiveDocumentTitle();
     var previousAdapter = adapterMenu.dataset.activeAdapter;
+    var previousOrder = Array.from(adapterMenu.children).map(function (button) {
+      return button.dataset.adapterId;
+    }).join("\u0000");
     var focusedId = document.activeElement && document.activeElement.dataset.adapterId;
     var buttons = Object.create(null);
     Array.from(adapterMenu.children).forEach(function (button) {
@@ -3196,7 +3761,12 @@ ${MESSAGE_RECORD_SETTINGS_JS}
       buttons[focusedId].focus({ preventScroll: true });
     }
     adapterMenu.dataset.activeAdapter = state.currentAdapter;
-    if (previousAdapter !== state.currentAdapter) requestAnimationFrame(revealActiveAdapter);
+    var nextOrder = Array.from(adapterMenu.children).map(function (button) {
+      return button.dataset.adapterId;
+    }).join("\u0000");
+    if (previousAdapter !== state.currentAdapter || previousOrder !== nextOrder) {
+      requestAnimationFrame(revealActiveAdapter);
+    }
     updateAdapterScrollFade();
   }
 
@@ -3208,10 +3778,9 @@ ${MESSAGE_RECORD_SETTINGS_JS}
     var button = adapterMenu.querySelector(".is-active");
     if (!button || !adapterMenu.clientWidth) return;
     var left = button.offsetLeft - adapterMenu.offsetLeft;
-    if (left < adapterMenu.scrollLeft) adapterMenu.scrollLeft = left;
-    else if (left + button.offsetWidth > adapterMenu.scrollLeft + adapterMenu.clientWidth) {
-      adapterMenu.scrollLeft = left + button.offsetWidth - adapterMenu.clientWidth;
-    }
+    var centered = left - (adapterMenu.clientWidth - button.offsetWidth) / 2;
+    var maximum = Math.max(0, adapterMenu.scrollWidth - adapterMenu.clientWidth);
+    adapterMenu.scrollLeft = Math.min(maximum, Math.max(0, centered));
     updateAdapterScrollFade();
   }
 
@@ -3231,6 +3800,117 @@ ${MESSAGE_RECORD_SETTINGS_JS}
 
   function currentTaskModelState() {
     return state.currentThreadId ? state.taskModels[currentTaskModelKey()] || null : null;
+  }
+
+  function pendingNextTaskSettings(key) {
+    return key && state.nextTaskSettings && state.nextTaskSettings[key] || null;
+  }
+
+  function latestPendingTaskSettings(key) {
+    var pendingSettings = null;
+    var found = Array.prototype.some.call(
+      (Array.isArray(state.pendingMessages) ? state.pendingMessages : []).slice().reverse(),
+      function (message) {
+        var messageKey = conversationStateKey(
+          message.adapter || state.currentAdapter,
+          message.threadId || state.currentThreadId
+        );
+        if (messageKey === key && message.taskSettings) {
+          pendingSettings = message.taskSettings;
+          return true;
+        }
+        return false;
+      }
+    );
+    if (!found) {
+      Array.prototype.some.call(
+        (Array.isArray(state.outboundMessages) ? state.outboundMessages : []).slice().reverse(),
+        function (message) {
+          var messageKey = conversationStateKey(
+            message.adapter || state.currentAdapter,
+            message.threadId || state.currentThreadId
+          );
+          if (messageKey === key && message.taskSettings) {
+            pendingSettings = message.taskSettings;
+            return true;
+          }
+          return false;
+        }
+      );
+    }
+    return pendingSettings;
+  }
+
+  function recentSentTaskSettings(key) {
+    var sent = state.sentTaskSettings && state.sentTaskSettings[key];
+    if (!sent) return null;
+    // 已随消息发出、电脑尚未确认的设置最多继续显示 3 分钟，避免按钮闪回旧模型。
+    if (Date.now() - Number(sent.sentAtMs || 0) > 180000) {
+      delete state.sentTaskSettings[key];
+      return null;
+    }
+    return sent.settings;
+  }
+
+  function unconfirmedTaskSettings(modelState) {
+    var key = currentTaskModelKey();
+    var settings = pendingNextTaskSettings(key) || latestPendingTaskSettings(key) || recentSentTaskSettings(key);
+    if (!settings || !modelState) return null;
+    var confirmed = (!settings.model ||
+      settings.model === modelState.currentModel) &&
+      (!settings.reasoningEffort ||
+        settings.reasoningEffort === modelState.currentReasoningEffort);
+    return confirmed ? null : settings;
+  }
+
+  function projectedTaskModelState() {
+    var modelState = currentTaskModelState();
+    if (!modelState) return null;
+    var settings = unconfirmedTaskSettings(modelState);
+    return settings ? applyDraftModelSelection(modelState, settings) : modelState;
+  }
+
+  function setNextTaskSettings(settings) {
+    var key = currentTaskModelKey();
+    if (!key) return;
+    if (!state.nextTaskSettings) state.nextTaskSettings = Object.create(null);
+    if (!Array.isArray(state.nextTaskSettingsOrder)) state.nextTaskSettingsOrder = [];
+    var sanitized = {
+      model: typeof settings.model === "string" ? settings.model : undefined,
+      reasoningEffort: typeof settings.reasoningEffort === "string"
+        ? settings.reasoningEffort
+        : undefined
+    };
+    Object.keys(sanitized).forEach(function (field) {
+      if (sanitized[field] === undefined) delete sanitized[field];
+    });
+    if (!sanitized.model && !sanitized.reasoningEffort) {
+      deleteConversationValue(
+        state.nextTaskSettings,
+        state.nextTaskSettingsOrder,
+        key
+      );
+    } else {
+      setBoundedConversationValue(
+        state.nextTaskSettings,
+        state.nextTaskSettingsOrder,
+        key,
+        sanitized,
+        MAX_CONVERSATION_SNAPSHOTS
+      );
+    }
+    schedulePersistentMobileCacheWrite();
+  }
+
+  function clearNextTaskSettings(key) {
+    if (!state.nextTaskSettings) state.nextTaskSettings = Object.create(null);
+    if (!Array.isArray(state.nextTaskSettingsOrder)) state.nextTaskSettingsOrder = [];
+    deleteConversationValue(
+      state.nextTaskSettings,
+      state.nextTaskSettingsOrder,
+      key
+    );
+    schedulePersistentMobileCacheWrite();
   }
 
   function currentTaskPermissionKey() {
@@ -3279,7 +3959,8 @@ ${MESSAGE_RECORD_SETTINGS_JS}
   }
 
   function renderSessionControl() {
-    var modelState = currentTaskModelState();
+    var confirmedModelState = currentTaskModelState();
+    var modelState = projectedTaskModelState();
     var permissionState = currentTaskPermissionState();
     if (!state.currentThreadId) {
       closeSessionMenu();
@@ -3301,9 +3982,7 @@ ${MESSAGE_RECORD_SETTINGS_JS}
     var currentPermissionOption = permissionOptions.find(function (option) {
       return option.id === currentPermission;
     });
-    var reasoningText = state.reasoningChanging
-      ? "正在切换…"
-      : !modelState
+    var reasoningText = !modelState
         ? "获取中"
         : currentReasoningOption && currentReasoningOption.label ||
           (currentEffort ? reasoningEffortLabel(currentEffort) : taskNeedsCreation(currentTask()) && !modelState.currentModel ? "先选模型" : "跟随会话");
@@ -3322,12 +4001,14 @@ ${MESSAGE_RECORD_SETTINGS_JS}
       permissionState && permissionState.canChange && permissionOptions.length > 0
     );
     var canChange = canChangeReasoning || canChangePermission;
-    var isChanging = state.reasoningChanging || state.permissionChanging;
+    var isChanging = state.permissionChanging;
     if (!canChange) closeSessionMenu();
     composerView.renderSession({
       key: currentTaskModelKey(), visible: true, open: state.sessionMenuOpen,
       label: composerSessionLabel(reasoningText, permissionText), canChange: canChange, changing: isChanging,
-      title: canChange ? "切换推理强度或访问权限" : modelState && modelState.reasoningEffortUnavailableReason ||
+      title: unconfirmedTaskSettings(confirmedModelState)
+        ? "下一条消息使用"
+        : canChange ? "切换推理强度或访问权限" : modelState && modelState.reasoningEffortUnavailableReason ||
         permissionState && permissionState.unavailableReason ||
         (!modelState || !permissionState ? "正在读取当前任务设置。" : "当前任务没有可切换的设置。"),
       groups: [
@@ -3357,20 +4038,23 @@ ${MESSAGE_RECORD_SETTINGS_JS}
   }
 
   function renderModelControl() {
-    var modelState = currentTaskModelState();
+    var confirmedModelState = currentTaskModelState();
+    var modelState = projectedTaskModelState();
     var currentModel = modelState && modelState.currentModel || "";
     var options = modelState && Array.isArray(modelState.options) ? modelState.options : [];
-    var visible = Boolean(state.currentThreadId && (taskNeedsCreation(currentTask()) || currentModel || options.length || state.modelChanging));
+    var visible = Boolean(state.currentThreadId && (taskNeedsCreation(currentTask()) || currentModel || options.length));
     var currentOption = options.find(function (option) { return option.id === currentModel; });
     var canChange = Boolean(modelState && modelState.canChange && options.length > 0 && !draftSettingsSubmitted());
     if (!visible || !canChange) closeModelMenu();
     composerView.renderModel({
       key: currentTaskModelKey(), visible: visible, open: state.modelMenuOpen, canChange: canChange,
-      retry: Boolean(modelState && modelState.loadError), changing: state.modelChanging,
+      retry: Boolean(modelState && modelState.loadError), changing: false,
       value: currentModel, options: options, activeGroup: state.activeModelGroup,
       label: currentOption && currentOption.label || currentModel ||
-        (state.modelChanging ? "正在切换…" : modelState && modelState.loadError ? "重新获取模型" : !modelState ? "获取中" : "选择模型"),
-      title: !canChange ? modelState && modelState.unavailableReason || "当前任务暂时不能切换模型。" : currentModel ? "切换当前任务模型" : "查看模型"
+        (modelState && modelState.loadError ? "重新获取模型" : !modelState ? "获取中" : "选择模型"),
+      title: unconfirmedTaskSettings(confirmedModelState)
+        ? "下一条消息使用"
+        : !canChange ? modelState && modelState.unavailableReason || "当前任务暂时不能切换模型。" : currentModel ? "切换当前任务模型" : "查看模型"
     });
     renderSessionControl();
   }
@@ -3405,7 +4089,7 @@ ${MESSAGE_RECORD_SETTINGS_JS}
       return;
     }
     var task = currentTask();
-    var modelState = currentTaskModelState();
+    var modelState = projectedTaskModelState();
     var selection = Object.assign({}, task.newTaskSettings || {}, update);
     if (update.model) {
       var projected = applyDraftModelSelection(modelState, { model: update.model });
@@ -3430,11 +4114,18 @@ ${MESSAGE_RECORD_SETTINGS_JS}
     var key = currentTaskModelKey();
     var cached = state.taskModels[key];
     renderModelControl();
-    if (state.modelChanging || state.reasoningChanging) return cached || null;
-    if (!force && cached && Date.now() - Number(cached.loadedAtMs || 0) < 10000) {
+    var reusingStaleInFlight = state.modelRequestInFlight && state.modelRequestKey === key;
+    if (reusingStaleInFlight) {
+      return cached || null;
+    }
+    var awaitingSentSettings = state.sentTaskSettings && state.sentTaskSettings[key];
+    var modelCacheTtlMs = awaitingSentSettings ? 5000 : 60000;
+    if (!force && cached && Date.now() - Number(cached.loadedAtMs || 0) < modelCacheTtlMs) {
       return cached;
     }
     var requestId = ++state.modelRequestId;
+    state.modelRequestInFlight = true;
+    state.modelRequestKey = key;
     var requestedAdapter = state.currentAdapter;
     var requestedThreadId = state.currentThreadId;
     var modelAbort = new AbortController();
@@ -3457,7 +4148,20 @@ ${MESSAGE_RECORD_SETTINGS_JS}
         requestedThreadId !== state.currentThreadId
       ) return null;
       if (draft) payload = applyDraftModelSelection(payload, currentTask().newTaskSettings);
+      else if (payload && payload.stale) {
+        payload = Object.assign({}, cached || {}, payload, {
+          loadError: false,
+          stale: true,
+          staleReason: payload.staleReason || cached && cached.staleReason || ""
+        });
+      }
       state.taskModels[key] = Object.assign({}, payload, { loadedAtMs: Date.now() });
+      var sentSettings = state.sentTaskSettings && state.sentTaskSettings[key];
+      if (sentSettings && !payload.stale &&
+          (!sentSettings.settings.model || payload.currentModel === sentSettings.settings.model) &&
+          (!sentSettings.settings.reasoningEffort || payload.currentReasoningEffort === sentSettings.settings.reasoningEffort)) {
+        delete state.sentTaskSettings[key];
+      }
       renderModelControl();
       return state.taskModels[key];
     } catch (error) {
@@ -3466,23 +4170,33 @@ ${MESSAGE_RECORD_SETTINGS_JS}
         requestedAdapter === state.currentAdapter &&
         requestedThreadId === state.currentThreadId
       ) {
-        state.taskModels[key] = {
-          loadError: true,
-          currentModel: cached && cached.currentModel || "",
-          options: cached && cached.options || [],
-          currentReasoningEffort: cached && cached.currentReasoningEffort || "",
-          reasoningEffortOptions: cached && cached.reasoningEffortOptions || [],
-          canChange: false,
-          canChangeReasoningEffort: false,
-          unavailableReason: error.message || "暂时无法读取模型。",
-          reasoningEffortUnavailableReason: error.message || "暂时无法读取推理强度。",
-          loadedAtMs: Date.now()
-        };
+        state.taskModels[key] = cached && Array.isArray(cached.options) && cached.options.length
+          ? Object.assign({}, cached, {
+              loadError: false,
+              stale: true,
+              staleReason: error.message || "电脑暂时没响应，显示上次缓存。"
+            })
+          : {
+              loadError: true,
+              currentModel: cached && cached.currentModel || "",
+              options: [],
+              currentReasoningEffort: cached && cached.currentReasoningEffort || "",
+              reasoningEffortOptions: cached && cached.reasoningEffortOptions || [],
+              canChange: false,
+              canChangeReasoningEffort: false,
+              unavailableReason: error.message || "暂时无法读取模型。",
+              reasoningEffortUnavailableReason: error.message || "暂时无法读取推理强度。",
+              loadedAtMs: Date.now()
+            };
         renderModelControl();
       }
       return null;
     } finally {
       clearTimeout(modelTimeout);
+      if (requestId === state.modelRequestId && state.modelRequestKey === key) {
+        state.modelRequestInFlight = false;
+        state.modelRequestKey = "";
+      }
     }
   }
 
@@ -3499,10 +4213,15 @@ ${MESSAGE_RECORD_SETTINGS_JS}
     var key = currentTaskPermissionKey();
     var cached = state.taskPermissions[key];
     renderSessionControl();
-    if (!force && cached && Date.now() - Number(cached.loadedAtMs || 0) < 10000) {
+    if (state.permissionRequestInFlight && state.permissionRequestKey === key) {
+      return cached || null;
+    }
+    if (!force && cached && Date.now() - Number(cached.loadedAtMs || 0) < PERMISSION_CACHE_TTL_MS) {
       return cached;
     }
     var requestId = ++state.permissionRequestId;
+    state.permissionRequestInFlight = true;
+    state.permissionRequestKey = key;
     var requestedAdapter = state.currentAdapter;
     var requestedThreadId = state.currentThreadId;
     try {
@@ -3534,6 +4253,11 @@ ${MESSAGE_RECORD_SETTINGS_JS}
         renderSessionControl();
       }
       return null;
+    } finally {
+      if (requestId === state.permissionRequestId && state.permissionRequestKey === key) {
+        state.permissionRequestInFlight = false;
+        state.permissionRequestKey = "";
+      }
     }
   }
 
@@ -3607,10 +4331,6 @@ ${MESSAGE_RECORD_SETTINGS_JS}
 
   async function selectCurrentTaskModel(model) {
     var modelState = currentTaskModelState();
-    if (state.reasoningChanging) {
-      showToast("推理强度尚在同步到电脑，请稍后再切换模型");
-      return;
-    }
     if (!modelState || !modelState.canChange) {
       showToast(modelState && modelState.unavailableReason || "当前任务暂时不能切换模型");
       return;
@@ -3621,54 +4341,37 @@ ${MESSAGE_RECORD_SETTINGS_JS}
       showToast("已为新任务选择模型，发送时生效");
       return;
     }
-    if (state.modelChanging || model === modelState.currentModel) {
-      closeModelMenu();
-      renderModelControl();
-      return;
-    }
+    if (!(modelState.options || []).some(function (option) { return option.id === model; })) return;
     var key = currentTaskModelKey();
-    var requestId = ++state.modelRequestId;
-    var requestedAdapter = state.currentAdapter;
-    var requestedThreadId = state.currentThreadId;
-    state.modelChanging = true;
+    var selection = Object.assign({}, pendingNextTaskSettings(key) || {});
+    selection.model = model;
+    var projected = applyDraftModelSelection(modelState, selection);
+    if (!projected.reasoningEffortOptions.some(function (option) {
+      return option.id === selection.reasoningEffort;
+    })) {
+      if (projected.currentReasoningEffort) {
+        selection.reasoningEffort = projected.currentReasoningEffort;
+      } else {
+        delete selection.reasoningEffort;
+      }
+    }
+    var confirmed = model === modelState.currentModel &&
+      (!selection.reasoningEffort ||
+        selection.reasoningEffort === modelState.currentReasoningEffort);
+    if (confirmed) clearNextTaskSettings(key);
+    else setNextTaskSettings(selection);
+    var selectedOption = (modelState.options || []).find(function (option) {
+      return option.id === model;
+    });
     closeModelMenu();
     renderModelControl();
-    try {
-      var path = adapterApiPath("/api/tasks/" + encodeURIComponent(state.currentThreadId) + "/model");
-      var changePromise = api(path, {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ model: model })
-      });
-      var sync = { adapter: requestedAdapter, threadId: requestedThreadId, model: model, promise: changePromise };
-      state.taskSettingSync = sync;
-      var payload = await changePromise;
-      if (
-        requestId !== state.modelRequestId ||
-        requestedAdapter !== state.currentAdapter ||
-        requestedThreadId !== state.currentThreadId
-      ) return;
-      state.taskModels[key] = Object.assign({}, payload, { loadedAtMs: Date.now() });
-      showToast((currentVisibleRunSummary() && currentVisibleRunSummary().status === "running" ? "已选择下一轮模型：" : "已切换至 ") + (payload.currentModel || model));
-    } catch (error) {
-      if (
-        requestId === state.modelRequestId &&
-        requestedAdapter === state.currentAdapter &&
-        requestedThreadId === state.currentThreadId
-      ) showToast(error.message || "模型切换失败，请重试");
-    } finally {
-      if (state.taskSettingSync && state.taskSettingSync.promise === changePromise) state.taskSettingSync = null;
-      if (requestId === state.modelRequestId) state.modelChanging = false;
-      renderModelControl();
-    }
+    showToast("已选择，下一条消息使用：" +
+      (selectedOption && selectedOption.label || model));
   }
 
   async function selectCurrentTaskReasoningEffort(reasoningEffort) {
-    var modelState = currentTaskModelState();
-    if (state.modelChanging) {
-      showToast("模型尚在同步到电脑，请稍后再切换推理强度");
-      return;
-    }
+    var confirmedModelState = currentTaskModelState();
+    var modelState = projectedTaskModelState();
     if (!modelState || !modelState.canChangeReasoningEffort) {
       showToast(modelState && modelState.reasoningEffortUnavailableReason || "当前模型没有可选推理强度");
       return;
@@ -3679,46 +4382,26 @@ ${MESSAGE_RECORD_SETTINGS_JS}
       showToast("已为新任务选择推理强度，发送时生效");
       return;
     }
-    if (state.reasoningChanging || reasoningEffort === modelState.currentReasoningEffort) {
-      closeSessionMenu();
-      renderSessionControl();
-      return;
-    }
+    if (!(modelState.reasoningEffortOptions || []).some(function (option) {
+      return option.id === reasoningEffort;
+    })) return;
     var key = currentTaskModelKey();
-    var requestId = ++state.modelRequestId;
-    var requestedAdapter = state.currentAdapter;
-    var requestedThreadId = state.currentThreadId;
-    state.reasoningChanging = true;
+    var selection = Object.assign({}, pendingNextTaskSettings(key) || {});
+    selection.reasoningEffort = reasoningEffort;
+    var confirmed = (!selection.model || selection.model === confirmedModelState.currentModel) &&
+      reasoningEffort === confirmedModelState.currentReasoningEffort;
+    if (confirmed) clearNextTaskSettings(key);
+    else setNextTaskSettings(selection);
+    closeModelMenu();
     closeSessionMenu();
-    renderSessionControl();
-    try {
-      var path = adapterApiPath("/api/tasks/" + encodeURIComponent(state.currentThreadId) + "/model");
-      var changePromise = api(path, {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ reasoningEffort: reasoningEffort })
-      });
-      var sync = { adapter: requestedAdapter, threadId: requestedThreadId, reasoningEffort: reasoningEffort, promise: changePromise };
-      state.taskSettingSync = sync;
-      var payload = await changePromise;
-      if (
-        requestId !== state.modelRequestId ||
-        requestedAdapter !== state.currentAdapter ||
-        requestedThreadId !== state.currentThreadId
-      ) return;
-      state.taskModels[key] = Object.assign({}, payload, { loadedAtMs: Date.now() });
-      showToast("推理强度已切换为" + reasoningEffortLabel(payload.currentReasoningEffort || reasoningEffort));
-    } catch (error) {
-      if (
-        requestId === state.modelRequestId &&
-        requestedAdapter === state.currentAdapter &&
-        requestedThreadId === state.currentThreadId
-      ) showToast(error.message || "推理强度切换失败，请重试");
-    } finally {
-      if (state.taskSettingSync && state.taskSettingSync.promise === changePromise) state.taskSettingSync = null;
-      if (requestId === state.modelRequestId) state.reasoningChanging = false;
-      renderModelControl();
-    }
+    renderModelControl();
+    var selectedOption = (modelState.options || []).find(function (option) {
+      return option.id === (selection.model || modelState.currentModel);
+    });
+    showToast("已选择，下一条消息使用：" +
+      (selectedOption && selectedOption.label ||
+        selection.model || modelState.currentModel || reasoningEffortLabel(reasoningEffort)) +
+      " · " + reasoningEffortLabel(reasoningEffort));
   }
 
   function resetTaskStateForAdapterSwitch() {
@@ -3728,12 +4411,16 @@ ${MESSAGE_RECORD_SETTINGS_JS}
     state.composerRevision += 1;
     state.loadingMessages = false;
     state.trailingMessageRefresh = null;
+    state.liveRefreshInFlight = false;
+    state.liveRefreshTrailing = false;
     state.tasks = [];
     state.currentThreadId = "";
     state.modelRequestId += 1;
-    state.modelChanging = false;
-    state.reasoningChanging = false;
+    state.modelRequestInFlight = false;
+    state.modelRequestKey = "";
     state.permissionRequestId += 1;
+    state.permissionRequestInFlight = false;
+    state.permissionRequestKey = "";
     state.permissionChanging = false;
     closeModelMenu();
     closeSessionMenu();
@@ -3788,6 +4475,7 @@ ${MESSAGE_RECORD_SETTINGS_JS}
     state.currentAdapter = adapterId;
     resetTaskStateForAdapterSwitch();
     restoreCachedAdapterState(adapterId, "");
+    syncLiveSubscriptions();
     var canonicalUrl = new URL(window.location.href);
     canonicalUrl.searchParams.set("adapter", adapterId);
     if (!initial) canonicalUrl.searchParams.delete("task");
@@ -3831,6 +4519,7 @@ ${MESSAGE_RECORD_SETTINGS_JS}
   }
 
   function showAuthentication(mode, message, disabled) {
+    stopLiveChannel(false);
     state.authenticated = false;
     state.cachePreviewMode = false;
     state.taskRequestId += 1;
@@ -4027,6 +4716,8 @@ ${MESSAGE_RECORD_SETTINGS_JS}
       if (pending.status === "failed" || Number(pending.imageCount) > 0 && !(pending.images || []).length) return;
       setTimeout(function () { void submitPendingMessage(pending); }, index * 120);
     });
+    startLiveChannel();
+    scheduleRecentTaskPrewarm();
     scheduleLiveRefresh(2200);
   }
 
@@ -4036,6 +4727,12 @@ ${MESSAGE_RECORD_SETTINGS_JS}
     if (status === "input") return "等待回答";
     if (status === "error") return "异常";
     return "空闲";
+  }
+
+  function scopedTaskProjectName(task) {
+    var projectName = String(task && task.projectName || "").trim();
+    if (!projectName || /^(?:workspace|工作区|未命名项目)$/i.test(projectName)) return "";
+    return projectName;
   }
 
   function reconcileTaskApprovalStatus(task, pendingApproval, runSummary) {
@@ -4119,6 +4816,8 @@ ${MESSAGE_RECORD_SETTINGS_JS}
 
   function updateHeader() {
     renderAdapterConnectionNotice();
+    void childTaskLinks.setTarget(state.currentAdapter,
+      state.authenticated && !state.switchingAdapter ? state.currentThreadId : "");
     var task = currentTask();
     var visibleSummary = currentVisibleRunSummary();
     var capabilityLimited = isAdapterCapabilityError();
@@ -4140,21 +4839,9 @@ ${MESSAGE_RECORD_SETTINGS_JS}
           : state.adapterError
             ? currentAdapterName() + (capabilityLimited ? " 网页能力受限" : " 未连接")
             : "选择一个任务";
-    metaEl.textContent = state.switchingAdapter
-      ? ""
-      : task
-        ? task.localCreationState === "creating"
-          ? "正在后台创建，可以先输入"
-          : task.localCreationState === "failed"
-            ? "输入内容和图片已保留"
-            : task.localCreationState === "ready"
-              ? "输入内容会保留，发送后开始执行"
-            : (task.projectName || currentAdapterName() + " 任务")
-        : state.adapterError
-          ? capabilityLimited
-            ? "请在微信或电脑终端中继续使用"
-            : "点击上方终端菜单重新连接"
-          : "";
+    var projectName = state.switchingAdapter ? "" : scopedTaskProjectName(task);
+    metaEl.textContent = projectName;
+    metaEl.hidden = !projectName;
     updateActiveDocumentTitle();
     refreshMessageSourceTaskLabels();
     statusEl.className = "status-label" + (
@@ -5877,9 +6564,11 @@ ${MESSAGE_RECORD_SETTINGS_JS}
         if (!chosen && !state.currentThreadId) renderMessages(false);
         updateHeader();
       }
-      state.nextTaskRefreshAtMs = Date.now() + TASK_REFRESH_INTERVAL_MS;
+      state.lastTaskRefreshAtMs = Date.now();
+      state.nextTaskRefreshAtMs = Date.now() + liveTaskPollingInterval();
       rememberCurrentTaskSnapshot();
       schedulePersistentMobileCacheWrite();
+      if (initial) scheduleRecentTaskPrewarm();
     } catch (error) {
       if (requestId !== state.taskRequestId || error.status === 401) return;
       if (isMobileConnectionUnavailable(error)) {
@@ -5888,7 +6577,7 @@ ${MESSAGE_RECORD_SETTINGS_JS}
         );
       }
       if (isMobileConnectionUnavailable(error) && state.tasks.length) {
-        state.nextTaskRefreshAtMs = Date.now() + TASK_REFRESH_INTERVAL_MS;
+        state.nextTaskRefreshAtMs = Date.now() + liveTaskPollingInterval();
         return;
       }
       var nextError = error.message || "任务列表读取失败";
@@ -7686,6 +8375,7 @@ ${MESSAGE_RECORD_SETTINGS_JS}
         messagesEl.innerHTML = '<div class="empty-state"><div class="empty-wordmark brand-logo" role="img" aria-label="WeRelay" style="--brand-logo-width: 150px"></div><h1>还没有消息</h1><p>可以从手机继续这个任务。</p></div>';
       }
       messagesEl.dataset.threadId = state.currentThreadId || "";
+      if (!childTaskLinks.element.hidden) messagesEl.appendChild(childTaskLinks.element);
       updateUserMessageNavigation();
       return;
     }
@@ -7761,6 +8451,7 @@ ${MESSAGE_RECORD_SETTINGS_JS}
     if (pendingDelivery) nodes.push(renderDeliveryHeader(pendingDelivery));
     var responsePending = renderResponsePendingIndicator(summary);
     if (responsePending) nodes.push(responsePending);
+    if (!childTaskLinks.element.hidden) nodes.push(childTaskLinks.element);
     syncChildOrder(messagesEl, nodes);
     Object.keys(state.messageNodes).forEach(function (nodeKey) {
       if (!usedMessageNodeKeys[nodeKey]) delete state.messageNodes[nodeKey];
@@ -8226,6 +8917,12 @@ ${MESSAGE_RECORD_SETTINGS_JS}
       updateHeader();
       renderTasks();
       saveCurrentConversationSnapshot();
+      if (!historyOnly && typeof state.contentRevision === "string" && state.contentRevision) {
+        var currentSnapshot = state.conversationSnapshots[
+          conversationStateKey(state.currentAdapter, state.currentThreadId)
+        ];
+        if (currentSnapshot) currentSnapshot.staleRevision = "";
+      }
       if (
         state.cacheSyncState === "waiting-computer" ||
         state.cacheSyncState === "server-retry"
@@ -8260,6 +8957,9 @@ ${MESSAGE_RECORD_SETTINGS_JS}
             trailingRefresh.historyOnly,
             trailingRefresh.forceFullPage
           );
+        } else if (state.liveRefreshTrailing && !state.liveRefreshInFlight) {
+          state.liveRefreshTrailing = false;
+          refreshCurrentMessagesFromLive();
         }
       }
     }
@@ -8341,15 +9041,30 @@ ${MESSAGE_RECORD_SETTINGS_JS}
         delete cache[oldSettingsKey];
       }
     });
+    moveConversationValue(
+      state.nextTaskSettings,
+      state.nextTaskSettingsOrder,
+      oldSettingsKey,
+      newSettingsKey,
+      MAX_CONVERSATION_SNAPSHOTS
+    );
     if (state.currentAdapter !== adapter || state.currentThreadId !== temporaryThreadId) {
       var oldKey = conversationStateKey(adapter, temporaryThreadId);
       var newKey = conversationStateKey(adapter, realThreadId);
       var snapshot = state.conversationSnapshots[oldKey];
       if (snapshot) (snapshot.pendingMessages || []).forEach(function (message) { message.threadId = realThreadId; });
       moveConversationValue(state.conversationSnapshots, state.conversationSnapshotOrder, oldKey, newKey, MAX_CONVERSATION_SNAPSHOTS);
+      moveConversationValue(state.conversationSnapshotSavedAtMs, [], oldKey, newKey, Number.MAX_SAFE_INTEGER);
       moveConversationValue(state.composerDrafts, state.composerDraftOrder, oldKey, newKey, MAX_COMPOSER_DRAFTS);
       var tasks = state.currentAdapter === adapter ? state.tasks : (state.taskSnapshots[adapter] || {}).tasks || [];
-      tasks.forEach(function (task) { if (task.threadId === temporaryThreadId) { task.threadId = realThreadId; task.localCreationState = "ready"; } });
+      tasks.forEach(function (task) {
+        if (task.threadId !== temporaryThreadId) return;
+        task.threadId = realThreadId;
+        delete task.localCreationState;
+        delete task.localCreationError;
+        delete task.localSourceThreadId;
+      });
+      forgetLocalTaskDraft(adapter, realThreadId, temporaryThreadId);
       schedulePersistentMobileCacheWrite();
       return;
     }
@@ -8362,10 +9077,12 @@ ${MESSAGE_RECORD_SETTINGS_JS}
     var temporaryTask = taskById(temporaryThreadId);
     if (temporaryTask) {
       temporaryTask.threadId = realThreadId;
-      temporaryTask.localCreationState = "ready";
+      delete temporaryTask.localCreationState;
+      delete temporaryTask.localCreationError;
+      delete temporaryTask.localSourceThreadId;
       temporaryTask.lastUpdatedAt = new Date().toISOString();
-      rememberLocalTaskDraft(temporaryTask);
     }
+    forgetLocalTaskDraft(adapter, realThreadId, temporaryThreadId);
     saveCurrentConversationSnapshot();
     moveConversationValue(
       state.composerDrafts,
@@ -8379,7 +9096,14 @@ ${MESSAGE_RECORD_SETTINGS_JS}
       state.conversationSnapshotOrder,
       temporaryKey,
       realKey,
-      MAX_CONVERSATION_SNAPSHOTS
+      Number.MAX_SAFE_INTEGER
+    );
+    moveConversationValue(
+      state.conversationSnapshotSavedAtMs,
+      [],
+      temporaryKey,
+      realKey,
+      Number.MAX_SAFE_INTEGER
     );
     state.currentThreadId = realThreadId;
     messagesEl.dataset.threadId = realThreadId;
@@ -8445,11 +9169,9 @@ ${MESSAGE_RECORD_SETTINGS_JS}
         void loadCurrentTaskPermission(false);
         finishConversationEntryFocus(currentEntryGeneration);
       } else {
-        void Promise.all([
-          refreshMessagesIfChanged(false, true),
-          loadCurrentTaskModel(false),
-          loadCurrentTaskPermission(false)
-        ]).finally(function () {
+        void loadCurrentTaskModel(false);
+        void loadCurrentTaskPermission(false);
+        void refreshMessagesIfChanged(false, true).finally(function () {
           finishConversationEntryFocus(currentEntryGeneration);
         });
       }
@@ -8459,13 +9181,18 @@ ${MESSAGE_RECORD_SETTINGS_JS}
     state.messageRequestId += 1;
     state.loadingMessages = false;
     state.trailingMessageRefresh = null;
+    state.liveRefreshInFlight = false;
+    state.liveRefreshTrailing = false;
     state.composerRevision += 1;
     state.currentThreadId = threadId;
+    syncLiveSubscriptions();
     var entryGeneration = beginConversationEntryFocus(state.currentAdapter, threadId);
     state.modelRequestId += 1;
-    state.modelChanging = false;
-    state.reasoningChanging = false;
+    state.modelRequestInFlight = false;
+    state.modelRequestKey = "";
     state.permissionRequestId += 1;
+    state.permissionRequestInFlight = false;
+    state.permissionRequestKey = "";
     state.permissionChanging = false;
     closeModelMenu();
     closeSessionMenu();
@@ -8595,7 +9322,9 @@ ${MESSAGE_RECORD_SETTINGS_JS}
       if (adapter !== state.currentAdapter) return;
       await loadTasks(false);
       if (adapter === state.currentAdapter && threadId === state.currentThreadId) {
-        await Promise.all([loadMessages(false, false, false), loadCurrentTaskModel(true), loadCurrentTaskPermission(true)]);
+        void loadCurrentTaskModel(true);
+        void loadCurrentTaskPermission(true);
+        await loadMessages(false, false, false);
       }
       if (adapter === state.currentAdapter && state.adapterConnectionNotice === notice) clearAdapterConnectionNotice(adapter);
     } catch (error) {
@@ -8878,59 +9607,6 @@ ${MESSAGE_RECORD_SETTINGS_JS}
     if (next) void submitPendingMessage(next);
   }
 
-  async function confirmPendingTaskSettings(pending, requestedAdapter, requestedThreadId, isActive) {
-    var required = pending.requiredTaskSettings;
-    if (!required || (!required.model && !required.reasoningEffort)) return;
-    var path = adapterApiPath(
-      "/api/tasks/" + encodeURIComponent(requestedThreadId) + "/model",
-      requestedAdapter
-    );
-    function matches(payload) {
-      return payload &&
-        (!required.model || payload.currentModel === required.model) &&
-        (!required.reasoningEffort || payload.currentReasoningEffort === required.reasoningEffort);
-    }
-    try {
-      var sync = state.taskSettingSync;
-      var sameRequest = sync && sync.adapter === requestedAdapter &&
-        sync.threadId === requestedThreadId &&
-        sync.model === required.model &&
-        sync.reasoningEffort === required.reasoningEffort;
-      // On a reload, the original PUT may have succeeded without its response
-      // reaching this tab. Read the owner first; repeat only if still needed.
-      var payload;
-      if (sameRequest) {
-        try {
-          payload = await sync.promise;
-        } catch (requestError) {
-          if (isActive && !isActive()) return;
-          // A lost PUT response does not mean the desktop rejected the change.
-          payload = await api(path, { cache: "no-store" });
-          if (!matches(payload)) throw requestError;
-        }
-      } else {
-        payload = await api(path, { cache: "no-store" });
-      }
-      if (isActive && !isActive()) return;
-      if (!matches(payload) && !sameRequest) {
-        payload = await api(path, {
-          method: "PUT",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(required)
-        });
-      }
-      if (isActive && !isActive()) return;
-      if (!matches(payload)) throw new Error("电脑尚未确认所选模型设置");
-      delete pending.requiredTaskSettings;
-      pending.status = "sending";
-      persistMobileCacheNow();
-    } catch (error) {
-      var failure = new Error("模型设置未确认，消息未发送：" + (error && error.message || "请稍后重试"));
-      failure.modelSyncFailed = true;
-      throw failure;
-    }
-  }
-
   async function submitPendingMessage(pending) {
     if (pending.inFlight || pending.deliveryConfirmed || pending.serverAcknowledged) return;
     var requestedThreadId = pending.threadId;
@@ -8952,8 +9628,7 @@ ${MESSAGE_RECORD_SETTINGS_JS}
     if (targetVisible()) cancelConversationEntryFocus();
     state.sending = true;
     pending.inFlight = true;
-    pending.status = pending.requiredTaskSettings ? "syncing_model" :
-      pending.browserAttempts > 0 ? "retrying" : (
+    pending.status = pending.browserAttempts > 0 ? "retrying" : (
         pending.waitingForTaskCreation ? "creating_task" : "sending"
       );
     if (targetVisible()) renderMessages(true);
@@ -8972,8 +9647,6 @@ ${MESSAGE_RECORD_SETTINGS_JS}
         saveCurrentConversationSnapshot();
         persistMobileCacheNow();
         if (pending.deliveryConfirmed || pending.serverAcknowledged) return null;
-        await confirmPendingTaskSettings(pending, requestedAdapter, requestedThreadId, isActive);
-        if (!isActive() || pending.deliveryConfirmed || pending.serverAcknowledged) return null;
         if (targetVisible()) renderMessages(true);
         var images = (pending.images || []).map(function (image) {
           return {
@@ -8989,6 +9662,10 @@ ${MESSAGE_RECORD_SETTINGS_JS}
           composerDraftRevision: pending.composerDraftRevision || undefined,
           images: images,
           retry: Boolean(pending.manualRetry),
+          taskSettings: !String(requestedThreadId).startsWith("local-new-") &&
+            pending.taskSettings
+            ? Object.assign({}, pending.taskSettings)
+            : undefined,
           newTaskSettings: String(requestedThreadId).startsWith("local-new-") ? pending.newTaskSettings : undefined,
           createTaskSourceThreadId: pending.waitingForTaskCreation
             ? pending.createTaskSourceThreadId || ""
@@ -9015,6 +9692,7 @@ ${MESSAGE_RECORD_SETTINGS_JS}
       pending.status = result.status || (pending.queued ? "queued" : "accepted");
       if (result.threadId && result.threadId !== requestedThreadId) {
         migrateTemporaryConversation(requestedThreadId, result.threadId, requestedAdapter);
+        finishLocalTaskDraft(result.threadId);
       }
       if (pending.queued && pending.optimisticRun && requestedThreadId === state.currentThreadId && requestedAdapter === state.currentAdapter) {
         state.localRunSummary = null;
@@ -9033,7 +9711,7 @@ ${MESSAGE_RECORD_SETTINGS_JS}
       if (pending.deliveryConfirmed || pending.serverAcknowledged) return;
       pending.browserAttempts = Math.min(30, Number(pending.browserAttempts || 0) + 1);
       pending.lastError = error && error.message || "网络连接暂时中断";
-      pending.retryBlocked = Boolean(error && (error.attachmentMissing || error.modelSyncFailed)) ||
+      pending.retryBlocked = Boolean(error && error.attachmentMissing) ||
         isNativeComposerDraftConflict(error) ||
         [400, 413, 422].includes(error && error.status);
       pending.status = pending.retryBlocked ? "failed" : "retrying";
@@ -9201,13 +9879,19 @@ ${MESSAGE_RECORD_SETTINGS_JS}
       saveComposerDraft(state.currentAdapter, state.currentThreadId);
     }
     var pending = makePendingMessage(text, images);
-    var settingSync = state.taskSettingSync;
-    if (settingSync && settingSync.adapter === pending.adapter && settingSync.threadId === pending.threadId) {
-      pending.requiredTaskSettings = settingSync.model
-        ? { model: settingSync.model }
-        : { reasoningEffort: settingSync.reasoningEffort };
-    }
     var waitingForTaskCreation = taskNeedsCreation(task);
+    var pendingSettingsKey = conversationStateKey(pending.adapter, pending.threadId);
+    var nextSettings = waitingForTaskCreation
+      ? null
+      : pendingNextTaskSettings(pendingSettingsKey);
+    if (nextSettings) {
+      pending.taskSettings = Object.assign({}, nextSettings);
+      clearNextTaskSettings(pendingSettingsKey);
+      state.sentTaskSettings[pendingSettingsKey] = { settings: Object.assign({}, nextSettings), sentAtMs: Date.now() };
+      if (pending.adapter === state.currentAdapter && pending.threadId === state.currentThreadId) {
+        renderModelControl();
+      }
+    }
     var visibleRunSummaryForQueue = effectiveRunSummary();
     // 只有「当前任务确实在跑」时才进待发队列；空闲时发出应立刻成为正文气泡，
     // 否则用户会看到自己的消息卡在队列里等一个根本没在跑的任务。
@@ -9289,7 +9973,7 @@ ${MESSAGE_RECORD_SETTINGS_JS}
   });
 
   function toggleComposerModel() {
-    var modelState = currentTaskModelState();
+    var modelState = projectedTaskModelState();
     if (!modelState || modelState.loadError) {
       void loadCurrentTaskModel(true).then(function (loaded) {
         if (loaded && loaded.canChange) { state.modelMenuOpen = true; renderModelControl(); }
@@ -9306,7 +9990,7 @@ ${MESSAGE_RECORD_SETTINGS_JS}
   }
 
   function toggleComposerSession() {
-    var modelState = currentTaskModelState();
+    var modelState = projectedTaskModelState();
     var permissionState = currentTaskPermissionState();
     var canChangeReasoning = Boolean(
       modelState && modelState.canChangeReasoningEffort &&
@@ -9324,7 +10008,7 @@ ${MESSAGE_RECORD_SETTINGS_JS}
       );
       return;
     }
-    if (state.reasoningChanging || state.permissionChanging) return;
+    if (state.permissionChanging) return;
     state.sessionMenuOpen = !state.sessionMenuOpen;
     closeModelMenu();
     renderSessionControl();
@@ -9340,6 +10024,12 @@ ${MESSAGE_RECORD_SETTINGS_JS}
     state.composerRevision += 1;
     state.tasks = [];
     state.currentThreadId = "";
+    state.modelRequestId += 1;
+    state.modelRequestInFlight = false;
+    state.modelRequestKey = "";
+    state.permissionRequestId += 1;
+    state.permissionRequestInFlight = false;
+    state.permissionRequestKey = "";
     state.serverMessages = [];
     state.outboundMessages = [];
     state.deliveredClientIds = [];
@@ -9368,8 +10058,12 @@ ${MESSAGE_RECORD_SETTINGS_JS}
     state.pendingImages = [];
     state.conversationSnapshots = Object.create(null);
     state.conversationSnapshotOrder = [];
+    state.conversationSnapshotSavedAtMs = Object.create(null);
     state.composerDrafts = Object.create(null);
     state.composerDraftOrder = [];
+    state.nextTaskSettings = Object.create(null);
+    state.sentTaskSettings = Object.create(null);
+    state.nextTaskSettingsOrder = [];
     state.nativeComposerDraft = null;
     state.nativeComposerDraftConsumed = Object.create(null);
     state.nativeComposerDraftRequest += 1;
@@ -9381,6 +10075,13 @@ ${MESSAGE_RECORD_SETTINGS_JS}
     state.persistentCacheAuthenticatedAtMs = 0;
     if (state.authenticationRetryTimer) clearTimeout(state.authenticationRetryTimer);
     state.authenticationRetryTimer = null;
+    if (state.prewarmTimer) clearTimeout(state.prewarmTimer);
+    if (state.prewarmIdleHandle && typeof window.cancelIdleCallback === "function") {
+      window.cancelIdleCallback(state.prewarmIdleHandle);
+    }
+    state.prewarmTimer = null;
+    state.prewarmIdleHandle = null;
+    state.prewarmRunId += 1;
     composerInput.value = "";
     composerInput.placeholder = "有问题，尽管问";
     composerImageButton.disabled = false;
@@ -9556,16 +10257,29 @@ ${MESSAGE_RECORD_SETTINGS_JS}
           : []
         : [
             refreshMessagesIfChanged(false, false),
-            loadNativeComposerDraft(),
-            loadCurrentTaskModel(false),
-            loadCurrentTaskPermission(false)
+            childTaskLinks.refresh(),
+            loadNativeComposerDraft()
           ];
-      if (!state.boardOpen && Date.now() >= state.nextTaskRefreshAtMs) {
+      if (!state.settingsOpen && !state.boardOpen) {
+        void loadCurrentTaskModel(false);
+        void loadCurrentTaskPermission(false);
+      }
+      if (
+        !state.boardOpen &&
+        Date.now() >= Math.max(
+          state.nextTaskRefreshAtMs,
+          Number(state.lastTaskRefreshAtMs) + liveTaskPollingInterval()
+        )
+      ) {
         refreshes.push(loadTasks(false));
       }
       await Promise.all(refreshes);
       submitNextWaitingMessage();
-      scheduleLiveRefresh(document.hidden ? 10000 : 2200);
+      scheduleLiveRefresh(
+        document.hidden
+          ? 10000
+          : liveMessagePollingInterval()
+      );
     }, delayMs);
   }
 
@@ -9586,6 +10300,9 @@ ${MESSAGE_RECORD_SETTINGS_JS}
   document.addEventListener("visibilitychange", function () {
     if (!state.authenticated) return;
     if (!document.hidden) {
+      if (state.liveHiddenTimer) clearTimeout(state.liveHiddenTimer);
+      state.liveHiddenTimer = null;
+      startLiveChannel();
       void (async function () {
         if (await checkForAppUpdate(true)) return;
         state.nextTaskRefreshAtMs = 0;
@@ -9595,16 +10312,28 @@ ${MESSAGE_RECORD_SETTINGS_JS}
           if (settingsTab !== "records") await Promise.all([loadTasks(false), loadSettings()]);
         }
         else if (state.boardOpen) await loadTaskBoard(true);
-        else await Promise.all([
-          loadTasks(false),
-          refreshMessagesIfChanged(false, true),
-          loadNativeComposerDraft(),
-          loadCurrentTaskModel(true),
-          loadCurrentTaskPermission(true)
-        ]);
+        else {
+          void loadCurrentTaskModel(true);
+          void loadCurrentTaskPermission(true);
+          await Promise.all([
+            loadTasks(false),
+            refreshMessagesIfChanged(false, true),
+            loadNativeComposerDraft()
+          ]);
+          scheduleRecentTaskPrewarm();
+        }
       })();
+    } else if (!state.liveHiddenTimer) {
+      state.liveHiddenTimer = setTimeout(function () {
+        state.liveHiddenTimer = null;
+        if (document.hidden) stopLiveChannel(false);
+      }, LIVE_HIDDEN_DISCONNECT_MS);
     }
-    scheduleLiveRefresh(document.hidden ? 10000 : 300);
+    scheduleLiveRefresh(
+      document.hidden
+        ? 10000
+        : liveMessagePollingInterval()
+    );
   });
 
   window.addEventListener("werelay:open-task", function (event) {

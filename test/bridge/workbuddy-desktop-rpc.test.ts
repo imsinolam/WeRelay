@@ -11,6 +11,7 @@ import {
   buildWorkBuddyDesktopHookSource,
   WORKBUDDY_BUNDLE_ID,
   ensureWorkBuddyDesktopHookFile,
+  formatWorkBuddyRestartTimeoutMessage,
   isWorkBuddyDesktopDaemonCommandLine,
   isWorkBuddyMainProcessCommandLine,
   resolveWorkBuddyDesktopSocketPath,
@@ -107,6 +108,13 @@ async function withUnixServer(
 }
 
 describe("WorkBuddy desktop RPC client", () => {
+  test("describes a quit timeout without claiming the application blocked a restart", () => {
+    const message = formatWorkBuddyRestartTimeoutMessage(10_000);
+    expect(message).toContain("没有在 10 秒内退出");
+    expect(message).toContain("不会强制结束应用");
+    expect(message).not.toContain("正在阻止自动重启");
+  });
+
   test("distinguishes the WorkBuddy main process from app-server and sidecar children", () => {
     const executable = "/Applications/WorkBuddy.app/Contents/MacOS/Electron";
     const appAsar = "/Applications/WorkBuddy.app/Contents/Resources/app.asar";

@@ -155,6 +155,11 @@ async function launchDeepSeekDesktop(): Promise<void> {
   }
 }
 
+export function formatDeepSeekDesktopRestartTimeoutMessage(timeoutMs: number): string {
+  const seconds = Math.max(1, Math.round(timeoutMs / 1_000));
+  return `DSH Desktop 没有在 ${seconds} 秒内退出。WeRelay 不会强制结束应用，请确认窗口中没有未保存内容，手动关闭 DSH Desktop 后重试。`;
+}
+
 async function restartDeepSeekDesktop(): Promise<void> {
   try {
     await execFileAsync("/usr/bin/osascript", [
@@ -165,10 +170,10 @@ async function restartDeepSeekDesktop(): Promise<void> {
       killSignal: "SIGKILL",
     });
   } catch {
-    throw new Error("DSH Desktop 无法自动重启，请先处理电脑端尚未保存的内容后重试。");
+    throw new Error("DSH Desktop 未能正常退出。WeRelay 不会强制结束应用，请手动关闭 DSH Desktop 后重试。");
   }
   if (!await waitForDeepSeekDesktopToExit(DEFAULT_QUIT_TIMEOUT_MS)) {
-    throw new Error("DSH Desktop 正在阻止自动重启，请先处理电脑端尚未保存的内容后重试。");
+    throw new Error(formatDeepSeekDesktopRestartTimeoutMessage(DEFAULT_QUIT_TIMEOUT_MS));
   }
   await launchDeepSeekDesktop();
 }

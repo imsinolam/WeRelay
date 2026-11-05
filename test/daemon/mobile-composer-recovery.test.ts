@@ -150,18 +150,19 @@ test("a slow attachment restore cannot hold the composer forever or send after i
   expect(first.images).toHaveLength(1);
 });
 
-test("a late model switch confirmation cannot send the expired attempt or clear a later lock", async () => {
-  let confirm!: (value: unknown) => void;
-  let posts = 0;
-  const h = harness(async () => { posts++; return { status: "accepted" }; }, 5);
-  h.state.taskSettingSync = { adapter: "codex", threadId: "task", model: "fixture-model",
-    promise: new Promise(resolve => { confirm = resolve; }) };
-  const first = h.pending("first", { requiredTaskSettings: { model: "fixture-model" } });
+test("taskSettings is included in the next message request without a model confirmation step", async () => {
+  const bodies: any[] = [];
+  const h = harness(async (_path, options) => {
+    bodies.push(JSON.parse(options.body));
+    return { status: "accepted" };
+  });
+  const first = h.pending("first", { taskSettings: { model: "fixture-model" } });
   await h.submitPendingMessage(first);
-  expect(first.status).toBe("retrying");
+  expect(first.status).toBe("accepted");
   expect(h.state.sending).toBe(false);
-  confirm({ currentModel: "fixture-model" });
-  await Bun.sleep(0);
-  expect(posts).toBe(0);
-  expect(first.requiredTaskSettings).toEqual({ model: "fixture-model" });
+  expect(first.inFlight).toBe(false);
+  expect(bodies).toEqual([expect.objectContaining({
+    clientId: "first",
+    taskSettings: { model: "fixture-model" },
+  })]);
 });

@@ -3,10 +3,18 @@ import { describe, expect, test } from "bun:test";
 import {
   DEEPSEEK_DESKTOP_BUNDLE_ID,
   enableDeepSeekDesktopLoopbackAccessInYaml,
+  formatDeepSeekDesktopRestartTimeoutMessage,
   recoverDeepSeekDesktopHarnessAccess,
 } from "../../src/bridge/deepseek-desktop-lifecycle.ts";
 
 describe("DeepSeek Desktop lifecycle", () => {
+  test("describes a quit timeout without claiming the application blocked a restart", () => {
+    const message = formatDeepSeekDesktopRestartTimeoutMessage(10_000);
+    expect(message).toContain("没有在 10 秒内退出");
+    expect(message).toContain("不会强制结束应用");
+    expect(message).not.toContain("正在阻止自动重启");
+  });
+
   test("never applies legacy settings repair to the new Harness Desktop", async () => {
     const effects: string[] = [];
     expect(await recoverDeepSeekDesktopHarnessAccess({

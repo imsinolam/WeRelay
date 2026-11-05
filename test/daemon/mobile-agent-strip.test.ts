@@ -81,12 +81,21 @@ describe("sidebar Agent icon choices", () => {
     expect(h.adapterMenu.children[2].querySelector(".adapter-menu-label")!.textContent).toBe("DeepSeek Harness");
   });
 
-  test("keeps a larger logo, tighter wrapped lines and a compact active frame", () => {
+  test("uses one equal neutral frame around the active Agent logo", () => {
+    expect(CODEX_MOBILE_CSS).toContain("align-items: flex-start;");
     expect(CODEX_MOBILE_CSS).toContain(".adapter-menu-icon { position: relative; display: grid; place-items: center; width: 38px; height: 38px;");
     expect(CODEX_MOBILE_CSS).toContain(".adapter-menu-icon img { display: block; width: 34px; height: 34px;");
-    expect(CODEX_MOBILE_CSS).toContain("font-size: 11px; line-height: 14px;");
-    expect(CODEX_MOBILE_CSS).toContain(".adapter-menu-item.is-active::before { content: \"\"; position: absolute; inset: 4px 4px 2px;");
-    expect(CODEX_MOBILE_CSS).toContain(".adapter-menu-item.is-active > * { position: relative; z-index: 1; }");
+    const labelRule = CODEX_MOBILE_CSS.match(/\.adapter-menu-label \{([^}]+)\}/)![1];
+    expect(labelRule).toContain("font-size: 10px");
+    expect(labelRule).toContain("line-height: 13px");
+    const activeRule = CODEX_MOBILE_CSS.match(/\.adapter-menu-item\.is-active \{([^}]+)\}/)![1];
+    expect(activeRule).not.toContain("background: var(--surface-selected)");
+    expect(activeRule).not.toContain("box-shadow");
+    expect(activeRule).not.toContain("green");
+    expect(CODEX_MOBILE_CSS).not.toContain(".adapter-menu-item.is-active::before");
+    const activeIconRule = CODEX_MOBILE_CSS.match(/\.adapter-menu-item\.is-active \.adapter-menu-icon \{([^}]+)\}/)![1];
+    expect(activeIconRule).toContain("background: var(--surface-selected)");
+    expect(activeIconRule).toContain("box-shadow: inset 0 0 0 1px var(--border)");
   });
 
   test("preserves server order, brand logos, labels, busy state and existing switch action", () => {
@@ -136,5 +145,25 @@ describe("sidebar Agent icon choices", () => {
     h.render();
     expect(h.adapterMenu.children.map(button => button.dataset.adapterId)).toEqual(["pi", "deepseek", "claude"]);
     expect(h.adapterMenu.children.every(button => !button.disabled)).toBe(true);
+  });
+
+  test("keeps a short-named Agent visible when ordering changes or it sits at the end", () => {
+    const h = stripHarness();
+    h.render();
+    h.frames.shift()!();
+    h.state.adapters.push({ id: "workbuddy", label: "WorkBuddy", status: "idle" });
+    h.state.currentAdapter = "workbuddy";
+    h.adapterMenu.scrollWidth = 346;
+    h.render();
+    h.frames.shift()!();
+    expect(h.adapterMenu.children.at(-1)!.dataset.adapterId).toBe("workbuddy");
+    expect(h.adapterMenu.scrollLeft).toBe(140);
+    h.adapterMenu.scrollLeft = 0;
+    h.state.adapters = [h.state.adapters.at(-1)!, ...h.state.adapters.slice(0, -1)];
+    h.render();
+    expect(h.frames).toHaveLength(1);
+    h.frames.shift()!();
+    expect(h.adapterMenu.children[0].dataset.adapterId).toBe("workbuddy");
+    expect(h.adapterMenu.scrollLeft).toBe(0);
   });
 });

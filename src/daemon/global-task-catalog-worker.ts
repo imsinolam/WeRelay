@@ -1,6 +1,6 @@
 import { isMainThread, parentPort, Worker } from "node:worker_threads";
 
-import { listLightweightAdapterSessions } from "./global-task-catalog.ts";
+import { listChildTaskCandidates, listLightweightAdapterSessions, readGlobalTaskNotificationMetadata } from "./global-task-catalog.ts";
 import type { BridgeResumeSessionCandidate } from "../bridge/bridge-types.ts";
 import type { DaemonAdapterKind } from "../bridge/bridge-providers.ts";
 import type { DesktopCompletion } from "./passive-completion-monitor.ts";
@@ -10,7 +10,7 @@ type CatalogRequest = {
   adapter: DaemonAdapterKind;
   cwd: string;
   limit: number;
-  operation?: "completions" | "notificationMetadata";
+  operation?: "completions" | "notificationMetadata" | "children";
   sessionId?: string;
 };
 type CatalogResponse = {
@@ -29,10 +29,15 @@ type CatalogResponse = {
 if (!isMainThread && parentPort) {
   parentPort.on("message", async (request: CatalogRequest) => {
     try {
+      if (request.operation === "children") {
+        if (!request.sessionId) throw new Error("缺少主任务标识。");
+        const candidates = await listChildTaskCandidates(request.adapter, request.cwd, request.sessionId, request.limit);
+        parentPort!.postMessage({ id: request.id, ok: true, candidates } satisfies CatalogResponse);
+        return;
+      }
       if (request.operation === "notificationMetadata") {
-        if (request.adapter !== "codex" || !request.sessionId) throw new Error("不支持这个任务元数据来源。");
-        const metadata = await (await import("../bridge/bridge-adapters.codex.ts"))
-          .readCodexSessionNotificationMetadata(request.sessionId);
+        if (!request.sessionId) throw new Error("缺少任务标识。");
+        const metadata = await readGlobalTaskNotificationMetadata(request.adapter, request.sessionId);
         parentPort!.postMessage({ id: request.id, ok: true, metadata } satisfies CatalogResponse);
         return;
       }
@@ -145,8 +150,12 @@ export class GlobalTaskCatalogWorker {
     return (await this.request(adapter, cwd, limit, "completions")).completions ?? [];
   }
 
-  async loadNotificationMetadata(cwd: string, sessionId: string): Promise<Pick<BridgeResumeSessionCandidate, "source" | "parentThreadId"> | null> {
-    return (await this.request("codex", cwd, 1, "notificationMetadata", sessionId)).metadata ?? null;
+  async loadChildren(adapter: DaemonAdapterKind, cwd: string, parentThreadId: string, limit = 100): Promise<BridgeResumeSessionCandidate[]> {
+    return (await this.request(adapter, cwd, limit, "children", parentThreadId)).candidates ?? [];
+  }
+
+  async loadNotificationMetadata(cwd: string, sessionId: string, adapter: DaemonAdapterKind = "codex"): Promise<Pick<BridgeResumeSessionCandidate, "source" | "parentThreadId"> | null> {
+    return (await this.request(adapter, cwd, 1, "notificationMetadata", sessionId)).metadata ?? null;
   }
 
   private async request(adapter: DaemonAdapterKind, cwd: string, limit: number, operation?: CatalogRequest["operation"], sessionId?: string): Promise<CatalogResponse> {

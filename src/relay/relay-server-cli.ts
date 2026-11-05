@@ -14,6 +14,7 @@ export type RelayServerCliOptions = {
   deviceToken: string;
   allowNonLoopback: boolean;
   taskLinkStateFile: string;
+  warmSnapshotFile: string | null;
 };
 
 function readOption(args: string[], name: string): string | undefined {
@@ -77,6 +78,10 @@ export function parseRelayServerCliOptions(
   const dataDir = env.WERELAY_DATA_DIR?.trim() || path.join(os.homedir(), ".werelay");
   const taskLinkStateFile = env.WERELAY_RELAY_TASK_LINK_STATE_FILE?.trim() ||
     path.join(dataDir, "relay-task-links.json");
+  const configuredSnapshotFile = env.WERELAY_RELAY_WARM_SNAPSHOT_FILE?.trim();
+  const warmSnapshotFile = configuredSnapshotFile?.toLowerCase() === "off"
+    ? null
+    : configuredSnapshotFile || path.join(dataDir, "relay-warm-snapshot.bin");
   return {
     host,
     port,
@@ -84,6 +89,7 @@ export function parseRelayServerCliOptions(
     deviceToken,
     allowNonLoopback,
     taskLinkStateFile,
+    warmSnapshotFile,
   };
 }
 
@@ -100,6 +106,9 @@ export async function main(
     deviceId: options.deviceId,
     deviceToken: options.deviceToken,
     taskLinkStateFile: options.taskLinkStateFile,
+    ...(options.warmSnapshotFile
+      ? { warmSnapshotFile: options.warmSnapshotFile }
+      : {}),
     logger: (message) => process.stderr.write(`[WeRelay Relay] ${message}\n`),
   });
   process.stdout.write(

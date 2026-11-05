@@ -23,6 +23,7 @@ import type {
 } from "./bridge-types.ts";
 import type { AdapterOptions, EventSink } from "./bridge-adapters.shared.ts";
 import { nowIso, truncatePreview } from "./bridge-utils.ts";
+import { isInternalTask, readTaskOriginMetadata, retainTaskOrigin, type TaskOriginMetadata } from "./task-origin.ts";
 import { DeepSeekHarnessRemoteMux } from "./deepseek-harness-remote.ts";
 import { recoverDeepSeekDesktopHarnessAccess } from "./deepseek-desktop-lifecycle.ts";
 import { classifyDeepSeekDesktopProcess, DEEPSEEK_HARNESS_APP_PATH } from "./deepseek-desktop-process.ts";
@@ -1277,6 +1278,7 @@ function sessionCandidate(
   return {
     sessionId: summary.sessionId,
     threadId: summary.sessionId,
+    ...readTaskOriginMetadata(summary),
     title: sessionTitle(summary),
     lastUpdatedAt: new Date(summary.updatedAt).toISOString(),
     ...(project
@@ -1291,16 +1293,19 @@ function sessionCandidate(
 export async function listDeepSeekHarnessSessions(
   limit = 100,
   baseUrl = resolveDeepSeekHarnessBaseUrl(),
-  options: { timeoutMs?: number } = {},
+  options: { timeoutMs?: number; parentThreadId?: string; includeInternal?: boolean } = {},
 ): Promise<BridgeResumeSessionCandidate[]> {
   const client = new DeepSeekHarnessHttpClient(
     baseUrl,
     fetch,
     options.timeoutMs ?? DEEPSEEK_HARNESS_HTTP_TIMEOUT_MS,
   );
-  return (await client.listSessions()).sort((a, b) => b.updatedAt - a.updatedAt).slice(0, Math.max(0, limit)).map((item) =>
-    sessionCandidate(item)
-  );
+  return (await client.listSessions()).sort((a, b) => b.updatedAt - a.updatedAt)
+    .map((item) => sessionCandidate(item))
+    .filter((candidate) => options.parentThreadId
+      ? candidate.parentThreadId === options.parentThreadId
+      : options.includeInternal || !isInternalTask(candidate))
+    .slice(0, Math.max(0, limit));
 }
 
 function imageMediaType(pathname: string): DeepSeekHarnessImageMediaType {
@@ -1411,6 +1416,7 @@ export class DeepSeekHarnessAdapter implements BridgeAdapter {
   private readonly historyReconciliationBySession = new Map<string, Promise<void>>();
   private readonly recoveryTaskBySession = new Map<string, Promise<void>>();
   private readonly permissionSelectionBySession = new Map<string, string>();
+  private readonly sessionOrigins = new Map<string, TaskOriginMetadata>();
   private muxOutageNoticeActive = false;
   private muxLastOutageNoticeAt = 0;
   private muxOutageNoticeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1560,7 +1566,7 @@ export class DeepSeekHarnessAdapter implements BridgeAdapter {
 
   private async connectAndRestoreSession(): Promise<DeepSeekHarnessSessionSummary | undefined> {
     await this.client.describeHost();
-    const sessions = (await this.client.listSessions()).sort(
+    const sessions = (await this.listSessionSummaries()).sort(
       (left, right) => right.updatedAt - left.updatedAt,
     );
     const requestedSessionId = this.state.sharedSessionId;
@@ -1575,7 +1581,7 @@ export class DeepSeekHarnessAdapter implements BridgeAdapter {
         throw new Error("无法恢复指定的 DeepSeek Harness 任务；为避免会话分叉，未切换到其他任务。");
       }
     } else {
-      selected = sessions[0];
+      selected = sessions.find((item) => !isInternalTask(this.sessionOrigins.get(item.sessionId)));
     }
     if (!selected) {
       await this.createSessionAt(this.options.cwd, false);
@@ -1664,7 +1670,7 @@ export class DeepSeekHarnessAdapter implements BridgeAdapter {
     items: BridgeTurnInputItem[],
   ): Promise<BridgeSessionSendResult> {
     if (sessionId !== this.state.sharedSessionId) await this.resumeSession(sessionId);
-    const sessionSummary = (await this.client.listSessions()).find(
+    const sessionSummary = (await this.listSessionSummaries()).find(
       (item) => item.sessionId === sessionId,
     );
     if (sessionSummary?.blank && items.some((item) => item.type === "localImage")) {
@@ -1730,17 +1736,33 @@ export class DeepSeekHarnessAdapter implements BridgeAdapter {
     }
   }
 
-  async listResumeSessions(limit = 10): Promise<BridgeResumeSessionCandidate[]> {
-    const sessions = await this.client.listSessions();
-    return [...sessions].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, Math.max(0, limit)).map((item) => sessionCandidate(
+  async listResumeSessions(limit = 10, options: { includeInternal?: boolean } = {}): Promise<BridgeResumeSessionCandidate[]> {
+    const sessions = await this.listSessionSummaries();
+    return [...sessions].sort((a, b) => b.updatedAt - a.updatedAt).map((item) => retainTaskOrigin(sessionCandidate(
       item,
       [...this.pendingApprovals.values()].some((pending) => pending.sessionId === item.sessionId),
       [...this.pendingQuestions.values()].some((pending) => pending.sessionId === item.sessionId),
-    ));
+    ), this.sessionOrigins.get(item.sessionId))).filter((candidate) => options.includeInternal || !isInternalTask(candidate)).slice(0, Math.max(0, limit));
+  }
+
+  /** Retain hidden origins for notification/approval routing without a second read. */
+  getSessionNotificationMetadata(sessionId: string): TaskOriginMetadata | null {
+    return this.sessionOrigins.get(sessionId) ?? null;
+  }
+
+  private async listSessionSummaries(): Promise<DeepSeekHarnessSessionSummary[]> {
+    const sessions = await this.client.listSessions();
+    for (const summary of sessions) {
+      const origin = retainTaskOrigin(readTaskOriginMetadata(summary), this.sessionOrigins.get(summary.sessionId));
+      this.sessionOrigins.delete(summary.sessionId);
+      this.sessionOrigins.set(summary.sessionId, origin);
+    }
+    while (this.sessionOrigins.size > 2048) this.sessionOrigins.delete(this.sessionOrigins.keys().next().value!);
+    return sessions;
   }
 
   async resumeSession(sessionId: string): Promise<void> {
-    const sessions = await this.client.listSessions();
+    const sessions = await this.listSessionSummaries();
     const session = sessions.find((item) => item.sessionId === sessionId);
     if (!session) {
       throw new Error("没有找到这个 DeepSeek Harness 任务；为避免会话分叉，未新建替代任务。");

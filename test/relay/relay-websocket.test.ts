@@ -8,6 +8,7 @@ import { startWeRelayRelayServer } from "../../src/relay/relay-server.ts";
 import { startWeRelayRelayClient } from "../../src/relay/relay-client.ts";
 import { WERELAY_RELAY_WEBSOCKET_PATH } from "../../src/relay/relay-protocol.ts";
 import { relayWebSocketUrl } from "../../src/relay/relay-websocket-client.ts";
+import { MobileLiveEventHub } from "../../src/daemon/mobile-live-events.ts";
 
 const headers = { authorization: "Bearer synthetic-device-token", "x-werelay-device-id": "test-device" };
 const waitFor = async (predicate: () => boolean) => {
@@ -71,6 +72,59 @@ test("auto client uses socket for original API writes without polling and acknow
     expect(polls).toBe(0);
     expect(responds).toBe(0);
   } finally { await client.close(); await server.close(); await local.close(); }
+});
+
+test("auto client forwards hub events only while a welcomed WSS session is active", async () => {
+  const local = await localStub();
+  const server = http.createServer((_req, res) => {
+    res.writeHead(404);
+    res.end();
+  });
+  const { WebSocketServer } = await import("ws");
+  const sockets = new WebSocketServer({ server });
+  const frames: unknown[] = [];
+  sockets.on("connection", (socket) => {
+    socket.send(JSON.stringify({ version: 1, type: "hello" }));
+    socket.on("message", (data) => frames.push(JSON.parse(data.toString())));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${(server.address() as import("node:net").AddressInfo).port}`;
+  const liveEvents = new MobileLiveEventHub({ coalesceMs: 0 });
+  const client = startWeRelayRelayClient({
+    relayUrl: url,
+    localBaseUrl: local.url,
+    deviceId: "test-device",
+    deviceToken: "synthetic-device-token",
+    liveEvents,
+    heartbeatIntervalMs: 100,
+  });
+  try {
+    await waitFor(() => frames.some((frame) =>
+      (frame as Record<string, unknown>).type === "ready"));
+    const conversation = {
+      kind: "conversation" as const,
+      adapter: "codex",
+      threadId: "task-1",
+      revision: "revision-1",
+    };
+    liveEvents.publish(conversation);
+    liveEvents.publish({ kind: "tasks" as const, adapter: "claude" });
+    await waitFor(() => frames.filter((frame) =>
+      (frame as Record<string, unknown>).type === "event").length === 2);
+    expect(frames.filter((frame) =>
+      (frame as Record<string, unknown>).type === "event")).toEqual([
+      { version: 1, type: "event", event: conversation },
+      { version: 1, type: "event", event: { kind: "tasks", adapter: "claude" } },
+    ]);
+  } finally {
+    await client.close();
+    const socketsClient = sockets.clients;
+    for (const socket of socketsClient) socket.terminate();
+    sockets.close();
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await local.close();
+  }
 });
 
 test("only one authenticated socket consumes work; replacement closes old owner and excludes poll", async () => {
@@ -197,4 +251,169 @@ test("socket capacity bounds busy reads while heartbeat stays online and writes 
     expect(peak).toBeLessThanOrEqual(8);
     expect(order).toEqual(["/api/write-first", "/api/write-second"]);
   } finally { await client.close();await server.close();local.closeAllConnections();await new Promise<void>((resolve) => local.close(() => resolve())); }
+});
+
+test("device event frames validate without disconnecting and trigger targeted refreshes", async () => {
+  const sessionToken = `v1.${Date.now() + 60_000}.event.signature`;
+  const requests = new Map<string, number>();
+  let version = 1;
+  const local = http.createServer((request, response) => {
+    const url = new URL(request.url ?? "/", "http://werelay.local");
+    requests.set(url.pathname + url.search, (requests.get(url.pathname + url.search) ?? 0) + 1);
+    response.setHeader("content-type", "application/json; charset=utf-8");
+    if (url.pathname === "/api/auth/status") {
+      response.end(JSON.stringify({ authenticated: true }));
+    } else if (url.pathname === "/api/task-board" || url.pathname === "/api/tasks") {
+      response.end(JSON.stringify({ tasks: [], version }));
+    } else if (url.pathname.endsWith("/messages")) {
+      response.end(JSON.stringify({
+        messages: [{ role: "assistant", text: `版本 ${version}` }],
+      }));
+    } else {
+      response.end(JSON.stringify({ currentModel: `model-${version}`, options: [] }));
+    }
+  });
+  await new Promise<void>((resolve) => local.listen(0, "127.0.0.1", resolve));
+  const localUrl = `http://127.0.0.1:${(local.address() as import("node:net").AddressInfo).port}`;
+  const server = await startWeRelayRelayServer({
+    host: "127.0.0.1",
+    port: 0,
+    deviceId: "test-device",
+    deviceToken: "synthetic-device-token",
+    warmCacheTtlMs: 500,
+    warmRefreshIntervalMs: 60_000,
+    pollTimeoutMs: 20,
+    deviceOfflineMs: 5_000,
+  });
+  const client = startWeRelayRelayClient({
+    transport: "long-poll",
+    relayUrl: server.baseUrl,
+    deviceId: "test-device",
+    deviceToken: "synthetic-device-token",
+    localBaseUrl: localUrl,
+    retryDelayMs: 5,
+  });
+  try {
+    await waitFor(() => {
+      void fetch(server.baseUrl + "/health");
+      return true;
+    });
+    let online = false;
+    for (const until = Date.now() + 3_000; Date.now() < until;) {
+      online = Boolean((await (await fetch(server.baseUrl + "/health")).json()).deviceOnline);
+      if (online) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(online).toBe(true);
+    const browserHeaders = { cookie: `codex_mobile_session=${sessionToken}` };
+    await fetch(`${server.baseUrl}/api/auth/status`, { headers: browserHeaders });
+    const messagesPath = "/api/tasks/task-a/messages?limit=5&adapter=codex";
+    await fetch(`${server.baseUrl}${messagesPath}`, { headers: browserHeaders });
+    await fetch(`${server.baseUrl}${messagesPath}`, { headers: browserHeaders });
+    const versionBefore = requests.get(messagesPath) ?? 0;
+    const device = rawSocket(server.baseUrl);
+    let helloSent = false;
+    device.on("message", (data) => {
+      void (async () => {
+        const frame = JSON.parse(data.toString()) as {
+          type: string;
+          command?: {
+            id: string;
+            request: { path: string };
+          };
+        };
+        if (frame.type === "hello") {
+          helloSent = true;
+          return;
+        }
+        if (frame.type === "ack") {
+          device.send(JSON.stringify({ version: 1, type: "ready", capacity: 2 }));
+          return;
+        }
+        if (frame.type !== "command" || !frame.command) return;
+        const response = await fetch(
+          `${localUrl}${frame.command.request.path}`,
+        );
+        const body = Buffer.from(await response.arrayBuffer());
+        const headers: Record<string, string> = {};
+        response.headers.forEach((value, name) => {
+          headers[name] = value;
+        });
+        device.send(JSON.stringify({
+          version: 1,
+          type: "response",
+          response: {
+            protocolVersion: 1,
+            commandId: frame.command.id,
+            statusCode: response.status,
+            headers,
+            ...(body.length ? { bodyBase64: body.toString("base64") } : {}),
+          },
+        }));
+      })().catch(() => device.terminate());
+    });
+    await waitFor(() => helloSent);
+    device.send(JSON.stringify({ version: 1, type: "ready", capacity: 2 }));
+    device.send(JSON.stringify({ version: 1, type: "event", event: {
+      kind: "conversation", adapter: "", threadId: "task-a", revision: "bad",
+    } }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(device.readyState).toBe(WebSocket.OPEN);
+    version = 2;
+    device.send(JSON.stringify({ version: 1, type: "event", event: {
+      kind: "conversation", adapter: "codex", threadId: "task-a", revision: "rev-2",
+    } }));
+    await waitFor(() => (requests.get(messagesPath) ?? 0) > versionBefore);
+    expect((await fetch(`${server.baseUrl}${messagesPath}`, { headers: browserHeaders }))
+      .headers.get("x-werelay-cache")).toBe("warm");
+    device.close();
+  } finally {
+    await client.close();
+    await server.close();
+    local.closeAllConnections();
+    await new Promise<void>((resolve) => local.close(() => resolve()));
+  }
+});
+
+test("browser live channel authenticates, filters subscriptions, and closes at the limit", { timeout: 30_000 }, async () => {
+  // Bun 1.3.1 cannot surface manual WebSocket upgrade rejection status codes.
+  // Run the live protocol end to end with production Node HTTP/WebSocket clients.
+  const fixture = new URL("./fixtures/live-channel.mjs", import.meta.url);
+  const result = await promisify(execFile)(
+    "node",
+    ["--experimental-transform-types", fileURLToPath(fixture)],
+    { timeout: 30_000 },
+  );
+  const output = JSON.parse(result.stdout);
+  expect(output).toMatchObject({
+    rejected: [401, 403],
+    unsubscribedTaskReceived: false,
+    changedBeforeRefresh: false,
+    targetRefreshStarted: true,
+    afterUnsubscribeReceived: false,
+    subscriptionLimitCloseCode: 1008,
+    sessionExpiryCloseCode: 1008,
+  });
+  expect(output.messages).toEqual(expect.arrayContaining([
+    { v: 1, type: "hello" },
+    { v: 1, type: "pong" },
+    {
+      v: 1,
+      type: "changed",
+      adapter: "codex",
+      threadId: "task-1",
+      revision: "revision-1",
+    },
+    { v: 1, type: "tasks-changed", adapter: "claude" },
+    { v: 1, type: "changed", adapter: "codex", threadId: "task-slow", revision: "revision-slow" },
+    { v: 1, type: "tasks-changed", adapter: "slow" },
+  ]));
+  expect(output.messages).toHaveLength(7);
+  expect(output.messages.filter((message: { type: string }) => message.type === "pong"))
+    .toHaveLength(2);
+  expect(output.delayedConversationChangedAfterMs).toBeGreaterThanOrEqual(2_000);
+  expect(output.delayedConversationChangedAfterMs).toBeLessThan(3_500);
+  expect(output.delayedTasksChangedAfterMs).toBeLessThan(1_000);
+  expect(output.afterUnsubscribeReceived).toBe(false);
+  expect(output.afterUnsubscribeElapsedMs).toBeGreaterThanOrEqual(2_200);
 });

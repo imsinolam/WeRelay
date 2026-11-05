@@ -10,6 +10,7 @@ import http, {
 import { isIP } from "node:net";
 import os, { type NetworkInterfaceInfo } from "node:os";
 import path from "node:path";
+import { WebSocket, WebSocketServer } from "ws";
 import { BoundedTtlMap } from "../utils/bounded-ttl-cache.ts";
 import {
   createImmutableTextAsset,
@@ -39,6 +40,7 @@ import { RemoteAccessError, type MobileRemoteAccessView } from "./mobile-remote-
 import type { MobileProviderSettingsEntry } from "./mobile-provider-settings.ts";
 import type { MobileMessageOutboxStatus } from "./mobile-message-outbox.ts";
 import type { MessageRecords, MessageRecordPolicy } from "./message-records.ts";
+import type { MobileLiveEventHub } from "./mobile-live-events.ts";
 import {
   CODEX_MOBILE_CSS,
   CODEX_MOBILE_HTML,
@@ -168,6 +170,12 @@ export type CodexMobileTaskBoardTask = CodexMobileTask & {
   completedAt?: string;
 };
 
+/** Read-only links in the parent conversation; never independent list entries. */
+export type CodexMobileChildTask = Pick<CodexMobileTask, "threadId" | "title" | "lastUpdatedAt"> & {
+  parentThreadId: string;
+  status: CodexMobileTaskStatus | "unknown";
+};
+
 export type CodexMobileRecentCompletion = {
   adapter: string;
   adapterLabel: string;
@@ -231,6 +239,8 @@ export type CodexMobileMessageInput = {
   retry?: boolean;
   createTaskSourceThreadId?: string;
   newTaskSettings?: MobileNewTaskSettings;
+  /** 已有任务下一条消息要使用的模型/推理强度，由 daemon 固化到 Outbox 并在投递前按需应用。 */
+  taskSettings?: MobileNewTaskSettings;
   composerDraftRevision?: string;
 };
 
@@ -446,6 +456,7 @@ export type StartCodexMobileServerOptions = {
   accessToken: string;
   relayPrewarmToken?: string;
   authStore?: CodexMobileAuthStore;
+  liveEvents?: MobileLiveEventHub;
   readRemoteAccess?: () => MobileRemoteAccessView;
   changeRemoteAccess?: (input: Record<string, unknown>, checkOnly: boolean) => Promise<MobileRemoteAccessView>;
   resolveDesktopPublicAddress?: () => Promise<string | null>;
@@ -479,6 +490,7 @@ export type StartCodexMobileServerOptions = {
   /** Clears tokens for this origin, used when the app signs out or switches host. */
   clearPushTokens?: (input: { origin: string }) => Promise<{ cleared: number }>;
   listTasks: (adapter?: string) => Promise<CodexMobileTask[]>;
+  listChildTasks?: (parentThreadId: string, adapter?: string) => Promise<CodexMobileChildTask[]>;
   createTask?: (
     adapter?: string,
     options?: { sourceThreadId?: string },
@@ -492,7 +504,8 @@ export type StartCodexMobileServerOptions = {
   readTaskModel?: (
     threadId: string,
     adapter?: string,
-  ) => Promise<BridgeSessionModelState>;
+    readOptions?: { cachedOnly?: boolean },
+  ) => Promise<BridgeSessionModelState | null>;
   setTaskModel?: (
     threadId: string,
     update: { model?: string; reasoningEffort?: string },
@@ -1128,10 +1141,42 @@ function resolveTaskBySelector(
   throw new HttpError(404, "没有找到这个任务。");
 }
 
+/** 任务设置读取失败时给出明确原因，不让“任务不存在”变成笼统的服务错误。 */
+async function readTaskSettingOrExplain<T>(read: () => Promise<T>): Promise<T> {
+  try {
+    return await read();
+  } catch (error) {
+    if (error instanceof HttpError || error instanceof MobileAdapterUnavailableError) throw error;
+    const message = error instanceof Error ? error.message : "暂时无法读取任务设置。";
+    throw new HttpError(/没有找到这个/.test(message) ? 404 : 409, message);
+  }
+}
+
+export async function resolveTaskSettingsThreadId(
+  selector: string,
+  listTasks: (adapter?: string) => Promise<CodexMobileTask[]>,
+  adapter?: string,
+): Promise<string> {
+  const normalized = selector.trim();
+  if (
+    normalized.length >= 8 &&
+    normalized.length <= 200 &&
+    !normalized.startsWith("local-new-") &&
+    /^[A-Za-z0-9._:~-]+$/.test(normalized)
+  ) {
+    return normalized;
+  }
+  // 短前缀或非常规标识才需要完整列表做唯一匹配。
+  return resolveTaskBySelector(await listTasks(adapter), normalized).threadId;
+}
+
 function createRequestHandler(
   options: StartCodexMobileServerOptions,
   network: MobileServerNetworkContext,
-): (request: IncomingMessage, response: ServerResponse) => void {
+): {
+  handleRequest: (request: IncomingMessage, response: ServerResponse) => void;
+  isLiveRequestAuthenticated: (request: IncomingMessage) => boolean;
+} {
   const loginAttempts = new Map<string, LoginAttempt>();
   const lanHandoffs = new Map<string, LanHandoff>();
   const lanSessions = new Map<string, LanSession>();
@@ -1298,7 +1343,37 @@ function createRequestHandler(
     return session.clientAddress === requestClientKey(request);
   };
 
-  return (request, response) => {
+  const isLiveRequestAuthenticated = (request: IncomingMessage): boolean => {
+    const authStore = options.authStore;
+    if (!authStore) {
+      return timingSafeTokenEqual(
+        readLegacyAccessToken(
+          request,
+          new URL(request.url ?? "/", "http://localhost"),
+        ),
+        options.accessToken,
+      );
+    }
+    if (!authStore.isConfigured()) {
+      return false;
+    }
+    const sessionToken = readCookie(request, MOBILE_SESSION_COOKIE);
+    return authStore.verifySessionToken(sessionToken) ||
+      verifyLanSession(request, sessionToken);
+  };
+
+  const isRelayPrewarmAuthorized = (request: IncomingMessage, url: URL): boolean => {
+    const relayPrewarmHeader = request.headers["x-werelay-relay-prewarm"];
+    return Boolean(
+      options.relayPrewarmToken &&
+      request.headers["x-werelay-relay"] === "1" &&
+      typeof relayPrewarmHeader === "string" &&
+      timingSafeTokenEqual(relayPrewarmHeader, options.relayPrewarmToken) &&
+      isRelayPrewarmRead(request.method ?? "GET", url)
+    );
+  };
+
+  const handleRequest = (request: IncomingMessage, response: ServerResponse) => {
     void (async () => {
       const url = new URL(request.url ?? "/", "http://localhost");
       const method = request.method ?? "GET";
@@ -1497,6 +1572,7 @@ function createRequestHandler(
       }
 
       const authStore = options.authStore;
+      let relayPrewarmAuthorized = false;
       if (authStore) {
         const setupAuthorized = !authStore.isConfigured() && timingSafeTokenEqual(
           readSetupToken(request, url),
@@ -1505,14 +1581,7 @@ function createRequestHandler(
         const sessionToken = readCookie(request, MOBILE_SESSION_COOKIE);
         const authenticated = authStore.verifySessionToken(sessionToken) ||
           verifyLanSession(request, sessionToken);
-        const relayPrewarmHeader = request.headers["x-werelay-relay-prewarm"];
-        const relayPrewarmAuthorized = Boolean(
-          options.relayPrewarmToken &&
-          request.headers["x-werelay-relay"] === "1" &&
-          typeof relayPrewarmHeader === "string" &&
-          timingSafeTokenEqual(relayPrewarmHeader, options.relayPrewarmToken) &&
-          isRelayPrewarmRead(method, url)
-        );
+        relayPrewarmAuthorized = isRelayPrewarmAuthorized(request, url);
 
         if (url.pathname === "/api/auth/status" && method === "GET") {
           sendJson(response, 200, {
@@ -1994,16 +2063,31 @@ function createRequestHandler(
 
       const modelRoute = url.pathname.match(/^\/api\/tasks\/([^/]+)\/model$/);
       if (modelRoute?.[1] && (method === "GET" || method === "PUT")) {
-        const tasks = await options.listTasks(requestedAdapter);
-        const task = resolveTaskBySelector(tasks, decodeURIComponent(modelRoute[1]));
+        const threadId = await resolveTaskSettingsThreadId(
+          decodeURIComponent(modelRoute[1]),
+          options.listTasks,
+          requestedAdapter,
+        );
         if (method === "GET") {
           if (!options.readTaskModel) {
             throw new HttpError(409, "当前连接暂不支持读取模型。");
           }
+          if (relayPrewarmAuthorized) {
+            const model = await readTaskSettingOrExplain(() =>
+              options.readTaskModel!(threadId, requestedAdapter, { cachedOnly: true }));
+            if (model) {
+              sendJson(response, 200, model);
+            } else {
+              response.writeHead(204, { "cache-control": "no-store" });
+              response.end();
+            }
+            return;
+          }
           sendJson(
             response,
             200,
-            await options.readTaskModel(task.threadId, requestedAdapter),
+            (await readTaskSettingOrExplain(() =>
+              options.readTaskModel!(threadId, requestedAdapter)))!,
           );
           return;
         }
@@ -2028,7 +2112,7 @@ function createRequestHandler(
           sendJson(
             response,
             200,
-            await options.setTaskModel(task.threadId, {
+            await options.setTaskModel(threadId, {
               ...(model ? { model } : {}),
               ...(reasoningEffort ? { reasoningEffort } : {}),
             }, requestedAdapter),
@@ -2044,8 +2128,11 @@ function createRequestHandler(
 
       const permissionRoute = url.pathname.match(/^\/api\/tasks\/([^/]+)\/permission$/);
       if (permissionRoute?.[1] && (method === "GET" || method === "PUT")) {
-        const tasks = await options.listTasks(requestedAdapter);
-        const task = resolveTaskBySelector(tasks, decodeURIComponent(permissionRoute[1]));
+        const threadId = await resolveTaskSettingsThreadId(
+          decodeURIComponent(permissionRoute[1]),
+          options.listTasks,
+          requestedAdapter,
+        );
         if (method === "GET") {
           if (!options.readTaskPermission) {
             throw new HttpError(409, "当前连接暂不支持读取权限范围。");
@@ -2053,7 +2140,7 @@ function createRequestHandler(
           sendJson(
             response,
             200,
-            await options.readTaskPermission(task.threadId, requestedAdapter),
+            await readTaskSettingOrExplain(() => options.readTaskPermission!(threadId, requestedAdapter)),
           );
           return;
         }
@@ -2072,7 +2159,7 @@ function createRequestHandler(
           sendJson(
             response,
             200,
-            await options.setTaskPermission(task.threadId, permission, requestedAdapter),
+            await options.setTaskPermission(threadId, permission, requestedAdapter),
           );
         } catch (error) {
           throw new HttpError(
@@ -2095,6 +2182,18 @@ function createRequestHandler(
         );
         const interrupted = await options.stopTask(task.threadId, requestedAdapter);
         sendJson(response, 200, { ok: true, interrupted });
+        return;
+      }
+
+      const childrenRoute = url.pathname.match(/^\/api\/tasks\/([^/]+)\/children$/);
+      if (method === "GET" && childrenRoute?.[1]) {
+        const parentThreadId = decodeURIComponent(childrenRoute[1]).trim();
+        if (!parentThreadId) throw new HttpError(400, "主任务 ID 不能为空。");
+        const tasks = options.listChildTasks ? await options.listChildTasks(parentThreadId, requestedAdapter) : [];
+        sendJson(response, 200, {
+          parentThreadId,
+          tasks: tasks.filter((task) => task.parentThreadId === parentThreadId && task.threadId !== parentThreadId),
+        });
         return;
       }
 
@@ -2236,6 +2335,15 @@ function createRequestHandler(
           } catch (error) {
             throw new HttpError(400, error instanceof Error ? error.message : "新任务设置无效。");
           }
+          let taskSettings: MobileNewTaskSettings | undefined;
+          if (threadId.startsWith("local-new-") && body.taskSettings !== undefined) {
+            throw new HttpError(400, "新任务请使用预选设置。");
+          }
+          try {
+            taskSettings = parseMobileNewTaskSettings(body.taskSettings);
+          } catch (error) {
+            throw new HttpError(400, error instanceof Error ? error.message : "任务设置无效。");
+          }
           let result: CodexMobileSendResult;
           try {
             result = await options.sendMessage(
@@ -2244,6 +2352,7 @@ function createRequestHandler(
                 clientId,
                 ...(body.composerDraftRevision ? { composerDraftRevision: body.composerDraftRevision as string } : {}),
                 ...(newTaskSettings ? { newTaskSettings } : {}),
+                ...(taskSettings ? { taskSettings } : {}),
                 text,
                 images,
                 ...(typeof body.createdAtMs === "number" && Number.isFinite(body.createdAtMs)
@@ -2408,6 +2517,10 @@ function createRequestHandler(
       sendJson(response, statusCode, { error: message });
     });
   };
+  return {
+    handleRequest,
+    isLiveRequestAuthenticated,
+  };
 }
 
 async function listen(
@@ -2435,6 +2548,306 @@ async function listen(
   });
 }
 
+const LIVE_PATH = "/api/live";
+const LIVE_MAX_CONNECTIONS = 32;
+const LIVE_MAX_SUBSCRIPTIONS = 8;
+const LIVE_MAX_PAYLOAD = 4 * 1024;
+const LIVE_MAX_BUFFERED_AMOUNT = 1024 * 1024;
+const LIVE_IDLE_TIMEOUT_MS = 60_000;
+const LIVE_HEARTBEAT_INTERVAL_MS = 15_000;
+
+type LiveFrame = {
+  v: 1;
+  type: "subscribe" | "unsubscribe";
+  adapter: string;
+  threadId?: string;
+};
+
+type LiveConnection = {
+  socket: WebSocket;
+  subscriptions: Set<string>;
+  lastClientFrameAtMs: number;
+  idleTimer: ReturnType<typeof setTimeout>;
+  unsubscribeHub: () => void;
+  closed: boolean;
+};
+
+function rejectUpgrade(
+  socket: import("node:stream").Duplex,
+  statusCode: number,
+  statusText: string,
+): void {
+  const body = "";
+  socket.once("finish", () => socket.destroy());
+  socket.end(
+    `HTTP/1.1 ${statusCode} ${statusText}\r\n` +
+    "Connection: close\r\n" +
+    "Content-Type: text/plain; charset=utf-8\r\n" +
+    `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n` +
+    body,
+  );
+}
+
+function isValidLiveOrigin(request: IncomingMessage): boolean {
+  const origin = request.headers.origin;
+  const host = request.headers.host;
+  if (typeof origin !== "string" || typeof host !== "string") {
+    return false;
+  }
+  try {
+    const parsedOrigin = new URL(origin);
+    return (parsedOrigin.protocol === "http:" || parsedOrigin.protocol === "https:") &&
+      parsedOrigin.host === host;
+  } catch {
+    return false;
+  }
+}
+
+function closeLiveSocket(socket: WebSocket, code = 1008, reason = "协议错误"): void {
+  try {
+    socket.close(code, reason);
+    const timer = setTimeout(() => socket.terminate(), 1_000);
+    timer.unref?.();
+  } catch {
+    socket.terminate();
+  }
+}
+
+function liveFrameMatchesSubscription(
+  adapter: string,
+  threadId: string,
+  subscriptions: Set<string>,
+): boolean {
+  return subscriptions.has(JSON.stringify([adapter, threadId]));
+}
+
+function parseLiveFrame(
+  value: Record<string, unknown>,
+  allowedKeys: readonly string[],
+): LiveFrame | null {
+  try {
+    if (!Object.keys(value).every((key) => allowedKeys.includes(key))) return null;
+    if (!value || value.v !== 1 ||
+        (value.type !== "subscribe" && value.type !== "unsubscribe") ||
+        typeof value.adapter !== "string") {
+      return null;
+    }
+    const adapter = value.adapter.trim();
+    if (!adapter || Array.from(adapter).length > 200) {
+      return null;
+    }
+    if (value.type === "subscribe") {
+      if (typeof value.threadId !== "string") return null;
+      const threadId = value.threadId.trim();
+      if (!threadId || Array.from(threadId).length > 200) return null;
+      return { v: 1, type: "subscribe", adapter, threadId };
+    }
+    if (typeof value.threadId !== "string") return null;
+    const threadId = value.threadId.trim();
+    if (!threadId || Array.from(threadId).length > 200) return null;
+    return { v: 1, type: "unsubscribe", adapter, threadId };
+  } catch {
+    return null;
+  }
+}
+
+function sendLiveJson(socket: WebSocket, value: unknown): boolean {
+  if (socket.readyState !== WebSocket.OPEN) {
+    return false;
+  }
+  if (socket.bufferedAmount > LIVE_MAX_BUFFERED_AMOUNT) {
+    socket.terminate();
+    return false;
+  }
+  socket.send(JSON.stringify(value));
+  return true;
+}
+
+function installLiveUpgradeHandler(
+  server: Server,
+  options: StartCodexMobileServerOptions,
+  isLiveRequestAuthenticated: (request: IncomingMessage) => boolean,
+): {
+  close: () => Promise<void>;
+} {
+  const wss = new WebSocketServer({
+    noServer: true,
+    maxPayload: LIVE_MAX_PAYLOAD,
+    perMessageDeflate: false,
+  });
+  wss.on("error", () => undefined);
+  const connections = new Set<LiveConnection>();
+  let closed = false;
+
+  const removeConnection = (connection: LiveConnection): void => {
+    if (!connections.delete(connection)) {
+      return;
+    }
+    connection.closed = true;
+    clearTimeout(connection.idleTimer);
+    connection.unsubscribeHub();
+  };
+
+  const liveEvents = options.liveEvents;
+  if (liveEvents) {
+    wss.on("connection", (socket: WebSocket) => {
+      if (closed) {
+        socket.terminate();
+        return;
+      }
+      const subscriptions = new Set<string>();
+      const connection: LiveConnection = {
+        socket,
+        subscriptions,
+        lastClientFrameAtMs: Date.now(),
+        idleTimer: setTimeout(() => undefined, 0),
+        unsubscribeHub: () => undefined,
+        closed: false,
+      };
+      clearTimeout(connection.idleTimer);
+      const scheduleIdleCheck = () => {
+        clearTimeout(connection.idleTimer);
+        connection.idleTimer = setTimeout(() => {
+          if (closed || socket.readyState !== WebSocket.OPEN) return;
+          if (Date.now() - connection.lastClientFrameAtMs >= LIVE_IDLE_TIMEOUT_MS) {
+            closeLiveSocket(socket, 1008, "连接空闲超时");
+            return;
+          }
+          scheduleIdleCheck();
+        }, LIVE_HEARTBEAT_INTERVAL_MS);
+        connection.idleTimer.unref?.();
+      };
+      scheduleIdleCheck();
+      connections.add(connection);
+      connection.unsubscribeHub = liveEvents.subscribe((event) => {
+        if (event.kind === "tasks") {
+          sendLiveJson(socket, {
+            v: 1,
+            type: "tasks-changed",
+            adapter: event.adapter,
+          });
+          return;
+        }
+        if (liveFrameMatchesSubscription(
+          event.adapter,
+          event.threadId,
+          subscriptions,
+        )) {
+          sendLiveJson(socket, {
+            v: 1,
+            type: "changed",
+            adapter: event.adapter,
+            threadId: event.threadId,
+            revision: event.revision,
+          });
+        }
+      });
+      sendLiveJson(socket, { v: 1, type: "hello" });
+
+      socket.on("message", (data, isBinary) => {
+        if (connection.closed) return;
+        connection.lastClientFrameAtMs = Date.now();
+        scheduleIdleCheck();
+        if (socket.bufferedAmount > LIVE_MAX_BUFFERED_AMOUNT) {
+          socket.terminate();
+          return;
+        }
+        if (isBinary) {
+          closeLiveSocket(socket);
+          return;
+        }
+        let value: Record<string, unknown>;
+        try {
+          value = JSON.parse(data.toString()) as Record<string, unknown>;
+        } catch {
+          closeLiveSocket(socket);
+          return;
+        }
+        if (!value || value.v !== 1 || typeof value.type !== "string") {
+          closeLiveSocket(socket);
+          return;
+        }
+        if (value.type === "ping") {
+          if (Object.keys(value).some((key) => key !== "v" && key !== "type")) {
+            closeLiveSocket(socket);
+            return;
+          }
+          if (!sendLiveJson(socket, { v: 1, type: "pong" })) {
+            closeLiveSocket(socket);
+          }
+          return;
+        }
+        const frame = parseLiveFrame(value, ["v", "type", "adapter", "threadId"]);
+        if (!frame) {
+          closeLiveSocket(socket);
+          return;
+        }
+        if (frame.type === "subscribe") {
+          const key = JSON.stringify([frame.adapter, frame.threadId]);
+          if (!subscriptions.has(key) && subscriptions.size >= LIVE_MAX_SUBSCRIPTIONS) {
+            closeLiveSocket(socket, 1008, "订阅数量超限");
+            return;
+          }
+          subscriptions.add(key);
+        } else {
+          const key = JSON.stringify([frame.adapter, frame.threadId]);
+          subscriptions.delete(key);
+        }
+      });
+      socket.on("close", () => removeConnection(connection));
+      socket.on("error", () => removeConnection(connection));
+    });
+  }
+
+  server.on("upgrade", (request, socket, head) => {
+    let url: URL;
+    try {
+      url = new URL(request.url ?? "/", "http://localhost");
+    } catch {
+      rejectUpgrade(socket, 404, "Not Found");
+      return;
+    }
+    if (url.pathname !== LIVE_PATH ||
+        [...url.searchParams.keys()].some((key) => key !== "adapter") ||
+        url.searchParams.getAll("adapter").length > 1) {
+      rejectUpgrade(socket, 404, "Not Found");
+      return;
+    }
+    if (!liveEvents) {
+      rejectUpgrade(socket, 404, "Not Found");
+      return;
+    }
+    if (!isValidLiveOrigin(request)) {
+      rejectUpgrade(socket, 403, "Forbidden");
+      return;
+    }
+    if (!isLiveRequestAuthenticated(request)) {
+      rejectUpgrade(socket, 401, "Unauthorized");
+      return;
+    }
+    if (connections.size >= LIVE_MAX_CONNECTIONS) {
+      rejectUpgrade(socket, 503, "Service Unavailable");
+      return;
+    }
+    wss.handleUpgrade(request, socket, head, (webSocket) => {
+      wss.emit("connection", webSocket, request);
+    });
+  });
+
+  return {
+    close: () => {
+      closed = true;
+      for (const connection of connections) {
+        removeConnection(connection);
+        connection.socket.terminate();
+      }
+      return new Promise<void>((resolve) => {
+        wss.close(() => resolve());
+      });
+    },
+  };
+}
+
 export async function startCodexMobileServer(
   options: StartCodexMobileServerOptions,
 ): Promise<CodexMobileServerHandle> {
@@ -2450,6 +2863,7 @@ export async function startCodexMobileServer(
   }
 
   let server: Server | null = null;
+  let liveServer: { close: () => Promise<void> } | null = null;
   let port = requestedPort;
   let lastError: unknown = null;
   const networkContext: MobileServerNetworkContext = {
@@ -2460,11 +2874,17 @@ export async function startCodexMobileServer(
   for (let attempt = 0; attempt < maxPortAttempts; attempt += 1) {
     const candidatePort = requestedPort === 0 ? 0 : requestedPort + attempt;
     networkContext.port = candidatePort;
-    const candidate = http.createServer(createRequestHandler(options, networkContext));
+    const requestHandler = createRequestHandler(options, networkContext);
+    const candidate = http.createServer(requestHandler.handleRequest);
     try {
       port = await listen(candidate, host, candidatePort);
       networkContext.port = port;
       server = candidate;
+      liveServer = installLiveUpgradeHandler(
+        candidate,
+        options,
+        requestHandler.isLiveRequestAuthenticated,
+      );
       break;
     } catch (error) {
       lastError = error;
@@ -2522,6 +2942,7 @@ export async function startCodexMobileServer(
       return `${baseUrl}/t/${shortCode}${query ? `?${query}` : ""}`;
     },
     close: async () => {
+      await liveServer?.close();
       await new Promise<void>((resolve) => {
         activeServer.close(() => resolve());
         activeServer.closeAllConnections?.();

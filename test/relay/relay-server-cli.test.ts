@@ -20,7 +20,20 @@ describe("WeRelay relay server CLI", () => {
       deviceToken: "server-secret",
       allowNonLoopback: false,
       taskLinkStateFile: path.join("/tmp/werelay-test", "relay-task-links.json"),
+      warmSnapshotFile: path.join("/tmp/werelay-test", "relay-warm-snapshot.bin"),
     });
+  });
+
+  test("allows overriding or disabling the encrypted warm snapshot", () => {
+    expect(parseRelayServerCliOptions([], {
+      WERELAY_RELAY_DEVICE_TOKEN: "server-secret",
+      WERELAY_DATA_DIR: "/tmp/werelay-test",
+      WERELAY_RELAY_WARM_SNAPSHOT_FILE: "/tmp/custom-snapshot.bin",
+    }).warmSnapshotFile).toBe("/tmp/custom-snapshot.bin");
+    expect(parseRelayServerCliOptions([], {
+      WERELAY_RELAY_DEVICE_TOKEN: "server-secret",
+      WERELAY_RELAY_WARM_SNAPSHOT_FILE: "off",
+    }).warmSnapshotFile).toBeNull();
   });
 
   test("rejects wildcard and non-loopback listeners by default", () => {

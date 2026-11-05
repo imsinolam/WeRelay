@@ -5,7 +5,8 @@ import { assertMobileTaskPermission, ensureMobileTaskWritablePermission, mobileT
 
 import { readProcessSnapshot, recoverOpenAdaptersAfterProbeFailure } from "./process-snapshot.ts";
 import { buildSessionOrganizerSnapshot } from "./session-organizer.ts";
-import { applyMobileNewTaskSettings } from "./mobile-new-task-settings.ts";
+import { applyMobileNewTaskSettings, type MobileNewTaskSettings } from "./mobile-new-task-settings.ts";
+import { MobileTaskModelStateCache, staleModelStateFallback, startMobileTaskSettingsTimer, taskSettingsSatisfied } from "./mobile-task-settings-sync.ts";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
@@ -162,6 +163,7 @@ import { ClawbotUpdateController } from "./clawbot-update-controller.ts";
 import { canRestartClawbotService } from "./clawbot-update-restart.ts";
 import { getCurrentVersion } from "../utils/version-checker.ts";
 import { MobileConversationRevisionStore } from "./mobile-conversation-revisions.ts";
+import { MobileLiveEventHub } from "./mobile-live-events.ts";
 import { ensureWechatCredentials } from "../wechat/setup.ts";
 import { WechatImageDraftCollector } from "../wechat/wechat-image-draft.ts";
 import {
@@ -267,9 +269,11 @@ import {
   type CodexMobileQueuedMessage,
   type CodexMobileServerHandle,
   type CodexMobileTask,
+  type CodexMobileChildTask,
   type CodexMobileTaskBoard,
   type CodexMobileTaskStatus,
   type CodexMobileSettings,
+  paginateCodexMobileMessages,
   type CodexMobileTranscript,
 } from "./codex-mobile-server.ts";
 import {
@@ -715,6 +719,10 @@ const WECHAT_SEND_RETRY_BASE_MS = 750;
 const CODEX_TASK_MONITOR_INTERVAL_MS = 2_000;
 const CODEX_TASK_MONITOR_MAX_RETRY_MS = 60_000;
 const CODEX_TASK_CANDIDATE_CACHE_MAX_AGE_MS = 3_000;
+/** 投递前判断是否需要写入设置时，信任多新的已确认模型状态。 */
+const MOBILE_TASK_MODEL_FRESH_MAX_AGE_MS = 15_000;
+/** 电脑暂时没响应时，最多回退到多久之前的模型列表与切换能力。 */
+const MOBILE_TASK_MODEL_STALE_MAX_AGE_MS = 6 * 60 * 60_000;
 // Relay 预热在缓存超过 5 秒时刷新 task-board，移动网页每 8 秒轮询一次。
 // 目录缓存取 6 秒，使一次预热刷新只触发一次真实扫描，同时新建或重命名
 // 任务会主动失效缓存，用户仍能立即看到结果。
@@ -734,7 +742,7 @@ const MOBILE_CREATED_TASK_CACHE_MAX_SIZE = 256;
 const MOBILE_CREATED_TASK_CACHE_TTL_MS = 15 * 60_000;
 const MOBILE_MESSAGE_OUTBOX_MAX_ATTEMPTS = 5;
 const MOBILE_MESSAGE_FAILURE_NOTIFICATION_RETRY_MS = 30_000;
-const MOBILE_ADAPTER_USAGE_WINDOW_MS = 24 * 60 * 60_000;
+const MOBILE_ADAPTER_USAGE_WINDOW_MS = 3 * 24 * 60 * 60_000;
 const MOBILE_ADAPTER_USAGE_REFRESH_INTERVAL_MS = 24 * 60 * 60_000;
 const MOBILE_ADAPTER_USAGE_IDLE_DELAY_MS = 30_000;
 const MOBILE_ADAPTER_USAGE_BUSY_RETRY_MS = 5 * 60_000;
@@ -782,10 +790,12 @@ export function shouldRefreshAdapterUsageOrder(
   updatedAtMs: number | undefined,
   nowMs: number,
   intervalMs = MOBILE_ADAPTER_USAGE_REFRESH_INTERVAL_MS,
+  recordedWindowMs?: number,
 ): boolean {
   return updatedAtMs === undefined ||
     !Number.isFinite(updatedAtMs) ||
     updatedAtMs > nowMs ||
+    recordedWindowMs !== MOBILE_ADAPTER_USAGE_WINDOW_MS ||
     nowMs - updatedAtMs >= intervalMs;
 }
 
@@ -3146,6 +3156,7 @@ export class WeRelayDaemon {
   private mobileAdapterUsageRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private mobileAdapterUsageOrder: DaemonAdapterKind[];
   private mobileAdapterUsageOrderUpdatedAtMs: number | undefined;
+  private mobileAdapterUsageOrderWindowMs: number | undefined;
   // 全终端目录扫描会同步遍历各终端会话目录，必须与 Codex 候选一样做短时
   // 复用与并发合并，否则移动轮询与 Relay 预热会把主线程反复占满。
   private readonly globalTaskCatalogCache = createGlobalTaskCatalogCache<
@@ -3162,6 +3173,11 @@ export class WeRelayDaemon {
     },
   });
   private readonly globalTaskCatalogWorker = new GlobalTaskCatalogWorker();
+  // Small separate cache: never feed inspection-only children into visible lists.
+  private readonly mobileChildTaskCache = new BoundedTtlMap<string, {
+    loadedAtMs: number; tasks: CodexMobileChildTask[];
+  }>({ maxSize: 32, ttlMs: 60_000 });
+  private readonly mobileChildTaskReads = new Map<string, Promise<CodexMobileChildTask[]>>();
   private readonly passiveCompletionWorker = new GlobalTaskCatalogWorker({ timeoutMs: 15_000 });
   private readonly passiveCompletionMonitor: PassiveCompletionMonitor;
   private readonly notificationPolicy: ScreenNotificationPolicy;
@@ -3202,11 +3218,18 @@ export class WeRelayDaemon {
     maxSize: WECHAT_GENERATED_IMAGE_KEY_CACHE_MAX_SIZE,
     ttlMs: DAEMON_TRANSIENT_CACHE_TTL_MS,
   });
+  private readonly mobileTaskModelStates = new MobileTaskModelStateCache();
   private readonly mobileCreatedTaskKeys = new BoundedTtlSet<string>({
     maxSize: MOBILE_CREATED_TASK_CACHE_MAX_SIZE,
     ttlMs: MOBILE_CREATED_TASK_CACHE_TTL_MS,
   });
   private readonly mobileConversationRevisions = new MobileConversationRevisionStore();
+  /** 会话与任务列表变化的实时通知；只发“有变化”的提示，正文仍走原有已认证接口拉取。 */
+  private readonly mobileLiveEvents = new MobileLiveEventHub();
+  private readonly mobileTaskListSignatures = new Map<string, string>();
+  private readonly unsubscribeMobileRevisionChanges = this.mobileConversationRevisions.onChange(
+    (change) => this.mobileLiveEvents.publish({ kind: "conversation", ...change }),
+  );
   private readonly openAgentLogHistory = new OpenAgentLogHistoryProvider();
   private pushStoreInstance: PushRegistrationStore | null = null;
   private pushDispatchInstance: PushDispatch | null = null;
@@ -3392,6 +3415,7 @@ export class WeRelayDaemon {
     this.mobileAdapterUsageOrderUpdatedAtMs = adapterUsageOrder
       ? Date.parse(adapterUsageOrder.updatedAt)
       : undefined;
+    this.mobileAdapterUsageOrderWindowMs = adapterUsageOrder?.windowMs;
     const latestWechatTaskTarget = params.stateStore.getLatestWechatTaskTarget();
     this.latestWechatTaskTarget = latestWechatTaskTarget
       ? {
@@ -3577,6 +3601,7 @@ export class WeRelayDaemon {
         },
         listSessionOrganizer: async () => buildSessionOrganizerSnapshot((await this.listMobileTaskBoard()).tasks),
         listTasks: (adapter) => this.listMobileTasks(adapter),
+        listChildTasks: (parentThreadId, adapter) => this.listMobileChildTasks(parentThreadId, adapter),
         createTask: (adapter, options) =>
           this.createMobileTask(adapter, options?.sourceThreadId),
         renameTask: (threadId, title, adapter) =>
@@ -3593,8 +3618,11 @@ export class WeRelayDaemon {
           const submission = result.draft && this.mobileMessageOutbox.hasComposerDraftSubmission(slot.adapter, threadId, result.draft.revision);
           return submission ? { supported: true, draft: null } : result;
         },
-        readTaskModel: (threadId, adapter) =>
-          this.readMobileTaskModel(threadId, adapter),
+        liveEvents: this.mobileLiveEvents,
+        readTaskModel: (threadId, adapter, readOptions) =>
+          readOptions?.cachedOnly
+            ? this.readCachedMobileTaskModel(threadId, adapter)
+            : this.readMobileTaskModel(threadId, adapter),
         setTaskModel: (threadId, model, adapter) =>
           this.setMobileTaskModel(threadId, model, adapter),
         readTaskPermission: (threadId, adapter) =>
@@ -3692,6 +3720,7 @@ export class WeRelayDaemon {
       ...config,
       localBaseUrl: `http://127.0.0.1:${this.codexMobileServer.port}`,
       localPrewarmToken: accessToken,
+      liveEvents: this.mobileLiveEvents,
       journalFile: path.join(workspaceDir, "relay-command-journal.json"),
       transport: process.env.WERELAY_RELAY_TRANSPORT === "long-poll" ? "long-poll" : "auto",
       onTransportChange: (transport) => appendDaemonLog(`relay_transport: ${transport}`),
@@ -3916,6 +3945,7 @@ export class WeRelayDaemon {
 
   private async cleanup(): Promise<void> {
     appendDaemonLog("shutdown_started");
+    this.unsubscribeMobileRevisionChanges();
     this.updateNotifier?.stop();
     this.updateController?.stop();
     // An install already replacing files must finish verification/rollback.
@@ -6910,7 +6940,12 @@ export class WeRelayDaemon {
     if (
       this.shutdownPromise ||
       this.mobileAdapterUsageRefreshTimer ||
-      !shouldRefreshAdapterUsageOrder(this.mobileAdapterUsageOrderUpdatedAtMs, Date.now())
+      !shouldRefreshAdapterUsageOrder(
+        this.mobileAdapterUsageOrderUpdatedAtMs,
+        Date.now(),
+        MOBILE_ADAPTER_USAGE_REFRESH_INTERVAL_MS,
+        this.mobileAdapterUsageOrderWindowMs,
+      )
     ) {
       return;
     }
@@ -6932,7 +6967,12 @@ export class WeRelayDaemon {
       const updatedAt = new Date(nowMs).toISOString();
       this.mobileAdapterUsageOrder = order;
       this.mobileAdapterUsageOrderUpdatedAtMs = nowMs;
-      this.stateStore.setAdapterUsageOrder({ adapters: order, updatedAt });
+      this.mobileAdapterUsageOrderWindowMs = MOBILE_ADAPTER_USAGE_WINDOW_MS;
+      this.stateStore.setAdapterUsageOrder({
+        adapters: order,
+        updatedAt,
+        windowMs: MOBILE_ADAPTER_USAGE_WINDOW_MS,
+      });
       appendDaemonLog(`mobile_adapter_usage_order_refreshed: adapters=${order.join(",")}`);
     }, delayMs);
     this.mobileAdapterUsageRefreshTimer.unref?.();
@@ -6981,10 +7021,11 @@ export class WeRelayDaemon {
       await this.listGlobalTaskCandidates(adapters);
     const runningAdapterIds = collectRunningMobileAdapterIds(globalCandidates);
     this.scheduleMobileAdapterUsageOrderRefresh();
-    const orderedAdapters = sortAdaptersByRecentMessageActivity(
-      mergeAdapterUsageOrder(this.mobileAdapterUsageOrder, DAEMON_ADAPTERS),
-      this.stateStore.getAdapterMessageActivities(),
-      Date.now(),
+    // Keep the list stable between low-frequency refreshes. Recomputing here
+    // made the order jump on every request despite the persisted daily order.
+    const orderedAdapters = mergeAdapterUsageOrder(
+      this.mobileAdapterUsageOrder,
+      DAEMON_ADAPTERS,
     );
     return {
       ...(this.activeAdapter ? { activeAdapter: this.activeAdapter } : {}),
@@ -7112,6 +7153,32 @@ export class WeRelayDaemon {
     });
   }
 
+  private async listMobileChildTasks(parentThreadId: string, adapter?: string): Promise<CodexMobileChildTask[]> {
+    const resolvedAdapter = this.resolveMobileAdapter(adapter);
+    if (!["codex", "deepseek", "opencode"].includes(resolvedAdapter) || parentThreadId.startsWith("local-new-")) return [];
+    const key = `${resolvedAdapter}\u0000${parentThreadId}`;
+    const cached = this.mobileChildTaskCache.get(key);
+    if (cached && Date.now() - cached.loadedAtMs < 5_000) return cached.tasks;
+    const pending = this.mobileChildTaskReads.get(key);
+    if (pending) return pending;
+    if (this.mobileChildTaskReads.size >= 16) throw new Error("子任务读取繁忙，请稍后重试。");
+    const request = this.globalTaskCatalogWorker.loadChildren(resolvedAdapter, this.cwd, parentThreadId, 100)
+      .then((candidates) => {
+        const tasks = candidates.filter((candidate) => candidate.parentThreadId === parentThreadId && candidate.sessionId !== parentThreadId)
+          .map((candidate): CodexMobileChildTask => ({
+            threadId: candidate.sessionId, parentThreadId, title: candidate.title,
+            lastUpdatedAt: candidate.lastUpdatedAt,
+            status: !candidate.runtimeStatus || candidate.runtimeStatus.type === "notLoaded"
+              ? "unknown" : mapCodexMobileTaskStatus(candidate.runtimeStatus),
+          }));
+        this.mobileChildTaskCache.set(key, { loadedAtMs: Date.now(), tasks });
+        return tasks;
+      });
+    this.mobileChildTaskReads.set(key, request);
+    try { return await request; }
+    finally { if (this.mobileChildTaskReads.get(key) === request) this.mobileChildTaskReads.delete(key); }
+  }
+
   private async listMobileTasks(adapter?: string): Promise<CodexMobileTask[]> {
     const resolvedAdapter = this.resolveMobileAdapter(adapter);
     const slot = this.slots.get(resolvedAdapter);
@@ -7129,6 +7196,7 @@ export class WeRelayDaemon {
       if (slot.adapter !== "codex") {
         slot.taskCandidatesCache = candidates;
         slot.taskCandidatesCachedAtMs = Date.now();
+        this.publishMobileTasksChanged(slot.adapter, candidates);
       }
     } catch (error) {
       const unavailableMessage = formatMobileTaskListUnavailableMessage(
@@ -7345,6 +7413,7 @@ export class WeRelayDaemon {
     const normalizedTitle = title.trim();
     await renameSession.call(slot.runtime, normalizedThreadId, normalizedTitle);
     this.globalTaskCatalogCache.invalidate(slot.adapter);
+    this.publishMobileTasksChanged(slot.adapter);
     appendDaemonLog(
       `mobile_task_renamed: adapter=${slot.adapter} thread=${normalizedThreadId}`,
     );
@@ -7417,6 +7486,7 @@ export class WeRelayDaemon {
     if (!created) {
       throw new Error(`${formatDaemonAdapterLabel(slot.adapter)} 没有返回新任务编号，请稍后重试。`);
     }
+    this.publishMobileTasksChanged(slot.adapter);
     if (!tasks.some((task) => task.threadId === created.threadId)) {
       appendDaemonLog(
         `mobile_task_created_before_index: adapter=${slot.adapter} thread=${created.threadId}`,
@@ -7430,19 +7500,80 @@ export class WeRelayDaemon {
     return created;
   }
 
+  /**
+   * 确认任务存在，优先使用已缓存的任务目录，避免每次读写设置都重新扫描最近 100 个会话。
+   * 只有当前任务、最近新建和各级缓存都没有记录时，才回退到完整列表。
+   */
+  private async assertMobileTaskKnown(slot: DaemonSlot, threadId: string): Promise<void> {
+    if (threadId === this.getSlotThreadId(slot)) return;
+    if (this.mobileCreatedTaskKeys.has(`${slot.adapter}\0${threadId}`)) return;
+    const identity = globalTaskIdentityKey(slot.adapter, threadId);
+    if (
+      slot.taskListSnapshot?.candidates.some((candidate) => candidate.sessionId === threadId) ||
+      slot.taskCandidatesCache?.some((candidate) => candidate.sessionId === threadId) ||
+      this.globalTaskListSnapshot?.numberByIdentity.has(identity)
+    ) return;
+    const listed = (await this.listMobileTasks(slot.adapter)).some(
+      (candidate) => candidate.threadId === threadId,
+    );
+    if (!listed) {
+      throw new Error(`没有找到这个 ${formatDaemonAdapterLabel(slot.adapter)} 任务。`);
+    }
+  }
+
+  /** 预热只读已有缓存，绝不为了预热去连接或唤醒 Agent。 */
+  private async readCachedMobileTaskModel(
+    threadId: string,
+    adapter?: string,
+  ): Promise<BridgeSessionModelState | null> {
+    const resolvedAdapter = this.resolveMobileAdapter(adapter);
+    return this.mobileTaskModelStates.get(
+      resolvedAdapter,
+      threadId.trim(),
+      MOBILE_TASK_MODEL_STALE_MAX_AGE_MS,
+    ) ?? null;
+  }
+
+  /** 任务列表内容真正变化时才通知网页，避免每次轮询都触发全量刷新。 */
+  private publishMobileTasksChanged(adapter: string, candidates?: BridgeResumeSessionCandidate[]): void {
+    if (candidates) {
+      const signature = JSON.stringify(candidates.map((candidate) => [
+        candidate.sessionId,
+        candidate.title,
+        candidate.lastUpdatedAt,
+        candidate.runtimeStatus ?? "",
+      ]));
+      if (this.mobileTaskListSignatures.get(adapter) === signature) return;
+      const isFirstSnapshot = !this.mobileTaskListSignatures.has(adapter);
+      this.mobileTaskListSignatures.set(adapter, signature);
+      if (isFirstSnapshot) return;
+    }
+    this.mobileLiveEvents.publish({ kind: "tasks", adapter });
+  }
+
   private async readMobileTaskModel(
     threadId: string,
     adapter?: string,
   ): Promise<BridgeSessionModelState> {
+    const timer = startMobileTaskSettingsTimer();
     const slot = this.getMobileSlot(adapter);
-    const task = (await this.listMobileTasks(slot.adapter)).find(
-      (candidate) => candidate.threadId === threadId,
-    );
-    if (!task) {
-      throw new Error(`没有找到这个 ${formatDaemonAdapterLabel(slot.adapter)} 任务。`);
-    }
+    await this.assertMobileTaskKnown(slot, threadId);
+    timer.mark("locate");
     if (slot.runtime.getSessionModelState) {
-      return await slot.runtime.getSessionModelState(threadId);
+      try {
+        const state = await slot.runtime.getSessionModelState(threadId);
+        timer.mark("agent_read");
+        this.mobileTaskModelStates.remember(slot.adapter, threadId, state);
+        this.logMobileTaskSettingsTiming("read", slot.adapter, threadId, timer);
+        return state;
+      } catch (error) {
+        timer.mark("agent_read_failed");
+        this.logMobileTaskSettingsTiming("read", slot.adapter, threadId, timer);
+        // 临时失败不能把“能切换”降级成“不能切换”：有最近可用状态就带 stale 标记返回。
+        const cached = this.mobileTaskModelStates.get(slot.adapter, threadId, MOBILE_TASK_MODEL_STALE_MAX_AGE_MS);
+        if (cached?.options.length) return staleModelStateFallback(cached, error);
+        throw error;
+      }
     }
     const latest = slot.runtime.getLatestSessionMessage
       ? await slot.runtime.getLatestSessionMessage(threadId)
@@ -7456,36 +7587,86 @@ export class WeRelayDaemon {
     };
   }
 
+  private logMobileTaskSettingsTiming(
+    action: string,
+    adapter: string,
+    threadId: string,
+    timer: { summary(): string },
+  ): void {
+    appendDaemonLog(`mobile_task_settings_timing: action=${action} adapter=${adapter} thread=${threadId} ${timer.summary()}`);
+  }
+
   private async setMobileTaskModel(
     threadId: string,
     update: { model?: string; reasoningEffort?: string },
     adapter?: string,
   ): Promise<BridgeSessionModelState> {
+    const timer = startMobileTaskSettingsTimer();
     const slot = this.getMobileSlot(adapter);
-    const task = (await this.listMobileTasks(slot.adapter)).find(
-      (candidate) => candidate.threadId === threadId,
-    );
-    if (!task) {
-      throw new Error(`没有找到这个 ${formatDaemonAdapterLabel(slot.adapter)} 任务。`);
-    }
+    await this.assertMobileTaskKnown(slot, threadId);
+    timer.mark("locate");
     let state: BridgeSessionModelState | null = null;
-    if (update.model) {
-      if (!slot.runtime.setSessionModel) {
-        throw new Error(`${formatDaemonAdapterLabel(slot.adapter)} 暂不支持从网页版切换模型。`);
+    try {
+      if (update.model) {
+        if (!slot.runtime.setSessionModel) {
+          throw new Error(`${formatDaemonAdapterLabel(slot.adapter)} 暂不支持从网页版切换模型。`);
+        }
+        state = await slot.runtime.setSessionModel(threadId, update.model);
+        timer.mark("agent_set_model");
       }
-      state = await slot.runtime.setSessionModel(threadId, update.model);
-    }
-    if (update.reasoningEffort) {
-      if (!slot.runtime.setSessionReasoningEffort) {
-        throw new Error(`${formatDaemonAdapterLabel(slot.adapter)} 暂不支持从网页版切换推理强度。`);
+      if (update.reasoningEffort) {
+        if (!slot.runtime.setSessionReasoningEffort) {
+          throw new Error(`${formatDaemonAdapterLabel(slot.adapter)} 暂不支持从网页版切换推理强度。`);
+        }
+        state = await slot.runtime.setSessionReasoningEffort(
+          threadId,
+          update.reasoningEffort,
+        );
+        timer.mark("agent_set_effort");
       }
-      state = await slot.runtime.setSessionReasoningEffort(
-        threadId,
-        update.reasoningEffort,
-      );
+    } finally {
+      this.logMobileTaskSettingsTiming("set", slot.adapter, threadId, timer);
     }
     if (!state) throw new Error("请选择模型或推理强度。");
+    this.mobileTaskModelStates.remember(slot.adapter, threadId, state);
     return state;
+  }
+
+  /**
+   * 消息投递前应用它携带的模型与推理强度：已一致则跳过，不一致才写入并确认。
+   * 失败时抛错，让 Outbox 保留消息重试，绝不静默改用旧模型。
+   */
+  private async applyMobileMessageTaskSettings(
+    slot: DaemonSlot,
+    threadId: string,
+    settings: MobileNewTaskSettings,
+  ): Promise<void> {
+    const cached = this.mobileTaskModelStates.get(slot.adapter, threadId, MOBILE_TASK_MODEL_FRESH_MAX_AGE_MS);
+    if (taskSettingsSatisfied(cached, settings)) return;
+    let current: BridgeSessionModelState | null = null;
+    if (slot.runtime.getSessionModelState) {
+      try {
+        current = await slot.runtime.getSessionModelState(threadId);
+        this.mobileTaskModelStates.remember(slot.adapter, threadId, current);
+      } catch {
+        current = null;
+      }
+    }
+    if (taskSettingsSatisfied(current, settings)) return;
+    // 模型先于推理强度写入（切换模型可能重置推理强度），并分别用各自的写入结果确认。
+    if (settings.model && current?.currentModel !== settings.model) {
+      const state = await this.setMobileTaskModel(threadId, { model: settings.model }, slot.adapter);
+      if (state.currentModel !== settings.model) {
+        throw new Error("所选模型尚未在电脑端生效，消息已保留。");
+      }
+      current = state;
+    }
+    if (settings.reasoningEffort && current?.currentReasoningEffort !== settings.reasoningEffort) {
+      const state = await this.setMobileTaskModel(threadId, { reasoningEffort: settings.reasoningEffort }, slot.adapter);
+      if (state.currentReasoningEffort !== settings.reasoningEffort) {
+        throw new Error("所选推理强度尚未在电脑端生效，消息已保留。");
+      }
+    }
   }
 
   private async readMobileTaskPermission(
@@ -7494,10 +7675,7 @@ export class WeRelayDaemon {
   ): Promise<BridgeSessionPermissionState> {
     const slot = this.getMobileSlot(adapter);
     const label = formatDaemonAdapterLabel(slot.adapter);
-    const task = (await this.listMobileTasks(slot.adapter)).find(
-      (candidate) => candidate.threadId === threadId,
-    );
-    if (!task) throw new Error(`没有找到这个 ${label} 任务。`);
+    await this.assertMobileTaskKnown(slot, threadId);
     if (!slot.runtime.getSessionPermissionState) {
       return {
         options: [],
@@ -7516,10 +7694,7 @@ export class WeRelayDaemon {
     assertMobileTaskPermission(permission);
     const slot = this.getMobileSlot(adapter);
     const label = formatDaemonAdapterLabel(slot.adapter);
-    const task = (await this.listMobileTasks(slot.adapter)).find(
-      (candidate) => candidate.threadId === threadId,
-    );
-    if (!task) throw new Error(`没有找到这个 ${label} 任务。`);
+    await this.assertMobileTaskKnown(slot, threadId);
     if (!slot.runtime.setSessionPermission) {
       throw new Error(`${label} 暂不支持从网页版切换权限范围。`);
     }
@@ -7533,7 +7708,7 @@ export class WeRelayDaemon {
   ): Promise<CodexMobileTranscript> {
     const requestedThreadId = threadId;
     const resolvedAdapter = this.resolveMobileAdapter(adapter);
-    void this.reconcileFailedMobileMessages(resolvedAdapter);
+    if (!options.historyOnly && !options.before) void this.reconcileFailedMobileMessages(resolvedAdapter);
     const resolvedThreadId = this.mobileMessageOutbox.resolveRequestedThread(
       resolvedAdapter,
       requestedThreadId,
@@ -7569,11 +7744,16 @@ export class WeRelayDaemon {
       readOptions: BridgeSessionMessagePageOptions = options,
     ) => slot.runtime.getSessionMessagePage
       ? slot.runtime.getSessionMessagePage(activeThreadId, readOptions)
-      : slot.runtime.getSessionMessages!(activeThreadId).then((messages) => ({
-          messages,
-          hasMore: false,
-          nextBefore: null,
-        }));
+      : slot.runtime.getSessionMessages!(activeThreadId).then((messages) => {
+          if (!readOptions.historyOnly && !readOptions.before) return { messages, hasMore: false, nextBefore: null };
+          // Legacy readers (including OpenCode) return complete histories.
+          // Keep read-only previews bounded just like native paged readers.
+          const page = paginateCodexMobileMessages(messages, {
+            limit: readOptions.limit,
+            before: readOptions.before == null ? undefined : Number(readOptions.before),
+          });
+          return { messages: page.messages, hasMore: page.hasMore, nextBefore: page.nextBefore === null ? null : String(page.nextBefore) };
+        });
     const messagePagePromise = (async () => {
       const accelerated = await this.openAgentLogHistory.readPage(
         slot.adapter,
@@ -8007,6 +8187,7 @@ export class WeRelayDaemon {
       throw new Error("这份电脑端草稿已在网页提交，未重复发送；请查看原消息进度。");
     }
     const images = this.persistMobileImages(input);
+    const messageTaskSettings = (input as CodexMobileMessageInput & { taskSettings?: MobileNewTaskSettings }).taskSettings;
     const accepted = this.mobileMessageOutbox.accept({
       clientId: input.clientId,
       adapter: resolvedAdapter,
@@ -8016,6 +8197,7 @@ export class WeRelayDaemon {
         ? { createTaskSourceThreadId: input.createTaskSourceThreadId }
         : {}),
       ...(input.newTaskSettings && !resolvedThreadId ? { newTaskSettings: input.newTaskSettings } : {}),
+      ...(messageTaskSettings ? { taskSettings: messageTaskSettings } : {}),
       text: input.text,
       ...(input.composerDraftRevision ? { composerDraftRevision: input.composerDraftRevision } : {}),
       images,
@@ -8291,6 +8473,10 @@ export class WeRelayDaemon {
     }
     // Recheck even if the settings menu was never opened (including a newly created task).
     await ensureMobileTaskWritablePermission(slot.runtime, threadId);
+    if (entry.taskSettings && !entry.taskSettingsApplied) {
+      await this.applyMobileMessageTaskSettings(slot, threadId, entry.taskSettings);
+      this.mobileMessageOutbox.markTaskSettingsApplied(entry.adapter, entry.threadId, entry.clientId);
+    }
     const imagePaths = entry.images.map((image) => image.path);
     const result = await this.dispatchMobileInput(
       slot,
@@ -9295,6 +9481,7 @@ export class WeRelayDaemon {
     candidates = candidates.filter((candidate) => !isInternalTask(candidate));
     slot.taskCandidatesCache = candidates;
     slot.taskCandidatesCachedAtMs = Date.now();
+    this.publishMobileTasksChanged(slot.adapter, candidates);
     return candidates;
   }
 
@@ -9970,12 +10157,19 @@ export class WeRelayDaemon {
     // Do not select/follow the task or create an owner to classify it. Targeted
     // rollout metadata also covers children outside the latest 100 tasks and
     // persisted pending notifications after a daemon restart with no slot.
-    const metadata = adapter === "codex"
-      ? await this.globalTaskCatalogWorker.loadNotificationMetadata(this.cwd, threadId)
-      : slot?.runtime.getSessionNotificationMetadata?.(threadId);
+    const metadata = await this.readTaskNotificationMetadata(adapter, threadId);
     const pushable = shouldPushTaskNotification("completion", metadata);
     if (metadata) this.completionNotificationOriginCache.set(identity, pushable);
     return pushable;
+  }
+
+  private async readTaskNotificationMetadata(adapter: DaemonAdapterKind, threadId: string): Promise<TaskOriginMetadata | null> {
+    if (adapter === "codex") return this.globalTaskCatalogWorker.loadNotificationMetadata(this.cwd, threadId);
+    const metadata = this.slots.get(adapter)?.runtime.getSessionNotificationMetadata?.(threadId);
+    if (metadata) return metadata;
+    return ["deepseek", "opencode"].includes(adapter)
+      ? this.globalTaskCatalogWorker.loadNotificationMetadata(this.cwd, threadId, adapter)
+      : null;
   }
 
   private async formatActionableTaskNotificationText(delivery: { adapter: DaemonAdapterKind; threadId: string; text: string }): Promise<string> {
@@ -9983,11 +10177,9 @@ export class WeRelayDaemon {
     // to avoid putting an internal review into the normal task picker while
     // assigning its actionable heading/link. A failed read still sends it.
     try {
-      const origin = delivery.adapter === "codex"
-        ? await this.globalTaskCatalogWorker.loadNotificationMetadata(this.cwd, delivery.threadId)
-        : this.slots.get(delivery.adapter)?.runtime.getSessionNotificationMetadata?.(delivery.threadId);
+      const origin = await this.readTaskNotificationMetadata(delivery.adapter, delivery.threadId);
       return this.formatNumberedDeliveryText(delivery, delivery.text, origin ?? undefined,
-        delivery.adapter !== "codex" || Boolean(origin));
+        !["codex", "deepseek", "opencode"].includes(delivery.adapter) || Boolean(origin));
     } catch {
       return this.formatNumberedDeliveryText(delivery, delivery.text, undefined, false);
     }

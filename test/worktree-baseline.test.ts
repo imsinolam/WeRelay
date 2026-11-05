@@ -24,6 +24,11 @@ test("worktree preflight refuses old product identity and unrelated history", ()
     git("commit", "-qm", "first");
     const base = git("rev-parse", "HEAD");
     expect(run(base).status).toBe(0);
+    writePackage("werelay", "1.0.0");
+    expect(run(base).status).toBe(0);
+    writePackage("werelay", "2.1.1");
+    expect(run(base).status).toBe(1);
+    writePackage("werelay", "1.0.0");
     const subdirectory = path.join(directory, "nested");
     fs.mkdirSync(subdirectory);
     const fromChild = spawnSync(process.execPath, [script, "--base", base], {
@@ -56,7 +61,7 @@ test("shared commit hook rejects an obsolete worktree but accepts descendants of
     git("init", "-q");
     git("config", "user.name", "Test");
     git("config", "user.email", "test@example.invalid");
-    pkg("werelay", "0.3.15-preview.20260928.1");
+    pkg("werelay", "1.0.0");
     git("add", "package.json");
     git("commit", "-qm", "current preview");
     const base = git("rev-parse", "HEAD");

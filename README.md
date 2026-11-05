@@ -1,5 +1,7 @@
 # WeRelay
 
+当前正式版本：**1.0.0**。手机与电脑继续同一条真实任务；升级说明见 [1.0.0 版本记录](docs/发布/版本记录/1.0.0.md)。
+
 <p align="center"><strong>One real session. Every screen.</strong></p>
 
 <p align="center">

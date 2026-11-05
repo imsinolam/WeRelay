@@ -14,6 +14,7 @@ import {
   type WeRelayRelayCommand,
   type WeRelayRelayCommandResponse,
 } from "../../src/relay/relay-protocol.ts";
+import { MobileLiveEventHub } from "../../src/daemon/mobile-live-events.ts";
 
 const tempDirs: string[] = [];
 
@@ -120,4 +121,44 @@ describe("WeRelay relay command journal", () => {
 
     expect(creationPostedBeforeReadFinished).toBe(true);
   });
+});
+
+test("long-poll transport never subscribes to live events", async () => {
+  let polls = 0;
+  const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+    if (String(input).endsWith(WERELAY_RELAY_POLL_PATH)) {
+      polls += 1;
+      return await new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), {
+          once: true,
+        });
+      });
+    }
+    throw new Error(`unexpected fetch: ${String(input)}`);
+  }) as typeof fetch;
+  const liveEvents = new MobileLiveEventHub({ coalesceMs: 0 });
+  let subscriptions = 0;
+  const subscribe = liveEvents.subscribe.bind(liveEvents);
+  liveEvents.subscribe = (listener) => {
+    subscriptions += 1;
+    return subscribe(listener);
+  };
+  const handle = startWeRelayRelayClient({
+    transport: "long-poll",
+    relayUrl: "https://relay.example",
+    deviceId: "device-1",
+    deviceToken: "token-1",
+    localBaseUrl: "http://127.0.0.1:4396",
+    fetchImpl,
+    liveEvents,
+    retryDelayMs: 1,
+  });
+  try {
+    const deadline = Date.now() + 1_000;
+    while (polls === 0 && Date.now() < deadline) await Bun.sleep(5);
+    expect(polls).toBeGreaterThan(0);
+    expect(subscriptions).toBe(0);
+  } finally {
+    await handle.close();
+  }
 });

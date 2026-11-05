@@ -58,6 +58,16 @@ test("SQLite and rollout metadata cover Guardian other, thread_spawn, parent-onl
     expect(approvalCatalog?.candidates).toHaveLength(6);
     expect(approvalCatalog?.candidates.find((item) => item.sessionId === "guardian")).toMatchObject({ source: "subagent", parentThreadId: "main" });
     expect(approvalCatalog?.candidates.find((item) => item.sessionId === "rollout-only")).toMatchObject({ source: "subagent", parentThreadId: "main" });
+    const children = await readCodexStateDbSessionCatalogInProcess({
+      databasePath, catalogDatabasePath: path.join(dir, "missing.sqlite"),
+      parentThreadId: "main", includeInternal: true, limit: 10,
+    });
+    expect(children?.candidates.map(item => item.sessionId)).toEqual(["guardian", "spawn", "rollout-only", "parent-only"]);
+    const missing = await readCodexStateDbSessionCatalogInProcess({
+      databasePath, catalogDatabasePath: path.join(dir, "missing.sqlite"),
+      parentThreadId: "missing", includeInternal: true, limit: 1,
+    });
+    expect(missing?.candidates).toEqual([]);
   } finally {
     db.close();
     // Windows can release the SQLite handle shortly after close().

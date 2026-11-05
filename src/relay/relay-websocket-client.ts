@@ -9,6 +9,7 @@ import {
   normalizeWeRelayRelayBaseUrl,
   type WeRelayRelayCommandResponse,
 } from "./relay-protocol.ts";
+import type { MobileLiveEvent } from "../daemon/mobile-live-events.ts";
 
 export function relayWebSocketUrl(baseUrl: string): string {
   const url = new URL(normalizeWeRelayRelayBaseUrl(baseUrl));
@@ -25,7 +26,20 @@ export function relayWebSocketUrl(baseUrl: string): string {
 export type RelaySocketSession = {
   respond: (response: WeRelayRelayCommandResponse) => Promise<void>;
   ready: () => void;
+  event: (event: MobileLiveEvent) => void;
 };
+
+// Event hints are expendable, so use a much smaller backpressure ceiling than
+// protocol frames. A busy response must not make the live channel back up.
+const RELAY_EVENT_MAX_BUFFERED_AMOUNT = 1024 * 1024;
+
+export function encodeRelayEventFrame(event: MobileLiveEvent): string {
+  return JSON.stringify({
+    version: WERELAY_RELAY_SOCKET_VERSION,
+    type: "event",
+    event,
+  });
+}
 
 /** One bounded connection attempt; the caller owns reconnection/fallback. */
 export async function runRelayWebSocketSession(options: {
@@ -88,7 +102,20 @@ export async function runRelayWebSocketSession(options: {
         if (error) finish(new Error("WSS 写入失败。"));
       });
     };
+    const sendEvent = (event: MobileLiveEvent): void => {
+      if (finished || !welcomed ||
+          socket.readyState !== WebSocket.OPEN ||
+          socket.bufferedAmount > RELAY_EVENT_MAX_BUFFERED_AMOUNT) {
+        return;
+      }
+      try {
+        socket.send(encodeRelayEventFrame(event), () => undefined);
+      } catch {
+        // Live events are hints; protocol traffic owns connection failure handling.
+      }
+    };
     const session: RelaySocketSession = {
+      event: sendEvent,
       ready: () => {
         if (!finished && welcomed) {
           try { send("ready", { capacity: options.capacity() }); }

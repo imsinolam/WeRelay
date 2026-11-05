@@ -19,8 +19,9 @@ export function readTaskOriginMetadata(value: unknown): TaskOriginMetadata {
   }
   const subagent = record(source) ? source.subagent : undefined;
   const spawn = record(subagent) && record(subagent.thread_spawn) ? subagent.thread_spawn : undefined;
-  const parentThreadId = text(value.parentThreadId) ?? text(value.parent_thread_id) ?? text(spawn?.parent_thread_id);
-  const sourceLabel = subagent || value.thread_source === "subagent"
+  const parentThreadId = text(value.parentThreadId) ?? text(value.parent_thread_id) ??
+    text(value.parentSessionId) ?? text(spawn?.parent_thread_id);
+  const sourceLabel = subagent || value.thread_source === "subagent" || value.origin === "subagent"
     ? "subagent" : text(value.source) ?? text(value.thread_source);
   return {
     ...(sourceLabel ? { source: sourceLabel } : {}),

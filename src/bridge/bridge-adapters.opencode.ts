@@ -255,15 +255,30 @@ function normalizeStoredOpenCodeSession(value: Record<string, unknown>): SdkSess
 export function listOpenCodeStoredSessions(
   limit = 10,
   storageDirectory = openCodeStorageDirectory(),
+  options: { parentThreadId?: string } = {},
 ): SdkSession[] {
   return collectOpenCodeJsonFiles(path.join(storageDirectory, "session"))
     .map(readOpenCodeJson)
     .filter((value): value is Record<string, unknown> => Boolean(value))
     .map(normalizeStoredOpenCodeSession)
     .filter((session): session is SdkSession => Boolean(session))
-    .filter((session) => !session.parentID)
+    .filter((session) => options.parentThreadId ? session.parentID === options.parentThreadId : !session.parentID)
     .sort((left, right) => right.time.updated - left.time.updated)
     .slice(0, Math.max(1, limit));
+}
+
+/** Exact origin lookup for suppressed completions, outside the visible limit. */
+export function readOpenCodeStoredSessionNotificationMetadata(
+  sessionId: string,
+  storageDirectory = openCodeStorageDirectory(),
+): { parentThreadId?: string } | null {
+  for (const file of collectOpenCodeJsonFiles(path.join(storageDirectory, "session"))) {
+    const value = readOpenCodeJson(file);
+    if (!value || value.id !== sessionId) continue;
+    const session = normalizeStoredOpenCodeSession(value);
+    if (session) return session.parentID ? { parentThreadId: session.parentID } : {};
+  }
+  return null;
 }
 
 export function readOpenCodeStoredSessionMessages(

@@ -45,6 +45,9 @@ export type MobileMessageOutboxEntry = {
   originalThreadId?: string;
   createTaskSourceThreadId?: string;
   newTaskSettings?: MobileNewTaskSettings;
+  /** 已有任务这条消息要使用的模型/推理强度；投递前按需应用一次。 */
+  taskSettings?: MobileNewTaskSettings;
+  taskSettingsApplied?: boolean;
   composerDraftRevision?: string;
   text: string;
   images: MobileMessageOutboxImage[];
@@ -76,6 +79,7 @@ export type MobileMessageOutboxAcceptInput = {
   originalThreadId?: string;
   createTaskSourceThreadId?: string;
   newTaskSettings?: MobileNewTaskSettings;
+  taskSettings?: MobileNewTaskSettings;
   composerDraftRevision?: string;
   text: string;
   images: MobileMessageOutboxImage[];
@@ -171,6 +175,8 @@ function normalizeEntry(value: unknown): MobileMessageOutboxEntry | null {
     ...(value.newTaskSettings ? { newTaskSettings: parseMobileNewTaskSettings(value.newTaskSettings) } : {}),
     ...(normalizeOptionalText(value.composerDraftRevision) ? { composerDraftRevision: normalizeOptionalText(value.composerDraftRevision) } : {}),
     ...(value.newTaskSettingsApplied === true ? { newTaskSettingsApplied: true } : {}),
+    ...(value.taskSettings ? { taskSettings: parseMobileNewTaskSettings(value.taskSettings) } : {}),
+    ...(value.taskSettingsApplied === true ? { taskSettingsApplied: true } : {}),
     text: normalizeText(value.text),
     images,
     createdAtMs: Math.max(0, normalizeNumber(value.createdAtMs, Date.now())),
@@ -270,6 +276,7 @@ export function classifyMobileSendFailure(error: string): "transient" | "permane
   if (/暂未确认|未确认收到|avoid.*duplicate|unconfirmed/i.test(error)) return "unconfirmed";
   if (/Pi 窗口.*\/reload.*加载 WeRelay 扩展|当前项目已有未接入的 Pi 窗口|没有已接入的 Pi 原窗口|Pi 任务已找到，但原窗口尚未提供可接入的发送接口/i.test(error)) return "permanent";
   if (/session\/model-unavailable/i.test(error)) return "permanent";
+  if (/暂不支持从网页版切换(?:模型|推理强度)/.test(error)) return "permanent";
   if (/does not support image|attachment-error|不支持.*图片|图片.*不正确|没有找到这个|not found|invalid.*(image|input|model)|内容不能为空/i.test(error)) return "permanent";
   if (/ECONNREFUSED|ENETUNREACH|EHOSTUNREACH|ENOTFOUND|EAI_AGAIN|not connected|未连接|连接.*未就绪|waiting for app-server|电脑.*离线|at capacity|rate limit|too many requests|\b429\b/i.test(error)) return "transient";
   if (/timed out|timeout|超时|disconnected|连接中断/i.test(error)) return "unconfirmed";
@@ -390,6 +397,7 @@ export class MobileMessageOutbox {
         ? { createTaskSourceThreadId: input.createTaskSourceThreadId.trim() }
         : {}),
       ...(newTaskSettings ? { newTaskSettings: { ...newTaskSettings } } : {}),
+      ...(input.taskSettings ? { taskSettings: { ...input.taskSettings } } : {}),
       ...(input.composerDraftRevision ? { composerDraftRevision: input.composerDraftRevision } : {}),
       text: input.text,
       images: input.images.map((image) => ({ ...image })),
@@ -546,6 +554,13 @@ export class MobileMessageOutbox {
     }
     this.persist();
     return true;
+  }
+
+  /** 只标记这一条消息：之后的消息各自携带自己的设置，不能被前一条“顺带”应用。 */
+  markTaskSettingsApplied(adapter: string, threadId: string, clientId: string): boolean {
+    return this.update(adapter, threadId, clientId, (entry) => {
+      if (entry.taskSettings) entry.taskSettingsApplied = true;
+    });
   }
 
   markSending(adapter: string, threadId: string, clientId: string, attemptedAtMs = this.now()): boolean {

@@ -69,7 +69,9 @@ test("draft choices stay local and survive state refresh without updating anothe
   const start = CODEX_MOBILE_APP_JS.indexOf("  function applyDraftModelSelection(");
   const end = CODEX_MOBILE_APP_JS.indexOf("  async function loadCurrentTaskModel(",start);
   const save = new Function("state","task","rememberLocalTaskDraft",`
-    function taskNeedsCreation(){return true;} function currentTask(){return task;} function currentTaskModelState(){return state.taskModels.draft;}
+    function taskNeedsCreation(){return true;} function currentTask(){return task;}
+    function currentTaskModelState(){return state.taskModels.draft;}
+    function projectedTaskModelState(){return state.taskModels.draft;}
     function currentTaskModelKey(){return 'draft';} function saveCurrentConversationSnapshot(){}
     function closeModelMenu(){} function closeSessionMenu(){} function renderModelControl(){}
     ${CODEX_MOBILE_APP_JS.slice(start,end)};return saveDraftModelSelection;

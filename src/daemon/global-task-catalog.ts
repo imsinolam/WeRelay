@@ -3,8 +3,62 @@ import type { readCodexStateDbSessionCatalog } from "../bridge/bridge-adapters.c
 import type { BridgeResumeSessionCandidate } from "../bridge/bridge-types.ts";
 import type { DaemonAdapterKind } from "../bridge/bridge-providers.ts";
 import { isGeneratedTaskTitle, latestUserMessageText, titleFromLatestMessage } from "../bridge/task-title-fallback.ts";
+import { readTaskOriginMetadata, type TaskOriginMetadata } from "../bridge/task-origin.ts";
 
 const DEEPSEEK_GLOBAL_CATALOG_TIMEOUT_MS = 2_000;
+
+/** Never infer a missing child from a truncated, top-level-only list. */
+export async function readGlobalTaskNotificationMetadata(
+  adapter: DaemonAdapterKind,
+  sessionId: string,
+): Promise<TaskOriginMetadata | null> {
+  if (adapter === "codex") {
+    return (await import("../bridge/bridge-adapters.codex.ts")).readCodexSessionNotificationMetadata(sessionId);
+  }
+  if (adapter === "deepseek") {
+    const candidates = await (await import("../bridge/bridge-adapters.deepseek.ts"))
+      .listDeepSeekHarnessSessions(Number.MAX_SAFE_INTEGER, undefined, { includeInternal: true, timeoutMs: DEEPSEEK_GLOBAL_CATALOG_TIMEOUT_MS });
+    const candidate = candidates.find((item) => item.sessionId === sessionId);
+    return candidate ? readTaskOriginMetadata(candidate) : null;
+  }
+  if (adapter === "opencode") {
+    return (await import("../bridge/bridge-adapters.opencode.ts")).readOpenCodeStoredSessionNotificationMetadata(sessionId);
+  }
+  return null;
+}
+
+/** Parent-scoped read-only inspection, separate from user list/number caches. */
+export async function listChildTaskCandidates(
+  adapter: DaemonAdapterKind,
+  _cwd: string,
+  parentThreadId: string,
+  limit = 100,
+  dependencies: {
+    listCodexSessions?: typeof readCodexStateDbSessionCatalog;
+    listDeepSeekSessions?: typeof listDeepSeekHarnessSessions;
+  } = {},
+): Promise<BridgeResumeSessionCandidate[]> {
+  if (!parentThreadId.trim() || limit <= 0) return [];
+  let candidates: BridgeResumeSessionCandidate[];
+  if (adapter === "codex") {
+    const read = dependencies.listCodexSessions ?? (await import("../bridge/bridge-adapters.codex.ts")).readCodexStateDbSessionCatalog;
+    const catalog = await read({ limit, parentThreadId, includeInternal: true });
+    if (!catalog) throw new Error("Codex 子任务目录暂时无法读取，请稍后重试。");
+    candidates = catalog.candidates;
+  } else if (adapter === "deepseek") {
+    const read = dependencies.listDeepSeekSessions ?? (await import("../bridge/bridge-adapters.deepseek.ts")).listDeepSeekHarnessSessions;
+    candidates = await read(limit, undefined, { parentThreadId, timeoutMs: DEEPSEEK_GLOBAL_CATALOG_TIMEOUT_MS });
+  } else if (adapter === "opencode") {
+    const { listOpenCodeStoredSessions } = await import("../bridge/bridge-adapters.opencode.ts");
+    candidates = listOpenCodeStoredSessions(limit, undefined, { parentThreadId }).map((session) => ({
+      sessionId: session.id, threadId: session.id, title: session.title || "子任务",
+      parentThreadId: session.parentID, source: "subagent", cwd: session.directory,
+      lastUpdatedAt: new Date(session.time.updated).toISOString(),
+    }));
+  } else return [];
+  return candidates.filter((candidate) => candidate.sessionId !== parentThreadId &&
+    readTaskOriginMetadata(candidate).parentThreadId === parentThreadId).slice(0, limit);
+}
 
 function markNotLoaded(
   candidates: BridgeResumeSessionCandidate[],

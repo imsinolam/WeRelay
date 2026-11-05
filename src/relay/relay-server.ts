@@ -1,12 +1,16 @@
 import { serveMobileAppBundle } from "../daemon/mobile-app-bundle.ts";
 import crypto from "node:crypto";
-import { attachRelayWebSocketServer } from "./relay-websocket-server.ts";
+import {
+  attachRelayWebSocketServer,
+  type WeRelayRelayDeviceEvent,
+} from "./relay-websocket-server.ts";
 import http, {
   type IncomingMessage,
   type Server,
   type ServerResponse,
 } from "node:http";
 import { isIP } from "node:net";
+import WebSocket, { WebSocketServer as LiveWebSocketServer } from "ws";
 import {
   createImmutableTextAsset,
   sendImmutableTextAsset,
@@ -55,6 +59,7 @@ import {
   localPreviewOpenContentSecurityPolicy,
   localPreviewViewerContentSecurityPolicy,
 } from "../preview/local-preview-web.ts";
+import { RelayWarmSnapshotStore } from "./relay-warm-snapshot-store.ts";
 
 const ASSET_VERSION_PLACEHOLDER = "__WE_RELAY_ASSET_VERSION__";
 const MOBILE_HTML = CODEX_MOBILE_HTML.replaceAll(
@@ -84,15 +89,25 @@ const DEFAULT_COMMAND_LEASE_MS = 35_000;
 const DEFAULT_DEVICE_OFFLINE_MS = 45_000;
 const DEFAULT_WARM_CACHE_FRESH_MS = 5_000;
 const DEFAULT_WARM_CACHE_TTL_MS = 30 * 60_000;
+const DEFAULT_WARM_SNAPSHOT_RETENTION_MS = 7 * 24 * 60 * 60_000;
 // 设备级预热刷新周期：每个周期轮转刷新一个缓存路径。
 const DEFAULT_WARM_REFRESH_INTERVAL_MS = 5_000;
 // 设备级预热失败后的退避，避免电脑未授权时反复空转。
 const DEFAULT_WARM_FAILURE_RETRY_MS = 30_000;
 const MAX_WARM_SESSIONS = 4;
-const MAX_WARM_PATHS_PER_SESSION = 24;
+const MAX_WARM_PATHS_PER_DEVICE = 64;
 const MAX_WARM_PENDING_COMMANDS = 4;
 const MAX_WARM_RESPONSE_BYTES = 2 * 1024 * 1024;
+const MAX_WARM_DEVICE_BYTES = 24 * 1024 * 1024;
+const MAX_WARM_PATHS_PER_SESSION = 24;
 const MAX_WARM_SESSION_BYTES = 12 * 1024 * 1024;
+const DEVICE_EVENT_REFRESH_MIN_INTERVAL_MS = 1_000;
+const MAX_LIVE_BROWSER_CONNECTIONS = 64;
+const MAX_LIVE_SUBSCRIPTIONS = 8;
+const LIVE_MAX_PAYLOAD = 4 * 1024;
+const LIVE_MAX_BUFFERED_BYTES = 1 * 1024 * 1024;
+const LIVE_IDLE_TIMEOUT_MS = 60_000;
+const DEFAULT_LIVE_SWEEP_INTERVAL_MS = 5_000;
 const MAX_PENDING_COMMANDS = 64;
 // 无浏览器访问时也要提前缓存的任务条数：最近 10 个任务 + 当前任务。
 const DEVICE_WARM_TASK_LIMIT = 10;
@@ -111,6 +126,8 @@ export type StartWeRelayRelayServerOptions = {
   webSocketHeartbeatTimeoutMs?: number;
   warmCacheFreshMs?: number;
   warmCacheTtlMs?: number;
+  warmSnapshotFile?: string;
+  warmSnapshotRetentionMs?: number;
   warmRefreshIntervalMs?: number;
   taskLinkStateFile?: string;
   now?: () => number;
@@ -142,6 +159,13 @@ type WarmCacheEntry = {
   response: WeRelayRelayCommandResponse;
   updatedAtMs: number;
   sizeBytes: number;
+};
+
+type LiveBrowserConnection = {
+  socket: WebSocket;
+  sessionKey: string;
+  subscriptions: Set<string>;
+  lastClientFrameAtMs: number;
 };
 
 type WarmSession = {
@@ -432,11 +456,26 @@ export async function startWeRelayRelayServer(
     warmCacheFreshMs,
     options.warmCacheTtlMs ?? DEFAULT_WARM_CACHE_TTL_MS,
   );
+  const warmSnapshotRetentionMs = Math.max(
+    warmCacheFreshMs,
+    options.warmSnapshotRetentionMs ?? DEFAULT_WARM_SNAPSHOT_RETENTION_MS,
+  );
   const warmRefreshIntervalMs = Math.max(
     250,
     options.warmRefreshIntervalMs ?? DEFAULT_WARM_REFRESH_INTERVAL_MS,
   );
   const logger = options.logger ?? (() => undefined);
+  const warmSnapshotStore = options.warmSnapshotFile
+    ? new RelayWarmSnapshotStore({
+        filePath: options.warmSnapshotFile,
+        deviceToken,
+        retentionMs: warmSnapshotRetentionMs,
+        maxPaths: MAX_WARM_PATHS_PER_DEVICE,
+        maxBytes: MAX_WARM_DEVICE_BYTES,
+        now,
+      })
+    : null;
+  const loadedSnapshotEntries = warmSnapshotStore?.load() ?? [];
   const taskLinks = new WeRelayRelayTaskLinkStore({
     deviceToken,
     ...(options.taskLinkStateFile
@@ -448,8 +487,20 @@ export async function startWeRelayRelayServer(
   const commandOrder: string[] = [];
   const warmSessions = new Map<string, WarmSession>();
   const warmSessionOrder: string[] = [];
+  const liveConnections = new Set<LiveBrowserConnection>();
+  const pendingLiveChanges = new Map<string, {
+    event: Extract<WeRelayRelayDeviceEvent, { kind: "conversation" }>;
+    timer: ReturnType<typeof setTimeout> | null;
+  }>();
+  const lastConversationRefreshAtMs = new Map<string, number>();
+  const pendingLiveTasksChanges = new Map<string, ReturnType<typeof setTimeout>>();
+  const lastTasksRefreshAtMs = new Map<string, number>();
+  const queuedWarmRefreshes: string[] = [];
+  let warmRefreshRunning = false;
+  let shuttingDown = false;
   let waitingPoll: WaitingPoll | null = null;
   let lastDeviceSeenAtMs = 0;
+  let liveBrowserSocket: LiveWebSocketServer | null = null;
 
   const cleanCommandOrder = () => {
     while (commandOrder.length > 0 && !pendingCommands.has(commandOrder[0] ?? "")) {
@@ -591,10 +642,28 @@ export async function startWeRelayRelayServer(
     });
   };
 
+  const closeLiveConnection = (
+    connection: LiveBrowserConnection,
+    code: number,
+    reason: string,
+  ) => {
+    liveConnections.delete(connection);
+    connection.socket.close(code, reason);
+    const timer = setTimeout(() => connection.socket.terminate(), 250);
+    timer.unref?.();
+    connection.socket.once("close", () => clearTimeout(timer));
+  };
+  const closeLiveConnectionsForSession = (key: string) => {
+    for (const connection of [...liveConnections]) {
+      if (connection.sessionKey !== key) continue;
+      closeLiveConnection(connection, 1008, "Session expired");
+    }
+  };
   const deleteWarmSession = (key: string) => {
     warmSessions.delete(key);
     const index = warmSessionOrder.indexOf(key);
     if (index >= 0) warmSessionOrder.splice(index, 1);
+    closeLiveConnectionsForSession(key);
   };
 
   const touchWarmSession = (session: WarmSession) => {
@@ -604,7 +673,7 @@ export async function startWeRelayRelayServer(
     warmSessionOrder.push(session.key);
     while (warmSessionOrder.length > MAX_WARM_SESSIONS) {
       const removed = warmSessionOrder.shift();
-      if (removed) warmSessions.delete(removed);
+      if (removed) deleteWarmSession(removed);
     }
   };
 
@@ -620,7 +689,10 @@ export async function startWeRelayRelayServer(
     const existing = session.paths.indexOf(normalized);
     if (existing >= 0) return;
     session.paths.push(normalized);
-    while (session.paths.length > MAX_WARM_PATHS_PER_SESSION) {
+    const pathLimit = session.key === GLOBAL_WARM_SESSION_KEY
+      ? MAX_WARM_PATHS_PER_DEVICE
+      : MAX_WARM_PATHS_PER_SESSION;
+    while (session.paths.length > pathLimit) {
       const removed = session.paths.shift();
       if (removed) session.entries.delete(removed);
     }
@@ -666,6 +738,16 @@ export async function startWeRelayRelayServer(
   };
   for (const path of ["/api/adapters", "/api/task-board", "/api/tasks"]) {
     addWarmPath(globalWarmSession, path);
+  }
+  if (warmSnapshotStore) {
+    for (const entry of loadedSnapshotEntries) {
+      globalWarmSession.entries.set(entry.path, {
+        response: entry.response,
+        updatedAtMs: entry.updatedAtMs,
+        sizeBytes: entry.sizeBytes,
+      });
+      addWarmPath(globalWarmSession, entry.path);
+    }
   }
   let globalWarmRetryAtMs = 0;
 
@@ -742,19 +824,49 @@ export async function startWeRelayRelayServer(
       updatedAtMs: now(),
       sizeBytes,
     });
+    const maxSessionBytes = session.key === GLOBAL_WARM_SESSION_KEY
+      ? MAX_WARM_DEVICE_BYTES
+      : MAX_WARM_SESSION_BYTES;
     let totalBytes = [...session.entries.values()].reduce(
       (total, entry) => total + entry.sizeBytes,
       0,
     );
-    while (totalBytes > MAX_WARM_SESSION_BYTES && session.entries.size > 1) {
+    while (totalBytes > maxSessionBytes && session.entries.size > 1) {
       const oldest = [...session.entries.entries()].sort(
         (left, right) => left[1].updatedAtMs - right[1].updatedAtMs,
       )[0];
       if (!oldest) break;
       session.entries.delete(oldest[0]);
+      const pathIndex = session.paths.indexOf(oldest[0]);
+      if (pathIndex >= 0) session.paths.splice(pathIndex, 1);
       totalBytes -= oldest[1].sizeBytes;
     }
     learnWarmPaths(session, path, response);
+    if (session.key === GLOBAL_WARM_SESSION_KEY && warmSnapshotStore) {
+      warmSnapshotStore.save(globalSnapshotEntries());
+    }
+  };
+
+  const globalSnapshotEntries = () =>
+    [...globalWarmSession.entries.entries()].map(([entryPath, entry]) => ({
+      path: entryPath,
+      ...entry,
+    }));
+
+  const persistDeviceEntry = (path: string, response: WeRelayRelayCommandResponse) => {
+    if (!warmSnapshotStore) return;
+    const sizeBytes = response.bodyBase64
+      ? Buffer.byteLength(response.bodyBase64, "base64")
+      : 0;
+    if (response.statusCode < 200 || response.statusCode >= 300 ||
+        sizeBytes > MAX_WARM_RESPONSE_BYTES) return;
+    globalWarmSession.entries.set(path, {
+      response: cachedRelayResponse(response),
+      updatedAtMs: now(),
+      sizeBytes,
+    });
+    addWarmPath(globalWarmSession, path);
+    warmSnapshotStore.save(globalSnapshotEntries());
   };
 
   const responseAuthenticatesSession = (
@@ -776,10 +888,90 @@ export async function startWeRelayRelayServer(
   const invalidateWarmResponses = () => {
     globalWarmSession.entries.clear();
     globalWarmSession.refreshCursor = 0;
+    warmSnapshotStore?.save([]);
     for (const warmSession of warmSessions.values()) {
       warmSession.entries.clear();
       warmSession.refreshCursor = 0;
     }
+  };
+
+  const taskWriteTargets = (
+    url: URL,
+    response: WeRelayRelayCommandResponse,
+  ): { adapter: string; threadId: string } | null => {
+    const match = url.pathname.match(/^\/api\/tasks\/([^/]+)\//);
+    if (!match?.[1]) return null;
+    let threadId: string;
+    try {
+      threadId = decodeURIComponent(match[1]);
+    } catch {
+      return null;
+    }
+    const payload = responseJson(response);
+    const responseAdapter = payload && typeof payload === "object" &&
+      !Array.isArray(payload) &&
+      typeof (payload as Record<string, unknown>).adapter === "string"
+      ? String((payload as Record<string, unknown>).adapter).trim()
+      : "";
+    const adapter = url.searchParams.get("adapter")?.trim() || responseAdapter;
+    return threadId && adapter ? { adapter, threadId } : null;
+  };
+
+  const messageTailPaths = (adapter: string, threadId: string) => {
+    const base = `/api/tasks/${encodeURIComponent(threadId)}/messages`;
+    return [
+      `${base}?limit=40&history=1&adapter=${encodeURIComponent(adapter)}`,
+      `${base}?limit=5&adapter=${encodeURIComponent(adapter)}`,
+    ];
+  };
+  const taskListPath = (adapter: string) =>
+    `/api/tasks?adapter=${encodeURIComponent(adapter)}`;
+  const taskModelPath = (adapter: string, threadId: string) =>
+    `/api/tasks/${encodeURIComponent(threadId)}/model?adapter=${encodeURIComponent(adapter)}`;
+  const invalidateDevicePaths = (
+    paths: string[],
+    predicate: (path: string, url: URL) => boolean,
+  ) => {
+    const wanted = new Set(paths);
+    for (const session of [globalWarmSession, ...warmSessions.values()]) {
+      for (const [path, entry] of session.entries) {
+        let url: URL;
+        try {
+          url = new URL(path, "http://werelay-relay.local");
+        } catch {
+          continue;
+        }
+        if (wanted.has(path) || predicate(path, url)) {
+          // A zero timestamp keeps the payload servable while making both age
+          // headers and freshness checks detect that a refresh is due.
+          session.entries.set(path, { ...entry, updatedAtMs: 0 });
+        }
+      }
+    }
+    if (warmSnapshotStore) {
+      warmSnapshotStore.save(globalSnapshotEntries());
+    }
+  };
+  const invalidateTaskWarmPaths = (adapter: string, threadId: string) => {
+    invalidateDevicePaths(
+      [taskListPath(adapter), "/api/task-board"],
+      (path, url) => {
+        if (url.pathname === "/api/tasks" &&
+            url.searchParams.get("adapter") === adapter) return true;
+        if (url.pathname === "/api/task-board") return true;
+        const decoded = (() => {
+          const match = url.pathname.match(/^\/api\/tasks\/([^/]+)\/(?:messages|model)$/);
+          if (!match?.[1]) return "";
+          try {
+            return decodeURIComponent(match[1]);
+          } catch {
+            return "";
+          }
+        })();
+        return decoded === threadId &&
+          url.searchParams.get("adapter") === adapter;
+      },
+    );
   };
 
   const installLocalPreviewPackage = (
@@ -837,20 +1029,36 @@ export async function startWeRelayRelayServer(
     }
     if (session && request.method === "GET" && isWarmCacheablePath("GET", url)) {
       storeWarmResponse(session, path, commandResponse);
+      persistDeviceEntry(path, commandResponse);
     }
     if (request.method !== "GET" && commandResponse.statusCode < 400) {
-      invalidateWarmResponses();
+      const target = taskWriteTargets(url, commandResponse);
+      if (target) {
+        invalidateTaskWarmPaths(target.adapter, target.threadId);
+        void (async () => {
+          for (const warmPath of [
+            ...messageTailPaths(target.adapter, target.threadId),
+            taskModelPath(target.adapter, target.threadId),
+            taskListPath(target.adapter),
+            "/api/task-board",
+          ]) {
+            queueWarmRefresh(warmPath);
+          }
+        })();
+      } else {
+        invalidateWarmResponses();
+      }
     }
   };
 
-  const refreshWarmPath = async (session: WarmSession, path: string) => {
+  const refreshWarmPath = async (
+    session: WarmSession,
+    path: string,
+  ): Promise<boolean> => {
     const isDeviceSession = session.key === GLOBAL_WARM_SESSION_KEY;
-    if (
-      session.refreshing.has(path) ||
-      session.expiresAtMs <= now() ||
-      pendingCommands.size >= MAX_WARM_PENDING_COMMANDS ||
-      (isDeviceSession && now() < globalWarmRetryAtMs)
-    ) return;
+    if (session.refreshing.has(path) || session.expiresAtMs <= now() ||
+        (isDeviceSession && now() < globalWarmRetryAtMs)) return false;
+    if (pendingCommands.size >= MAX_WARM_PENDING_COMMANDS) return false;
     session.refreshing.add(path);
     try {
       const response = await enqueueRelayRequest({
@@ -867,27 +1075,55 @@ export async function startWeRelayRelayServer(
           // 电脑未授权预热：清空并退避，避免反复空转。
           session.entries.clear();
           session.refreshCursor = 0;
+          warmSnapshotStore?.save([]);
           globalWarmRetryAtMs = now() + DEFAULT_WARM_FAILURE_RETRY_MS;
         } else {
           deleteWarmSession(session.key);
         }
-        return;
+        return false;
       }
       const pathname = new URL(path, "http://werelay-relay.local").pathname;
       if (pathname === "/api/auth/status" && !responseAuthenticatesSession(path, response)) {
         deleteWarmSession(session.key);
-        return;
+        return false;
       }
       if (responseAuthenticatesSession(path, response) ||
           !pathname.startsWith("/api/auth/")) {
         if (isDeviceSession) globalWarmRetryAtMs = 0;
         storeWarmResponse(session, path, response);
+        return response.statusCode >= 200 && response.statusCode < 300;
       }
+      return false;
     } catch {
       // Warm refresh failures stay silent; the last verified snapshot remains usable.
+      return false;
     } finally {
       session.refreshing.delete(path);
     }
+  };
+
+  const drainQueuedWarmRefreshes = async () => {
+    if (warmRefreshRunning) return;
+    warmRefreshRunning = true;
+    try {
+      while (queuedWarmRefreshes.length > 0) {
+        if (shuttingDown) {
+          queuedWarmRefreshes.length = 0;
+          break;
+        }
+        const path = queuedWarmRefreshes.shift();
+        if (!path) continue;
+        await refreshWarmPath(globalWarmSession, path);
+      }
+    } finally {
+      warmRefreshRunning = false;
+    }
+  };
+
+  const queueWarmRefresh = (path: string) => {
+    if (shuttingDown) return;
+    if (!queuedWarmRefreshes.includes(path)) queuedWarmRefreshes.push(path);
+    void drainQueuedWarmRefreshes();
   };
 
   // 电脑在线时轮转刷新设备级缓存，使用户打开页面即可看到最新状态。
@@ -920,6 +1156,283 @@ export async function startWeRelayRelayServer(
     }
   };
 
+  const sendLive = (
+    connection: LiveBrowserConnection,
+    value: Record<string, unknown>,
+  ): boolean => {
+    if (connection.socket.readyState !== WebSocket.OPEN) return false;
+    if (connection.socket.bufferedAmount > LIVE_MAX_BUFFERED_BYTES) {
+      connection.socket.terminate();
+      liveConnections.delete(connection);
+      return false;
+    }
+    connection.socket.send(JSON.stringify(value), (error) => {
+      if (error) connection.socket.terminate();
+    });
+    return true;
+  };
+  const broadcastConversationChanged = (event: {
+    adapter: string;
+    threadId: string;
+    revision: string;
+  }) => {
+    const key = `${event.adapter}\n${event.threadId}`;
+    for (const connection of [...liveConnections]) {
+      if (!connection.subscriptions.has(key)) continue;
+      sendLive(connection, {
+        v: 1,
+        type: "changed",
+        adapter: event.adapter,
+        threadId: event.threadId,
+        revision: event.revision,
+      });
+    }
+  };
+  const broadcastTasksChanged = (adapter: string) => {
+    for (const connection of [...liveConnections]) {
+      sendLive(connection, { v: 1, type: "tasks-changed", adapter });
+    }
+  };
+  const refreshTasksWarmPaths = async (adapter: string) => {
+    await Promise.all([
+      refreshWarmPath(globalWarmSession, taskListPath(adapter)),
+      refreshWarmPath(globalWarmSession, "/api/task-board"),
+    ]);
+  };
+  const refreshAndBroadcastConversation = async (
+    event: Extract<WeRelayRelayDeviceEvent, { kind: "conversation" }>,
+  ) => {
+    if (shuttingDown) return;
+    const key = `${event.adapter}\n${event.threadId}`;
+    const pending = pendingLiveChanges.get(key);
+    if (pending) pendingLiveChanges.delete(key);
+    lastConversationRefreshAtMs.set(key, Date.now());
+    const queuedPaths = [
+      taskModelPath(event.adapter, event.threadId),
+      taskListPath(event.adapter),
+      "/api/task-board",
+    ];
+    const refreshTail = async (path: string, deadlineMs: number) => {
+      while (!shuttingDown) {
+        if (Date.now() >= deadlineMs) return false;
+        if (await refreshWarmPath(globalWarmSession, path)) return true;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      return false;
+    };
+    const tailDeadlineMs = Date.now() + 2_000;
+    const tailRefreshes = messageTailPaths(event.adapter, event.threadId)
+      .map((path) => refreshTail(path, tailDeadlineMs));
+    for (const path of queuedPaths) queueWarmRefresh(path);
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    await Promise.race([
+      Promise.all(tailRefreshes),
+      new Promise<void>((resolve) => {
+        timeoutId = setTimeout(
+          resolve,
+          Math.max(0, tailDeadlineMs - Date.now()),
+        );
+        timeoutId.unref?.();
+      }),
+    ]);
+    if (timeoutId) clearTimeout(timeoutId);
+    if (shuttingDown) return;
+    broadcastConversationChanged(event);
+  };
+  const scheduleConversationChanged = (
+    event: Extract<WeRelayRelayDeviceEvent, { kind: "conversation" }>,
+  ) => {
+    const key = `${event.adapter}\n${event.threadId}`;
+    const previous = pendingLiveChanges.get(key);
+    if (previous) {
+      previous.event = event;
+      return;
+    }
+    const pending = { event, timer: null as ReturnType<typeof setTimeout> | null };
+    const delay = Math.max(
+      0,
+      DEVICE_EVENT_REFRESH_MIN_INTERVAL_MS -
+        (Date.now() - (lastConversationRefreshAtMs.get(key) ?? 0)),
+    );
+    pendingLiveChanges.set(key, pending);
+    const timer = setTimeout(() => {
+      const current = pendingLiveChanges.get(key);
+      if (!current || current.timer !== timer) return;
+      current.timer = null;
+      void refreshAndBroadcastConversation(current.event);
+    }, delay);
+    timer.unref?.();
+    pending.timer = timer;
+  };
+  const beginLiveUpgrade = (
+    request: IncomingMessage,
+    socket: import("node:stream").Duplex,
+    head: Buffer,
+  ) => {
+    if (!liveBrowserSocket) return false;
+    let url: URL;
+    try {
+      url = new URL(request.url ?? "", "http://werelay-relay.local");
+    } catch {
+      return false;
+    }
+    if (url.pathname !== "/api/live") return false;
+    if (
+      [...url.searchParams.keys()].some((key) => key !== "adapter") ||
+      url.searchParams.getAll("adapter").length > 1
+    ) {
+      socket.write("HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n", () => socket.destroy());
+      return true;
+    }
+    const refuse = (code: number) => {
+      socket.write(`HTTP/1.1 ${code} Rejected\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`, () => socket.destroy());
+    };
+    if (liveConnections.size >= MAX_LIVE_BROWSER_CONNECTIONS) {
+      refuse(503);
+      return true;
+    }
+    const origin = request.headers.origin;
+    const host = request.headers.host;
+    if (typeof origin !== "string" || typeof host !== "string" || !host) {
+      refuse(403);
+      return true;
+    }
+    let originUrl: URL;
+    try {
+      originUrl = new URL(origin);
+    } catch {
+      refuse(403);
+      return true;
+    }
+    if (
+      (originUrl.protocol !== "http:" && originUrl.protocol !== "https:") ||
+      originUrl.host.toLowerCase() !== host.toLowerCase()
+    ) {
+      refuse(403);
+      return true;
+    }
+    const warmSession = warmSessionFromRequest(request);
+    if (!warmSession) {
+      refuse(401);
+      return true;
+    }
+    liveBrowserSocket.handleUpgrade(request, socket, head, (connected) => {
+      const connection: LiveBrowserConnection = {
+        socket: connected,
+        sessionKey: warmSession.key,
+        subscriptions: new Set<string>(),
+        lastClientFrameAtMs: Date.now(),
+      };
+      liveConnections.add(connection);
+      connected.on("error", () => connected.terminate());
+      connected.on("close", () => liveConnections.delete(connection));
+      connected.on("message", (data, binary) => {
+        connection.lastClientFrameAtMs = Date.now();
+        if (connected.bufferedAmount > LIVE_MAX_BUFFERED_BYTES) {
+          connected.terminate();
+          liveConnections.delete(connection);
+          return;
+        }
+        try {
+          if (binary) throw new Error("binary");
+          const message = JSON.parse(data.toString()) as Record<string, unknown>;
+          if (message.v !== 1) throw new Error("version");
+          if (message.type === "ping" && Object.keys(message).length === 2) {
+            const liveSession = warmSessions.get(connection.sessionKey);
+            if (!liveSession) throw new Error("session");
+            touchWarmSession(liveSession);
+            sendLive(connection, { v: 1, type: "pong" });
+            return;
+          }
+          if (message.type === "subscribe" || message.type === "unsubscribe") {
+            const adapter = message.adapter;
+            const threadId = message.threadId;
+            if (
+              Object.keys(message).length !== 4 ||
+              typeof adapter !== "string" ||
+              !adapter ||
+              adapter !== adapter.trim() ||
+              Array.from(adapter).length > 200 ||
+              typeof threadId !== "string" ||
+              !threadId ||
+              threadId !== threadId.trim() ||
+              Array.from(threadId).length > 200
+            ) throw new Error("subscription");
+            const liveSession = warmSessions.get(connection.sessionKey);
+            if (!liveSession) throw new Error("session");
+            touchWarmSession(liveSession);
+            const key = `${adapter}\n${threadId}`;
+            if (message.type === "subscribe") {
+              if (
+                !connection.subscriptions.has(key) &&
+                connection.subscriptions.size >= MAX_LIVE_SUBSCRIPTIONS
+              ) {
+                throw new Error("subscription limit");
+              }
+              connection.subscriptions.add(key);
+            } else {
+              connection.subscriptions.delete(key);
+            }
+            return;
+          }
+          throw new Error("frame");
+        } catch {
+          closeLiveConnection(connection, 1008, "Invalid live protocol");
+        }
+      });
+      sendLive(connection, { v: 1, type: "hello" });
+    });
+    return true;
+  };
+  const scheduleTasksChanged = (adapter: string) => {
+    if (pendingLiveTasksChanges.has(adapter)) return;
+    const delay = Math.max(
+      0,
+      DEVICE_EVENT_REFRESH_MIN_INTERVAL_MS -
+        (Date.now() - (lastTasksRefreshAtMs.get(adapter) ?? 0)),
+    );
+    const timer = setTimeout(() => {
+      pendingLiveTasksChanges.delete(adapter);
+      lastTasksRefreshAtMs.set(adapter, Date.now());
+      void (async () => {
+        let timeoutId: ReturnType<typeof setTimeout> | null = null;
+        await Promise.race([
+          refreshTasksWarmPaths(adapter).then(() => true),
+          new Promise<boolean>((resolve) => {
+            timeoutId = setTimeout(() => resolve(false), 2_000);
+            timeoutId.unref?.();
+          }),
+        ]);
+        if (timeoutId) clearTimeout(timeoutId);
+        if (!shuttingDown) broadcastTasksChanged(adapter);
+      })();
+    }, delay);
+    timer.unref?.();
+    pendingLiveTasksChanges.set(adapter, timer);
+  };
+  const liveSweepTimer = setInterval(() => {
+    const currentMs = Date.now();
+    for (const connection of [...liveConnections]) {
+      if (currentMs - connection.lastClientFrameAtMs > LIVE_IDLE_TIMEOUT_MS) {
+        closeLiveConnection(connection, 1001, "Idle timeout");
+        continue;
+      }
+      const session = warmSessions.get(connection.sessionKey);
+      if (
+        !session ||
+        session.expiresAtMs <= now() ||
+        now() - session.lastUserActivityAtMs > warmCacheTtlMs
+      ) {
+        deleteWarmSession(connection.sessionKey);
+      }
+    }
+  }, Math.min(DEFAULT_LIVE_SWEEP_INTERVAL_MS, Math.max(100, warmCacheTtlMs / 4)));
+  liveSweepTimer.unref?.();
+  const closeAllLive = () => {
+    for (const connection of [...liveConnections]) {
+      closeLiveConnection(connection, 1001, "Relay shutting down");
+    }
+  };
   const warmRefreshTimer = setInterval(scheduleWarmRefresh, warmRefreshIntervalMs);
   warmRefreshTimer.unref?.();
 
@@ -1220,9 +1733,26 @@ export async function startWeRelayRelayServer(
             const warmSession = warmSessionFromRequest(request);
             // 设备预热缓存只对已登录的浏览器会话可见：未登录请求仍会走正常
             // 转发并在电脑端被拒绝，避免把任务内容暴露给匿名访问者。
+            const browserEntry = warmSession?.entries.get(path);
+            const deviceEntry = warmSession
+              ? globalWarmSession.entries.get(path)
+              : undefined;
+            if (
+              browserEntry?.updatedAtMs &&
+              now() - browserEntry.updatedAtMs > warmCacheTtlMs
+            ) {
+              warmSession?.entries.delete(path);
+            }
+            if (
+              deviceEntry?.updatedAtMs &&
+              now() - deviceEntry.updatedAtMs > warmSnapshotRetentionMs
+            ) {
+              globalWarmSession.entries.delete(path);
+              warmSnapshotStore?.save(globalSnapshotEntries());
+            }
             const entry = warmSession?.entries.get(path) ??
               (warmSession ? globalWarmSession.entries.get(path) : undefined);
-            if (warmSession && entry && now() - entry.updatedAtMs <= warmCacheTtlMs) {
+            if (warmSession && entry) {
               writeForwardedResponse(response, entry.response, {
                 "x-werelay-cache": "warm",
                 "x-werelay-cache-age": String(Math.max(0, now() - entry.updatedAtMs)),
@@ -1230,7 +1760,14 @@ export async function startWeRelayRelayServer(
               if (
                 now() - entry.updatedAtMs >= warmCacheFreshMs &&
                 lastDeviceSeenAtMs && now() - lastDeviceSeenAtMs <= deviceOfflineMs
-              ) void refreshWarmPath(warmSession, path);
+              ) {
+                const currentDeviceEntry = globalWarmSession.entries.get(path);
+                if (currentDeviceEntry === entry) {
+                  void refreshWarmPath(globalWarmSession, path);
+                } else {
+                  void refreshWarmPath(warmSession, path);
+                }
+              }
               return;
             }
           }
@@ -1265,6 +1802,12 @@ export async function startWeRelayRelayServer(
     });
   });
 
+  liveBrowserSocket = new LiveWebSocketServer({
+    noServer: true,
+    perMessageDeflate: false,
+    maxPayload: LIVE_MAX_PAYLOAD,
+  });
+
   const deviceSocket = attachRelayWebSocketServer({
     server,
     authenticate: (request) => validateDeviceRequest(request, deviceId, deviceToken),
@@ -1284,6 +1827,22 @@ export async function startWeRelayRelayServer(
     hasPending: (id) => pendingCommands.has(id),
     complete: completeCommand,
     heartbeatTimeoutMs: options.webSocketHeartbeatTimeoutMs ?? 45_000,
+    handleOtherUpgrade: beginLiveUpgrade,
+    onEvent: (event) => {
+      if (event.kind === "conversation") {
+        invalidateTaskWarmPaths(event.adapter, event.threadId);
+        scheduleConversationChanged(event);
+      } else {
+        invalidateDevicePaths(
+          [taskListPath(event.adapter), "/api/task-board"],
+          (_path, url) =>
+            (url.pathname === "/api/tasks" &&
+              url.searchParams.get("adapter") === event.adapter) ||
+            url.pathname === "/api/task-board",
+        );
+        scheduleTasksChanged(event.adapter);
+      }
+    },
   });
 
   server.on("connection", (socket) => {
@@ -1308,8 +1867,21 @@ export async function startWeRelayRelayServer(
     port,
     baseUrl: `http://${host}:${port}`,
     close: async () => {
+      shuttingDown = true;
+      queuedWarmRefreshes.length = 0;
       deviceSocket?.close();
       clearInterval(warmRefreshTimer);
+      clearInterval(liveSweepTimer);
+      liveBrowserSocket?.close();
+      closeAllLive();
+      liveConnections.clear();
+      for (const pending of pendingLiveChanges.values()) {
+        if (pending.timer) clearTimeout(pending.timer);
+      }
+      pendingLiveChanges.clear();
+      for (const timer of pendingLiveTasksChanges.values()) clearTimeout(timer);
+      pendingLiveTasksChanges.clear();
+      warmSnapshotStore?.close();
       if (waitingPoll) {
         clearTimeout(waitingPoll.timer);
         if (!waitingPoll.response.headersSent) {

@@ -9,9 +9,18 @@ type MobileConversationRevisionEntry = {
   sequence: number;
 };
 
+export type MobileConversationRevisionChange = {
+  adapter: string;
+  threadId: string;
+  revision: string;
+};
+
 export class MobileConversationRevisionStore {
   private readonly epoch: string;
   private readonly entries: BoundedTtlMap<string, MobileConversationRevisionEntry>;
+  private readonly listeners = new Set<(
+    change: MobileConversationRevisionChange,
+  ) => void>();
 
   constructor(options: {
     epoch?: string;
@@ -35,11 +44,33 @@ export class MobileConversationRevisionStore {
   }
 
   touch(adapter: string | undefined, threadId: string): string {
-    const identity = this.identity(adapter, threadId);
+    const normalizedAdapter = adapter?.trim() || "codex";
+    const normalizedThreadId = threadId.trim();
+    const identity = this.identity(normalizedAdapter, normalizedThreadId);
     const previous = this.entries.get(identity);
     const sequence = (previous?.sequence ?? 0) + 1;
     this.entries.set(identity, { sequence });
-    return this.format(identity, sequence);
+    const revision = this.format(identity, sequence);
+    const change = {
+      adapter: normalizedAdapter,
+      threadId: normalizedThreadId,
+      revision,
+    };
+    for (const listener of this.listeners) {
+      try {
+        listener(change);
+      } catch {
+        // A consumer must never be able to break revision publication.
+      }
+    }
+    return revision;
+  }
+
+  onChange(listener: (change: MobileConversationRevisionChange) => void): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
   }
 
   private identity(adapter: string | undefined, threadId: string): string {

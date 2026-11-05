@@ -96,6 +96,23 @@ test("mobile board and recently completed section never resurrect a persisted ch
   expect(board.recentCompleted.map((item: any) => item.threadId)).toEqual(["parent"]);
 });
 
+test("unconnected Harness and OpenCode completion fallbacks must not resurrect hidden children", async () => {
+  const { daemon } = fixture([]);
+  const reads: unknown[] = [];
+  daemon.globalTaskCatalogWorker.loadNotificationMetadata = async (_cwd: string, id: string, adapter: string) => {
+    reads.push({ adapter, id });
+    return id === "child" ? { source: "subagent", parentThreadId: "parent" } : {};
+  };
+  for (const adapter of ["deepseek", "opencode"]) {
+    expect(await daemon.shouldPushCompletionForTask(adapter, "child")).toBe(false);
+    expect(await daemon.shouldPushCompletionForTask(adapter, "parent")).toBe(true);
+  }
+  expect(reads).toEqual([
+    { adapter: "deepseek", id: "child" }, { adapter: "deepseek", id: "parent" },
+    { adapter: "opencode", id: "child" }, { adapter: "opencode", id: "parent" },
+  ]);
+});
+
 test("child approval delivery keeps an actionable number but never inserts the child into the normal task list", async () => {
   const { daemon } = fixture([task("parent")]);
   daemon.globalTaskListSnapshot = buildGlobalTaskSnapshot([task("parent")]);
@@ -109,6 +126,43 @@ test("child approval delivery keeps an actionable number but never inserts the c
   expect(sent[0]).toContain("[任务 2 · 内部任务]");
   expect(daemon.globalTaskListSnapshot.candidates.map((item: any) => item.sessionId)).toEqual(["parent"]);
   expect(resolveGlobalTaskCandidate(daemon.globalTaskListSnapshot, "2")).toBeNull();
+});
+
+test("unconnected Harness and OpenCode approvals keep their origin without becoming list entries", async () => {
+  for (const adapter of ["deepseek", "opencode"] as const) {
+    const { daemon } = fixture([]);
+    daemon.globalTaskListSnapshot = buildGlobalTaskSnapshot([task("parent", { adapter })]);
+    daemon.globalTaskCatalogWorker.loadNotificationMetadata = async (_cwd: string, id: string, requestedAdapter: string) => {
+      expect(requestedAdapter).toBe(adapter);
+      return id === "child" ? { parentThreadId: "parent" } : null;
+    };
+    daemon.authorizedUserId = "fixture";
+    daemon.approvalNotificationDeliveries = new ApprovalNotificationDeliveryQueue();
+    const sent: string[] = [];
+    daemon.queueWechatMessage = async (_user: string, text: string) => { sent.push(text); return true; };
+    for (const threadId of ["child", "unknown"]) {
+      daemon.approvalNotificationDeliveries.enqueue({ key: threadId, adapter, threadId, text: "需要确认" });
+      expect((await daemon.deliverApprovalNotification(threadId, "fixture")).status).toBe("delivered");
+    }
+    expect(sent).toHaveLength(2);
+    expect(sent.every((text) => text.includes("需要确认"))).toBe(true);
+    expect(daemon.globalTaskListSnapshot.candidates.map((item: any) => item.sessionId)).toEqual(["parent"]);
+    expect(resolveGlobalTaskCandidate(daemon.globalTaskListSnapshot, "2")).toBeNull();
+  }
+});
+
+test("a failed Harness origin read cannot block approval delivery or add an unclassified task", async () => {
+  const { daemon } = fixture([task("parent")]);
+  daemon.globalTaskListSnapshot = buildGlobalTaskSnapshot([task("parent")]);
+  daemon.globalTaskCatalogWorker.loadNotificationMetadata = async () => { throw new Error("fixture unavailable"); };
+  daemon.authorizedUserId = "fixture";
+  daemon.approvalNotificationDeliveries = new ApprovalNotificationDeliveryQueue();
+  daemon.approvalNotificationDeliveries.enqueue({ key: "child", adapter: "deepseek", threadId: "child", text: "需要确认" });
+  const sent: string[] = [];
+  daemon.queueWechatMessage = async (_user: string, text: string) => { sent.push(text); return true; };
+  expect((await daemon.deliverApprovalNotification("child", "fixture")).status).toBe("delivered");
+  expect(sent[0]).toContain("需要确认");
+  expect(daemon.globalTaskListSnapshot.candidates.map((item: any) => item.sessionId)).toEqual(["parent"]);
 });
 
 test("child input questions stay actionable without reintroducing the child into the task list", async () => {

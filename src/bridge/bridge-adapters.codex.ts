@@ -48,6 +48,7 @@ import {
   writePrivateFileAtomic,
 } from "../utils/private-files.ts";
 import { scanFileTailReverse } from "../utils/file-tail.ts";
+import { BoundedTtlMap } from "../utils/bounded-ttl-cache.ts";
 import {
   CodexDesktopIpcClient,
   isCodexDesktopMainProcessRunning,
@@ -136,8 +137,10 @@ export type CodexStateDbSessionCatalogOptions = {
   catalogDatabasePath?: string;
   limit?: number;
   inferRuntimeStatuses?: boolean;
-  /** Only the approval observer opts in; never use this for a user-facing list. */
+  /** Approval observation and parent-scoped inspection only, never top-level lists. */
   includeInternal?: boolean;
+  /** Inspect only children of this real parent, before applying the limit. */
+  parentThreadId?: string;
 };
 
 type CodexStateCatalogWorkerRequest = {
@@ -2738,6 +2741,10 @@ async function readCodexLocalCatalogTitles(
   }
 }
 
+// First-record origins are immutable. Parent inspection may visit old rows;
+// reuse only their bounded metadata, never retain or read whole transcripts.
+const codexChildOriginCache = new BoundedTtlMap<string, TaskOriginMetadata>({ maxSize: 4096, ttlMs: 5 * 60_000 });
+
 export async function readCodexStateDbSessionCatalogInProcess(
   options: CodexStateDbSessionCatalogOptions = {},
 ): Promise<CodexStateDbSessionCatalog | null> {
@@ -2816,9 +2823,20 @@ export async function readCodexStateDbSessionCatalogInProcess(
       if (!options.includeInternal && isInternalTask(origin)) continue;
       // Older catalogs may omit parent/source fields; the bounded first rollout
       // record still distinguishes Guardian's {subagent:{other:...}} shape.
-      const persistedOrigin = rolloutPath
-        ? readTaskOriginMetadata(shared.readCodexSessionMeta(rolloutPath)) : {};
+      let persistedOrigin: TaskOriginMetadata = {};
+      if (rolloutPath) {
+        const cachedOrigin = options.parentThreadId ? codexChildOriginCache.get(rolloutPath) : undefined;
+        if (cachedOrigin) persistedOrigin = cachedOrigin;
+        else {
+          const metadata = shared.readCodexSessionMeta(rolloutPath);
+          persistedOrigin = readTaskOriginMetadata(metadata);
+          // Do not cache a missing/partially-written first record as "no parent".
+          if (options.parentThreadId && metadata) codexChildOriginCache.set(rolloutPath, persistedOrigin);
+        }
+      }
       if (!options.includeInternal && isInternalTask(persistedOrigin)) continue;
+      const parentThreadId = persistedOrigin.parentThreadId ?? origin.parentThreadId;
+      if (options.parentThreadId && parentThreadId !== options.parentThreadId) continue;
       const projectId = typeof value.project_id === "string" && value.project_id.trim()
         ? value.project_id.trim()
         : undefined;

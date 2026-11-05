@@ -8,6 +8,7 @@ import { createBridgeAdapter } from "../../src/bridge/bridge-adapters.ts";
 import {
   DeepSeekHarnessAdapter,
   DeepSeekHarnessHttpClient,
+  listDeepSeekHarnessSessions,
   discoverDeepSeekDesktopHarnessBaseUrl,
   mapDeepSeekHarnessHistoryEvents,
   normalizeDeepSeekHarnessBaseUrl,
@@ -1346,6 +1347,47 @@ describe("DeepSeek Harness adapter", () => {
     const adapter = new DeepSeekHarnessAdapter({kind:"deepseek",command:"dsh",cwd:"/tmp/project"},{createClient:()=>client});
     expect((await adapter.listResumeSessions(1)).map((x) => [x.sessionId,x.runtimeStatus?.type])).toEqual([["latest","active"]]);
     await adapter.dispose();
+  });
+
+  test("child sessions cannot starve the visible limit and keep their real parent for explicit inspection", async () => {
+    const queue = new AsyncEnvelopeQueue();
+    const { client } = createFakeClient(queue);
+    client.listSessions = async () => [
+      session({ sessionId: "child", updatedAt: 9000, parentSessionId: "main", origin: "subagent" }),
+      session({ sessionId: "review", updatedAt: 8000, origin: "subagent" }),
+      session({ sessionId: "main", updatedAt: 1000 }),
+    ];
+    const adapter = new DeepSeekHarnessAdapter({ kind: "deepseek", command: "dsh", cwd: "/tmp/project" }, { createClient: () => client });
+    try {
+      expect((await adapter.listResumeSessions(1)).map(item => item.sessionId)).toEqual(["main"]);
+      expect(await adapter.listResumeSessions(10, { includeInternal: true })).toContainEqual(expect.objectContaining({
+        sessionId: "child", parentThreadId: "main", source: "subagent",
+      }));
+      expect(adapter.getSessionNotificationMetadata?.("child")).toEqual({ parentThreadId: "main", source: "subagent" });
+      client.listSessions = async () => [session({ sessionId: "child", updatedAt: 9000 }), session({ sessionId: "main", updatedAt: 1000 })];
+      expect((await adapter.listResumeSessions(1)).map(item => item.sessionId)).toEqual(["main"]);
+      await adapter.start();
+      expect(adapter.getState().sharedSessionId).toBe("main");
+    } finally { await adapter.dispose(); }
+  });
+
+  test("lightweight HTTP catalog filters children before the limit and parent inspection is read-only", async () => {
+    const requests: string[] = [];
+    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
+      requests.push(new URL(request.url).pathname);
+      const body = await request.json() as { rpcId: string };
+      return Response.json({ type: "server-response", rpcId: body.rpcId, result: { ok: true, value: { items: [
+        session({ sessionId: "child", updatedAt: 9000, parentSessionId: "main", origin: "subagent" }),
+        session({ sessionId: "other-child", updatedAt: 8000, parentSessionId: "other" }),
+        session({ sessionId: "main", updatedAt: 1000 }),
+      ] } } });
+    } });
+    try {
+      const url = `http://127.0.0.1:${server.port}`;
+      expect((await listDeepSeekHarnessSessions(1, url)).map(item => item.sessionId)).toEqual(["main"]);
+      expect((await listDeepSeekHarnessSessions(1, url, { parentThreadId: "main" })).map(item => item.sessionId)).toEqual(["child"]);
+      expect(requests.every(path => path === "/api/session/list")).toBe(true);
+    } finally { await server.stop(true); }
   });
 
   test("background question preserves native custom-answer capability and responds to the exact rpc without a new prompt", async () => {

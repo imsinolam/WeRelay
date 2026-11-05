@@ -100,7 +100,7 @@ describe("documentation structure", () => {
     expect(agents).toContain("DeskRelay is the retired product name");
     expect(docsIndex).toContain("开发协作/更名与版本边界.md");
     expect(renameBoundary).toContain("DeskRelay 已完成对外更名");
-    expect(renameBoundary).toContain("正式版前的版本线 | `0.x.x`");
+    expect(renameBoundary).toContain("当前版本线 | `1.x.x`");
     expect(renameBoundary).toContain("禁止无差别全仓替换");
     expect(agents).toContain("docs/开发协作/多Agent协作规范.md");
     expect(docsIndex).toContain("开发协作/多Agent协作规范.md");
@@ -113,8 +113,8 @@ describe("documentation structure", () => {
     const agents = fs.readFileSync(path.join(root, "AGENTS.md"), "utf8");
     const docsIndex = fs.readFileSync(path.join(root, "docs/README.md"), "utf8");
 
-    expect(flow).toContain("所有新版本统一使用 `0.x.x`，只递增最后一位");
-    expect(flow).toContain("0.3.22 → 0.3.23 → 0.3.24");
+    expect(flow).toContain("所有新版本统一使用 `1.x.x`，只递增最后一位");
+    expect(flow).toContain("1.0.0 → 1.0.1 → 1.0.2");
     expect(flow).toContain("末位可以超过 9");
     expect(flow).toContain("版本已打包、部署或上传后不得覆盖为不同内容");
     expect(flow).toContain("仅把同一包公开到 GitHub 时不再次改号、不重新打包");

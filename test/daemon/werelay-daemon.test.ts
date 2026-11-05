@@ -679,21 +679,38 @@ describe("werelay-daemon helpers", () => {
     ]);
   });
 
-  test("sorts adapters by completed message activity from the latest 24 hours", () => {
+  test("sorts adapters by completed message activity from the latest three days", () => {
     const nowMs = Date.parse("2026-09-05T08:00:00.000Z");
     expect(sortAdaptersByRecentMessageActivity(
       ["codex", "claude", "grok", "workbuddy"],
       [
         { adapter: "grok", occurredAt: "2026-09-05T07:00:00.000Z", eventKey: "grok-1" },
         { adapter: "grok", occurredAt: "2026-09-05T06:00:00.000Z", eventKey: "grok-2" },
-        { adapter: "codex", occurredAt: "2026-09-05T05:00:00.000Z", eventKey: "codex-1" },
-        { adapter: "claude", occurredAt: "2026-09-04T05:00:00.000Z", eventKey: "old-claude" },
+        { adapter: "codex", occurredAt: "2026-09-03T20:00:00.000Z", eventKey: "codex-1" },
+        { adapter: "workbuddy", occurredAt: "2026-09-02T09:00:00.000Z", eventKey: "workbuddy-1" },
+        { adapter: "claude", occurredAt: "2026-09-02T07:00:00.000Z", eventKey: "old-claude" },
       ],
       nowMs,
-    )).toEqual(["grok", "codex", "claude", "workbuddy"]);
+    )).toEqual(["grok", "codex", "workbuddy", "claude"]);
     expect(shouldRefreshAdapterUsageOrder(undefined, nowMs)).toBe(true);
-    expect(shouldRefreshAdapterUsageOrder(nowMs - 23 * 60 * 60_000, nowMs)).toBe(false);
-    expect(shouldRefreshAdapterUsageOrder(nowMs - 24 * 60 * 60_000, nowMs)).toBe(true);
+    expect(shouldRefreshAdapterUsageOrder(
+      nowMs - 23 * 60 * 60_000,
+      nowMs,
+      undefined,
+      3 * 24 * 60 * 60_000,
+    )).toBe(false);
+    expect(shouldRefreshAdapterUsageOrder(
+      nowMs - 24 * 60 * 60_000,
+      nowMs,
+      undefined,
+      3 * 24 * 60 * 60_000,
+    )).toBe(true);
+    expect(shouldRefreshAdapterUsageOrder(
+      nowMs - 60 * 60_000,
+      nowMs,
+      undefined,
+      24 * 60 * 60_000,
+    )).toBe(true);
     expect(shouldRefreshAdapterUsageOrder(nowMs + 60_000, nowMs)).toBe(true);
   });
 
@@ -710,10 +727,13 @@ describe("werelay-daemon helpers", () => {
     expect(refreshBlock).toContain("this.hasBusyAdapterForUsageRefresh()");
     expect(refreshBlock).toContain("MOBILE_ADAPTER_USAGE_BUSY_RETRY_MS");
     expect(refreshBlock).toContain("this.stateStore.setAdapterUsageOrder");
+    expect(refreshBlock).toContain("windowMs: MOBILE_ADAPTER_USAGE_WINDOW_MS");
+    expect(refreshBlock).toContain("this.mobileAdapterUsageOrderWindowMs");
     expect(source).toContain("this.recordAdapterMessageActivity({");
     expect(adaptersBlock).toContain("orderedAdapters.map");
-    expect(adaptersBlock).toContain("sortAdaptersByRecentMessageActivity(");
-    expect(adaptersBlock).toContain("this.stateStore.getAdapterMessageActivities()");
+    expect(adaptersBlock).toContain("mergeAdapterUsageOrder(");
+    expect(adaptersBlock).not.toContain("sortAdaptersByRecentMessageActivity(");
+    expect(adaptersBlock).not.toContain("this.stateStore.getAdapterMessageActivities()");
     expect(refreshBlock).toContain("mergeAdapterUsageOrder(this.mobileAdapterUsageOrder, DAEMON_ADAPTERS)");
   });
 

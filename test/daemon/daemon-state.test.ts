@@ -56,22 +56,46 @@ describe("daemon workspace state", () => {
       }, nowMs);
       store.recordAdapterMessageActivity({
         adapter: "codex",
-        occurredAt: "2026-09-02T07:00:00.000Z",
-        eventKey: "expired-codex-turn",
+        occurredAt: "2026-09-03T07:00:00.000Z",
+        eventKey: "recent-codex-turn",
+      }, nowMs);
+      store.recordAdapterMessageActivity({
+        adapter: "workbuddy",
+        occurredAt: "2026-08-30T07:00:00.000Z",
+        eventKey: "week-old-workbuddy-turn",
+      }, nowMs);
+      store.recordAdapterMessageActivity({
+        adapter: "deepseek",
+        occurredAt: "2026-08-28T07:00:00.000Z",
+        eventKey: "expired-deepseek-turn",
       }, nowMs);
       store.setAdapterUsageOrder({
         adapters: ["grok", "codex", "workbuddy"],
         updatedAt: "2026-09-05T08:00:00.000Z",
+        windowMs: 3 * 24 * 60 * 60_000,
       });
 
-      expect(store.getAdapterMessageActivities()).toEqual([{
-        adapter: "grok",
-        occurredAt: "2026-09-05T07:00:00.000Z",
-        eventKey: "grok-turn-1",
-      }]);
+      expect(store.getAdapterMessageActivities()).toEqual([
+        {
+          adapter: "grok",
+          occurredAt: "2026-09-05T07:00:00.000Z",
+          eventKey: "grok-turn-1",
+        },
+        {
+          adapter: "codex",
+          occurredAt: "2026-09-03T07:00:00.000Z",
+          eventKey: "recent-codex-turn",
+        },
+        {
+          adapter: "workbuddy",
+          occurredAt: "2026-08-30T07:00:00.000Z",
+          eventKey: "week-old-workbuddy-turn",
+        },
+      ]);
       expect(store.getAdapterUsageOrder()).toEqual({
         adapters: ["grok", "codex", "workbuddy"],
         updatedAt: "2026-09-05T08:00:00.000Z",
+        windowMs: 3 * 24 * 60 * 60_000,
       });
 
       const restored = new DaemonWorkspaceStateStore(cwd, { stateFile });

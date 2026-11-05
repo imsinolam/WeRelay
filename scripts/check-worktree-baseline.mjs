@@ -28,9 +28,9 @@ try {
     }
   }
   const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
-  if (pkg.name !== "werelay" || !/^0\.\d+\.\d+(?:-|$)/.test(pkg.version) ||
+  if (pkg.name !== "werelay" || !/^(?:0|1)\.\d+\.\d+(?:-|$)/.test(pkg.version) ||
       !/github\.com\/imsinolam\/WeRelay(?:\.git)?$/.test(pkg.repository?.url ?? "")) {
-    throw new Error("当前工作树不是 WeRelay 0.x 主线；旧 DeskRelay/2.x 只能提取功能补丁");
+    throw new Error("当前工作树不是 WeRelay 0.x/1.x 主线；旧 DeskRelay/2.x 只能提取功能补丁");
   }
   git("cat-file", "-e", `${base}^{commit}`);
   const head = git("rev-parse", "HEAD");

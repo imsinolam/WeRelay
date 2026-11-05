@@ -403,6 +403,11 @@ async function waitForWorkBuddyToExit(timeoutMs: number): Promise<boolean> {
   return !await isWorkBuddyMainProcessRunning();
 }
 
+export function formatWorkBuddyRestartTimeoutMessage(timeoutMs: number): string {
+  const seconds = Math.max(1, Math.round(timeoutMs / 1_000));
+  return `WorkBuddy 没有在 ${seconds} 秒内退出。WeRelay 不会强制结束应用，请确认窗口中没有未保存内容，手动关闭 WorkBuddy 后重试。`;
+}
+
 export async function restartWorkBuddyWithDesktopRelay(options: {
   socketPath?: string;
   hookPath?: string;
@@ -422,10 +427,10 @@ export async function restartWorkBuddyWithDesktopRelay(options: {
         killSignal: "SIGKILL",
       });
     } catch {
-      throw new Error("WorkBuddy 无法自动重启，请先处理电脑端尚未关闭的窗口后重试。");
+      throw new Error("WorkBuddy 未能正常退出。WeRelay 不会强制结束应用，请手动关闭 WorkBuddy 后重试。");
     }
     if (!await waitForWorkBuddyToExit(quitTimeoutMs)) {
-      throw new Error("WorkBuddy 正在阻止自动重启，请先处理电脑端尚未保存的内容后重试。");
+      throw new Error(formatWorkBuddyRestartTimeoutMessage(quitTimeoutMs));
     }
   }
   await launchWorkBuddyWithDesktopRelay(options);

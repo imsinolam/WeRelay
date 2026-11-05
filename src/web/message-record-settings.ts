@@ -1,3 +1,5 @@
+import { TASK_CONVERSATION_PREVIEW_JS } from "./task-conversation-preview.ts";
+
 export const MESSAGE_RECORD_SETTINGS_CSS = String.raw`
 .record-toolbar, .record-filter-grid, .record-policy { display: grid; grid-template-columns: repeat(auto-fit, minmax(136px, 1fr)); gap: 12px; margin: 16px 0; }
 .record-toolbar label, .record-filter-grid label, .record-policy label { display: grid; align-content: start; gap: 5px; font-size: 12px; color: var(--muted-strong); min-width: 0; }
@@ -35,6 +37,8 @@ export const MESSAGE_RECORD_SETTINGS_CSS = String.raw`
 .record-preview::backdrop { background: rgba(0, 0, 0, .42); }
 .record-preview-shell { display: flex; flex-direction: column; max-height: calc(100dvh - 36px); }
 .record-preview-header { display: flex; gap: 16px; align-items: start; justify-content: space-between; padding: 18px 20px; border-bottom: 1px solid var(--border); }
+.record-preview-header > div { min-width: 0; overflow-wrap: anywhere; }
+.record-preview-header > button { flex: none; }
 .record-preview-header h2 { font-size: 16px; margin: 0 0 5px; }
 .record-preview-header p { margin: 0; }
 .record-preview-messages { overflow: auto; overscroll-behavior: contain; padding: 20px; }
@@ -53,7 +57,7 @@ export const MESSAGE_RECORD_SETTINGS_CSS = String.raw`
 
 `;
 
-export const MESSAGE_RECORD_SETTINGS_JS = String.raw`
+export const MESSAGE_RECORD_SETTINGS_JS = TASK_CONVERSATION_PREVIEW_JS + String.raw`
 function createMessageRecordSettings(options) {
   var root = options.root;
   var query = { kind: "task", range: "7", offset: 0 };
@@ -61,8 +65,10 @@ function createMessageRecordSettings(options) {
   var disposed = false;
   var latest = null;
   var advancedOpen = false;
-  var preview = null;
-  var previewEpoch = 0;
+  var preview = createTaskConversationPreview({
+    document: root.ownerDocument, escape: options.escape, agentName: options.agentName,
+    chatUI: options.chatUI, chatText: options.chatText, readTask: options.readTask
+  });
   var taskLabels = { running: "任务进行中", approval: "待审批", input: "待输入", error: "任务异常", idle: "当前空闲", unknown: "任务状态待确认" };
   var groups = { active: "处理中", sent: "已发送", attention: "需关注", closed: "已结束" };
   function statusGroup(status) {
@@ -162,7 +168,7 @@ function createMessageRecordSettings(options) {
     }); });
     root.querySelectorAll("[data-record-open]").forEach(function (button) { button.addEventListener("click", function () {
       var row = payload.records.find(function (item) { return item.id === button.dataset.recordOpen; });
-      if (row) void openPreview(row, button);
+      if (row) void preview.open(row, button);
     }); });
   }
   function rowHtml(row) {
@@ -201,71 +207,6 @@ function createMessageRecordSettings(options) {
     if (query.kind !== 'task') parts.push(query.kind === 'control' ? '控制消息' : '全部类型');
     return ' · ' + escape(parts.join(' · '));
   }
-  function closePreview() {
-    previewEpoch++;
-    if (preview) { var dialog = preview; preview = null; dialog.close(); dialog.remove(); }
-  }
-  async function openPreview(row, trigger) {
-    closePreview();
-    var current = ++previewEpoch;
-    var doc = root.ownerDocument;
-    var dialog = doc.createElement('dialog');
-    dialog.className = 'record-preview';
-    dialog.setAttribute('aria-labelledby', 'record-preview-title');
-    dialog.innerHTML = '<div class="record-preview-shell"><header class="record-preview-header"><div><h2 id="record-preview-title">' + escape(row.taskTitle || '任务预览') + '</h2><p class="settings-note">' + escape((row.projectName || '未归属项目') + ' · ' + options.agentName(row.adapter)) + ' · 只读预览，不切换当前任务</p></div><button class="record-action" type="button" data-preview-close autofocus>关闭</button></header><div class="record-preview-messages" aria-live="polite"><p class="settings-note">正在读取最近对话…</p></div></div>';
-    doc.body.appendChild(dialog); preview = dialog;
-    dialog.addEventListener('close', function () {
-      if (preview === dialog) { preview = null; previewEpoch++; dialog.remove(); }
-      if (!disposed && trigger && trigger.isConnected) trigger.focus();
-    });
-    dialog.querySelector('[data-preview-close]').addEventListener('click', closePreview);
-    dialog.addEventListener('click', function (event) { if (event.target === dialog) { var r = dialog.getBoundingClientRect(); if (event.clientX < r.left || event.clientX > r.right || event.clientY < r.top || event.clientY > r.bottom) closePreview(); } });
-    dialog.showModal();
-    var content = dialog.querySelector('.record-preview-messages');
-    async function read() {
-      content.innerHTML = '<p class="settings-note">正在读取最近对话…</p>';
-      try {
-        var payload = await options.readTask(row.adapter, row.threadId);
-        if (disposed || preview !== dialog || current !== previewEpoch) return;
-        var text = options.chatText || options.chatUI.createText();
-        var bubble = options.chatUI.createMessageBubble({ document: doc, text: text, actions: {
-          onOpenImage: function (url) { if (/^(?:https?:\/\/|\/api\/)/i.test(url)) doc.defaultView.open(url, '_blank', 'noopener,noreferrer'); }
-        } });
-        content.innerHTML = '';
-        var summary = payload.runSummary;
-        var taskStatus = summary ? (summary.status === 'running' ? 'running' : summary.status === 'failed' ? 'error' : 'idle') : row.taskState;
-        var note = doc.createElement('p'); note.className = 'settings-note';
-        note.textContent = (taskLabels[taskStatus] || '任务状态待确认') + ' · 最近对话，AI 回复默认显示末尾三行'; content.appendChild(note);
-        var messages = (payload.messages || []).concat((payload.outboundMessages || []).filter(function (outbound) {
-          return !(payload.messages || []).some(function (native) { return native.clientId && native.clientId === outbound.clientId; });
-        }));
-        messages.forEach(function (message, index) {
-          if (!['user', 'assistant'].includes(message.role)) return;
-          var node = bubble.render({ id: 'record-preview-message-' + index, message: message, text: message.text || '', footer: {} });
-          if (message.role === 'assistant' && message.text) {
-            var full = node.querySelector('.message-content');
-            if (full) {
-              full.hidden = true;
-              var tail = doc.createElement('div'); tail.className = 'record-reply-tail';
-              var span = doc.createElement('span'); span.textContent = message.text.trimEnd().split('\n').slice(-3).join('\n'); tail.appendChild(span);
-              full.before(tail);
-              var toggle = doc.createElement('button'); toggle.type = 'button'; toggle.className = 'record-link record-reply-toggle';
-              toggle.textContent = '展开回复'; toggle.setAttribute('aria-expanded', 'false');
-              toggle.addEventListener('click', function () { var expand = full.hidden; full.hidden = !expand; tail.hidden = expand; toggle.textContent = expand ? '收起回复' : '展开回复'; toggle.setAttribute('aria-expanded', String(expand)); });
-              tail.after(toggle);
-            }
-          }
-          content.appendChild(node);
-        });
-        if (!messages.length) { var empty = doc.createElement('p'); empty.className = 'record-empty'; empty.textContent = '原任务暂时没有可预览的消息。'; content.appendChild(empty); }
-      } catch (error) {
-        if (disposed || preview !== dialog || current !== previewEpoch) return;
-        content.innerHTML = '<p class="record-warning">' + escape(error.message || '暂时无法读取原任务') + '</p><button type="button" class="record-action" data-preview-retry>重新读取</button>';
-        content.querySelector('[data-preview-retry]').addEventListener('click', function () { void read(); });
-      }
-    }
-    await read();
-  }
   function policyHtml(payload) {
     var policy = payload.policy;
     return '<details class="record-policy-panel"><summary>记录与隐私设置' + (policy.enabled ? '' : '（已关闭）') + '</summary>' +
@@ -300,6 +241,6 @@ function createMessageRecordSettings(options) {
       }
     }
   }
-  return { load: load, destroy: function () { disposed = true; generation++; closePreview(); } };
+  return { load: load, destroy: function () { disposed = true; generation++; preview.destroy(); } };
 }
 `;

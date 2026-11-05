@@ -41,9 +41,9 @@ try {
   git("cat-file", "-e", `${base}^{commit}`);
   const basePackage = JSON.parse(git("show", `${base}:package.json`));
   if (basePackage.name !== "werelay" ||
-      !/^0\.\d+\.\d+(?:-|$)/.test(basePackage.version) ||
+      !/^(?:0|1)\.\d+\.\d+(?:-|$)/.test(basePackage.version) ||
       !/github\.com\/imsinolam\/WeRelay(?:\.git)?$/.test(basePackage.repository?.url ?? "")) {
-    throw new Error("指定提交不是 WeRelay 0.x 主线，不能作为活动基线");
+    throw new Error("指定提交不是 WeRelay 0.x/1.x 主线，不能作为活动基线");
   }
   const common = fs.realpathSync(path.resolve(root, git("rev-parse", "--git-common-dir")));
   const hooks = path.join(common, "hooks");

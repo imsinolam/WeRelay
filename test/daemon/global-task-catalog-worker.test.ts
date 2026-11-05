@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import type { Worker } from "node:worker_threads";
 import { expect, test } from "bun:test";
 import { GlobalTaskCatalogWorker } from "../../src/daemon/global-task-catalog-worker.ts";
+import { Database } from "bun:sqlite";
 
 class FakeWorker extends EventEmitter {
   terminated = false;
@@ -12,6 +13,21 @@ class FakeWorker extends EventEmitter {
   async terminate() { this.terminated = true; return 0; }
 }
 
+test("parent inspection uses its own operation without changing normal catalog results", async () => {
+  const w = new FakeWorker();
+  const catalog = new GlobalTaskCatalogWorker({ workerFactory: () => w as unknown as Worker });
+  try {
+    const children = catalog.loadChildren("deepseek", "/fixture", "parent", 20);
+    expect(w.requests[0]).toMatchObject({ adapter: "deepseek", operation: "children", sessionId: "parent", limit: 20 });
+    w.emit("message", { id: w.requests[0]!.id, ok: true, candidates: [{ sessionId: "child", parentThreadId: "parent" }] });
+    expect(await children).toMatchObject([{ sessionId: "child", parentThreadId: "parent" }]);
+    const listing = catalog.load("deepseek", "/fixture");
+    expect(w.requests[1]).not.toHaveProperty("operation", "children");
+    w.emit("message", { id: w.requests[1]!.id, ok: true, candidates: [{ sessionId: "parent" }] });
+    expect(await listing).toEqual([{ sessionId: "parent" }] as any);
+  } finally { await catalog.close(); }
+});
+
 test("notification metadata is a targeted read in the bounded Codex worker", async () => {
   const w = new FakeWorker();
   const catalog = new GlobalTaskCatalogWorker({ workerFactory: () => w as unknown as Worker });
@@ -21,6 +37,49 @@ test("notification metadata is a targeted read in the bounded Codex worker", asy
     w.emit("message", { id: w.requests[0]!.id, ok: true, metadata: { parentThreadId: "parent" } });
     expect(await result).toEqual({ parentThreadId: "parent" });
   } finally { await catalog.close(); }
+});
+
+test("notification metadata routes Harness and OpenCode to their own read-only workers", async () => {
+  for (const adapter of ["deepseek", "opencode"] as const) {
+    const w = new FakeWorker();
+    const catalog = new GlobalTaskCatalogWorker({ workerFactory: () => w as unknown as Worker });
+    try {
+      const result = catalog.loadNotificationMetadata("/fixture", "child", adapter);
+      expect(w.requests[0]).toMatchObject({ adapter, operation: "notificationMetadata", sessionId: "child", limit: 1 });
+      w.emit("message", { id: w.requests[0]!.id, ok: true, metadata: { parentThreadId: "parent" } });
+      expect(await result).toEqual({ parentThreadId: "parent" });
+    } finally { await catalog.close(); }
+  }
+});
+
+test("real Harness metadata worker reads hidden origins without prompting or selecting a session", async () => {
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "werelay-harness-origin-"));
+  const requests: string[] = [];
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
+    const pathname = new URL(request.url).pathname;
+    requests.push(pathname);
+    if (pathname !== "/api/session/list") return new Response("read only fixture", { status: 405 });
+    const body = await request.json() as { rpcId: string };
+    return Response.json({ type: "server-response", rpcId: body.rpcId, result: { ok: true, value: { items: [
+      { sessionId: "parent", updatedAt: 9000, running: false },
+      { sessionId: "child", updatedAt: 1, running: false, parentSessionId: "parent", origin: "subagent" },
+    ] } } });
+  } });
+  try {
+    const source = new URL("../../src/daemon/global-task-catalog-worker.ts", import.meta.url).href;
+    const code = `import {GlobalTaskCatalogWorker} from ${JSON.stringify(source)}; const c=new GlobalTaskCatalogWorker();try{console.log(JSON.stringify(await c.loadNotificationMetadata(${JSON.stringify(dir)},"child","deepseek")));}finally{await c.close();}`;
+    const { stdout } = await promisify(execFile)("node", ["--experimental-transform-types", "--input-type=module", "-e", code], {
+      env: { ...process.env, HOME: dir, WERELAY_DEEPSEEK_HARNESS_URL: `http://127.0.0.1:${server.port}` }, timeout: 8_000,
+    });
+    expect(JSON.parse(stdout.trim())).toEqual({ source: "subagent", parentThreadId: "parent" });
+    // The native client probes the dialect, then makes the read-only list call.
+    expect(requests).toEqual(["/api/session/list", "/api/session/list"]);
+  } finally { await server.stop(true); fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("real metadata worker finds an existing child outside the recent task list without an owner", async () => {
@@ -41,6 +100,29 @@ test("real metadata worker finds an existing child outside the recent task list 
       env: { ...process.env, HOME: dir, USERPROFILE: dir, CODEX_HOME: dir }, timeout: 8_000,
     });
     expect(JSON.parse(stdout.trim())).toEqual({ source: "subagent", parentThreadId: "parent" });
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("real child worker reads the original SQLite relationship without creating an Agent owner", async () => {
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "werelay-child-worker-"));
+  try {
+    const db = new Database(path.join(dir, "state_5.sqlite"));
+    try {
+      db.exec("CREATE TABLE threads (id TEXT, rollout_path TEXT, title TEXT, parent_thread_id TEXT, updated_at_ms INTEGER)");
+      db.prepare("INSERT INTO threads VALUES (?, ?, ?, ?, ?)").run("child", "", "审查", "parent", 2000);
+      db.prepare("INSERT INTO threads VALUES (?, ?, ?, ?, ?)").run("parent", "", "主任务", null, 1000);
+    } finally { db.close(); }
+    const source = new URL("../../src/daemon/global-task-catalog-worker.ts", import.meta.url).href;
+    const code = `import {GlobalTaskCatalogWorker} from ${JSON.stringify(source)}; const c=new GlobalTaskCatalogWorker();try{console.log(JSON.stringify(await c.loadChildren("codex",${JSON.stringify(dir)},"parent")));}finally{await c.close();}`;
+    const { stdout } = await promisify(execFile)("node", ["--experimental-transform-types", "--input-type=module", "-e", code], {
+      env: { ...process.env, HOME: dir, USERPROFILE: dir, CODEX_HOME: dir }, timeout: 8_000,
+    });
+    expect(JSON.parse(stdout.trim())).toMatchObject([{ sessionId: "child", parentThreadId: "parent", title: "审查" }]);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 

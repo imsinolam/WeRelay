@@ -3,15 +3,15 @@
 ## 当前工作基线（先检查，再修改）
 本地目录名仍可能是 `DeskRelay`；本地 `main` 是现行 WeRelay 源码整合线，但不等于已部署并验活的运行基线。旧 DeskRelay 主线已归档，不能作为开发起点。开发前在目标 worktree 根目录运行 `npm run baseline:check -- --active`；若旧工作树没有此命令，不要以“缺少脚本”为理由继续修改，先在现行 WeRelay worktree 中确认 `refs/werelay/active-baseline` 指向已部署候选，再从该提交新建工作树移植旧补丁。此引用由唯一体验整合负责人在候选**成功部署并验活后**更新，不由普通开发 Agent 自行推进。本机共享 Git `pre-commit` 守卫会拒绝旧历史或旧产品身份的提交；不要用 `--no-verify` 规避。旧工作树只供只读审查与提取补丁，不直接作为新功能起点。
 
-## 统一版本规则（2026-10-30）
-所有新版本统一用 `0.x.x`，只递增最后一位（如 `0.3.22 → 0.3.23`），不再创建 preview/rc 或“转正式”版本。每版对应已提交源码与唯一 tarball，同版本禁止覆盖不同内容。部署与 GitHub 公开仍分别授权，但使用同一版本、同一产物；开发只提交，发布 Agent 负责整合、部署与公开，不增设中间角色。真实 Agent/ClawBot 验活由用户自行完成，不能冒称通过，也不额外阻止用户已授权的公开。详见 `docs/发布/体验部署与正式发布.md`。
+## 统一版本规则（2026-11-05）
+用户已于 2026-11-05 指定 1.0.0 为正式版。所有新版本统一用 `1.x.x`，只递增最后一位（如 `1.0.0 → 1.0.1`），不再创建 preview/rc 或“转正式”版本。每版对应已提交源码与唯一 tarball，同版本禁止覆盖不同内容。部署与 GitHub 公开仍分别授权，但使用同一版本、同一产物；开发只提交，发布 Agent 负责整合、部署与公开，不增设中间角色。真实 Agent/ClawBot 验活由用户自行完成，不能冒称通过，也不额外阻止用户已授权的公开。详见 `docs/发布/体验部署与正式发布.md`。
 
 ## 当前交付边界（2026-09-13）
 开发完成必须验证、创建提交并登记完整 SHA；没有提交只能报告“未完成交付”。开发提交不自动部署，用户明确要求统一部署后，发布负责人同时盘点本机与开发服务器的提交、逐项恢复已完成但漏提交的工作，记录纳入或暂缓理由，不能静默排除。体验部署不等于 GitHub 正式发布。
 
 
 ## Required Reading For Every Agent
-Before modifying this repository, read `docs/开发协作/更名与版本边界.md` and `docs/开发协作/多Agent协作规范.md`. The first document defines the completed DeskRelay → WeRelay rename, the allowed legacy-name contexts, and the active `0.x.x` version line; the second defines mandatory worktree isolation, commit handoff, dirty-worktree classification, release ownership, and post-release cleanup. Also read `docs/开发协作/任务职责与分工.md` when the task may overlap another long-running Agent.
+Before modifying this repository, read `docs/开发协作/更名与版本边界.md` and `docs/开发协作/多Agent协作规范.md`. The first document defines the completed DeskRelay → WeRelay rename, the allowed legacy-name contexts, and the active `1.x.x` version line; the second defines mandatory worktree isolation, commit handoff, dirty-worktree classification, release ownership, and post-release cleanup. Also read `docs/开发协作/任务职责与分工.md` when the task may overlap another long-running Agent.
 
 ## Project Mental Model
 WeRelay extends real local coding-agent sessions to WeChat, LAN web, and an optional public application relay without creating a forked conversation. DeskRelay is the retired product name; a local directory or historical worktree may still contain that name, but it never changes the current product identity or version line. GitHub is the only public distribution source; `werelay` remains the local package identifier used for tarball installation. Do not publish it to npm Registry, return to the historical `2.x` preview line, or reintroduce legacy package names and command aliases.
@@ -150,7 +150,7 @@ Before modifying any file, every Agent must first check the repository up to the
 
 Development and release are the only two roles. A development Agent validates, commits and registers its full SHA as pending; it never deploys automatically. Only an explicit user request starts a batch deployment or GitHub publication, serialized by one release Agent.
 
-The release Agent inventories all worktrees, branches, dirty files and candidate commits, integrates explicit SHAs in an isolated worktree, reruns validation after conflicts, and never packages an uncommitted shared tree. Use one plain `0.x.x` version for source, tarball, local installation, Relay and GitHub. Increment only the last number for every new artifact; do not create new preview/rc versions or overwrite an allocated version with different content. Deployment and GitHub publication remain separately authorized operations, not separate version lines. Historical prerelease support stays read-only for compatibility.
+The release Agent inventories all worktrees, branches, dirty files and candidate commits, integrates explicit SHAs in an isolated worktree, reruns validation after conflicts, and never packages an uncommitted shared tree. Use one plain `1.x.x` version for source, tarball, local installation, Relay and GitHub. Increment only the last number for every new artifact; do not create new preview/rc versions or overwrite an allocated version with different content. Deployment and GitHub publication remain separately authorized operations, not separate version lines. Historical prerelease support stays read-only for compatibility.
 
 GitHub writes, fetch, public commits, candidate-branch CI, fast-forward main, tags and remote verification run only on the publishing server. No Mac push fallback. Real Agent/ClawBot acceptance belongs to the user; report pending honestly without inventing a separate wait before an explicitly authorized publication.
 
@@ -161,7 +161,7 @@ Chinese release notes are the user-facing source of truth. Write them in plain, 
 
 ## Release Process
 - Development completion requires scoped validation, a local commit and registration of the full SHA as pending integration. It does not automatically authorize deployment or wake the release Agent. Only an explicit user request starts a batch deployment, owned by one integration Agent. Report committed-but-not-deployed work clearly; never claim deployment until the same candidate tarball is installed and verified. Documentation-only, test-description or CI-maintenance commits do not restart runtime services when packaged runtime behavior is unchanged.
-- Deployment is not GitHub publication. Both use the same plain `0.x.x` version and immutable tarball; record source SHA and tarball SHA-256, retain a rollback artifact, and report actual installed and published states separately.
+- Deployment is not GitHub publication. Both use the same plain `1.x.x` version and immutable tarball; record source SHA and tarball SHA-256, retain a rollback artifact, and report actual installed and published states separately.
 - If any source or packaged content changes during observation, create a new commit, rerun the complete gates, rebuild and redeploy a new candidate, and restart the observation baseline. Rolling back a service must not delete or rewrite Git history.
 - Only an explicit user instruction to publish a GitHub version authorizes public writes. Review all completed commits, run full gates and disclose pending user experience. A combined publish-and-deploy request may complete both operations with one artifact; it does not require a separately numbered preview.
 - Keep README focused on product relationships and the shortest successful setup; move command matrices and advanced configuration into `docs/`.

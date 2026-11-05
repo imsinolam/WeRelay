@@ -15,6 +15,7 @@ import {
   type WeRelayRelayHeaderMap,
 } from "./relay-protocol.ts";
 import { writePrivateFileAtomic } from "../utils/private-files.ts";
+import type { MobileLiveEventHub } from "../daemon/mobile-live-events.ts";
 
 const DEFAULT_RETRY_DELAY_MS = 1_000;
 const MAX_RETRY_DELAY_MS = 15_000;
@@ -41,6 +42,7 @@ export type StartWeRelayRelayClientOptions = {
   webSocketHeartbeatTimeoutMs?: number;
   webSocketRetryIntervalMs?: number;
   onTransportChange?: (transport: "websocket" | "long-poll") => void;
+  liveEvents?: MobileLiveEventHub;
 };
 
 export type WeRelayRelayClientHandle = {
@@ -353,6 +355,7 @@ export function startWeRelayRelayClient(
   const inFlightCommandIds = new Set<string>();
   let mutationChain = Promise.resolve();
   let socketSession: RelaySocketSession | null = null;
+  let unsubscribeLiveEvents: (() => void) | null = null;
 
   const executeAndRespond = async (command: WeRelayRelayCommand): Promise<void> => {
     let commandResponse = command.request.method === "GET"
@@ -426,7 +429,14 @@ export function startWeRelayRelayClient(
               },
               onSession: (session) => {
                 socketSession = session;
-                if (session) options.onTransportChange?.("websocket");
+                unsubscribeLiveEvents?.();
+                unsubscribeLiveEvents = null;
+                if (session) {
+                  options.onTransportChange?.("websocket");
+                  unsubscribeLiveEvents = options.liveEvents?.subscribe((event) => {
+                    session.event(event);
+                  }) ?? null;
+                }
               },
               onAlive: () => {
                 consecutiveFailures = 0;
@@ -539,6 +549,8 @@ export function startWeRelayRelayClient(
     done,
     close: async () => {
       abortController.abort();
+      unsubscribeLiveEvents?.();
+      unsubscribeLiveEvents = null;
       await done;
       await Promise.allSettled([...inFlightCommands]);
     },

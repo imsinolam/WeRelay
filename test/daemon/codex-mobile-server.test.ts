@@ -8,6 +8,8 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 
 import { CodexMobileAuthStore } from "../../src/daemon/codex-mobile-auth.ts";
 import { normalizeMobileMessageText } from "../../src/daemon/mobile-message-text.ts";
@@ -30,8 +32,43 @@ import {
   paginateCodexMobileMessages,
   resolveCodexMobileListenHost,
   resolvePreferredLanAddress,
+  resolveTaskSettingsThreadId,
   startCodexMobileServer,
 } from "../../src/daemon/codex-mobile-server.ts";
+
+test("child links require authentication and never enumerate, connect, send or select a task", async () => {
+  const authStore = createAuthStore("child links fixture");
+  const calls: unknown[] = [];
+  const child = { threadId: "hidden-child", parentThreadId: "parent", title: "子任务", status: "idle" as const };
+  const server = await startCodexMobileServer({ host: "127.0.0.1", port: 0, lanAddress: "127.0.0.1", accessToken: "fixture", authStore,
+    listTasks: async () => { throw new Error("must not enumerate tasks"); },
+    readMessages: async (threadId, options, adapter) => {
+      calls.push({ threadId, options, adapter });
+      return { threadId, messages: [{ role: "assistant", text: "原子任务只读内容" }], queuedMessages: [] };
+    },
+    sendMessage: async () => { throw new Error("must not send"); },
+    listChildTasks: async (parentThreadId, adapter) => {
+      calls.push({ parentThreadId, adapter });
+      return [child, { ...child, threadId: "other", parentThreadId: "another" }, { ...child, threadId: "parent" }];
+    },
+  });
+  try {
+    const root = `http://127.0.0.1:${server.port}`;
+    const endpoint = `${root}/api/tasks/parent/children?adapter=deepseek`;
+    expect((await fetch(endpoint)).status).toBe(401);
+    expect(calls).toEqual([]);
+    const headers = { cookie: `codex_mobile_session=${authStore.createSessionToken()}` };
+    const result = await fetch(endpoint, { headers });
+    expect(result.status).toBe(200);
+    expect(await result.json()).toEqual({ parentThreadId: "parent", tasks: [child] });
+    expect(calls).toEqual([{ parentThreadId: "parent", adapter: "deepseek" }]);
+    expect((await fetch(`${root}/api/tasks/%20/children?adapter=deepseek`, { headers })).status).toBe(400);
+    const preview = await fetch(`${root}/api/tasks/hidden-child/messages?adapter=deepseek&limit=30&history=1`, { headers });
+    expect(preview.status).toBe(200);
+    expect(await preview.json()).toMatchObject({ threadId: "hidden-child", messages: [{ text: "原子任务只读内容" }] });
+    expect(calls[1]).toEqual({ threadId: "hidden-child", adapter: "deepseek", options: { limit: 30, historyOnly: true, lightweight: true } });
+  } finally { await server.close(); }
+});
 
 test("reads WeChat notification receipts independently of Agent history and user-message acknowledgements", async () => {
   const authStore = createAuthStore("notification receipt fixture");
@@ -65,6 +102,209 @@ test("reads WeChat notification receipts independently of Agent history and user
   } finally { await server.close(); }
 });
 
+describe("mobile live task events", () => {
+  test("enforces upgrade auth, origin, route, subscriptions, and frame limits", async () => {
+    const fixtureDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "werelay-live-fixture-"));
+    const fixture = path.join(fixtureDirectory, "server.mjs");
+    const serverSource = new URL("../../src/daemon/codex-mobile-server.ts", import.meta.url).href;
+    const authSource = new URL("../../src/daemon/codex-mobile-auth.ts", import.meta.url).href;
+    const hubSource = new URL("../../src/daemon/mobile-live-events.ts", import.meta.url).href;
+    const wsSource = new URL("../../node_modules/ws/wrapper.mjs", import.meta.url).href;
+    fs.writeFileSync(fixture, `
+import crypto from "node:crypto";
+import fs from "node:fs";
+import http from "node:http";
+import os from "node:os";
+import path from "node:path";
+import process from "node:process";
+import { setTimeout as delay } from "node:timers/promises";
+import WebSocket from ${JSON.stringify(wsSource)};
+import { CodexMobileAuthStore } from ${JSON.stringify(authSource)};
+import { startCodexMobileServer } from ${JSON.stringify(serverSource)};
+import { MobileLiveEventHub } from ${JSON.stringify(hubSource)};
+
+const directory = fs.mkdtempSync(path.join(os.tmpdir(), "werelay-live-"));
+const authStore = new CodexMobileAuthStore({ stateFile: path.join(directory, "auth.json") });
+authStore.setPassword("live fixture password");
+const liveEvents = new MobileLiveEventHub({ coalesceMs: 0 });
+const server = await startCodexMobileServer({
+  host: "127.0.0.1", port: 0, lanAddress: "127.0.0.1",
+  accessToken: "mobile-secret", authStore, liveEvents,
+  listTasks: async () => [],
+  readMessages: async () => ({ messages: [], queuedMessages: [] }),
+  sendMessage: async () => ({ queued: false }),
+});
+
+function upgradeStatus(root, headers, pathName = "/api/live") {
+  return new Promise((resolve, reject) => {
+    const request = http.request(root + pathName, { headers: {
+      connection: "Upgrade", upgrade: "websocket", "sec-websocket-version": "13",
+      "sec-websocket-key": crypto.randomBytes(16).toString("base64"), ...headers,
+    } }, (response) => { response.resume(); resolve(response.statusCode); });
+    request.on("upgrade", (_response, socket) => {
+      socket.destroy(); reject(new Error("unexpected websocket upgrade"));
+    });
+    request.on("error", reject);
+    request.setTimeout(1_000, () => request.destroy(new Error("upgrade timeout")));
+    request.end();
+  });
+}
+
+function openSocket(root, headers) {
+  return new Promise((resolve, reject) => {
+    const messages = [];
+    const socket = new WebSocket(root.replace(/^http/, "ws") + "/api/live", { headers });
+    socket.on("message", (data) => messages.push(JSON.parse(data.toString())));
+    socket.once("open", () => resolve({ socket, messages }));
+    socket.once("error", reject);
+  });
+}
+
+async function waitForMessage(messages, predicate, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const value = messages.find(predicate);
+    if (value) return value;
+    await delay(5);
+  }
+  throw new Error("message timeout: " + JSON.stringify(messages));
+}
+
+async function waitForCloseCode(socket) {
+  return await Promise.race([
+    new Promise((resolve) => socket.once("close", (code) => resolve(code))),
+    delay(1_000).then(() => -1),
+  ]);
+}
+
+try {
+  const root = "http://127.0.0.1:" + server.port;
+  const origin = root;
+  const cookie = "codex_mobile_session=" + authStore.createSessionToken();
+  const rejected = [
+    await upgradeStatus(root, { origin }),
+    await upgradeStatus(root, { cookie, origin: "https://evil.example" }),
+    await upgradeStatus(root, { cookie, origin }, "/api/live/other"),
+    await upgradeStatus(root, { cookie, origin }, "/api/live?unexpected=1"),
+    await upgradeStatus(root, { cookie, origin }, "/api/live?adapter=codex&adapter=claude"),
+    await upgradeStatus(root, { origin }),
+  ];
+  const serverWithoutLiveEvents = await startCodexMobileServer({
+    host: "127.0.0.1", port: 0, lanAddress: "127.0.0.1",
+    accessToken: "mobile-secret", authStore,
+    listTasks: async () => [],
+    readMessages: async () => ({ messages: [], queuedMessages: [] }),
+    sendMessage: async () => ({ queued: false }),
+  });
+  let noLiveEventsStatus;
+  try {
+    noLiveEventsStatus = await upgradeStatus(
+      "http://127.0.0.1:" + serverWithoutLiveEvents.port,
+      { cookie, origin: "http://127.0.0.1:" + serverWithoutLiveEvents.port },
+    );
+  } finally {
+    await serverWithoutLiveEvents.close();
+  }
+  const { socket, messages } = await openSocket(root, { cookie, origin });
+  await waitForMessage(messages, (value) => value.type === "hello");
+  socket.send(JSON.stringify({ v: 1, type: "subscribe", adapter: "codex", threadId: "task-1" }));
+  socket.send(JSON.stringify({ v: 1, type: "ping" }));
+  await waitForMessage(messages, (value) => value.type === "pong");
+  liveEvents.publish({ kind: "conversation", adapter: "codex", threadId: "task-2", revision: "ignored" });
+  liveEvents.publish({ kind: "conversation", adapter: "codex", threadId: "task-1", revision: "revision-1" });
+  await waitForMessage(messages, (value) => value.type === "changed");
+  liveEvents.publish({ kind: "tasks", adapter: "claude" });
+  await waitForMessage(messages, (value) => value.type === "tasks-changed");
+  for (let index = 0; index < 7; index += 1) {
+    socket.send(JSON.stringify({ v: 1, type: "subscribe", adapter: "codex", threadId: "limit-" + index }));
+  }
+  socket.send(JSON.stringify({ v: 1, type: "ping" }));
+  await waitForMessage(messages, (value) => value.type === "pong" &&
+    messages.filter((item) => item.type === "pong").length >= 2);
+  const overflowClose = waitForCloseCode(socket);
+  socket.send(JSON.stringify({ v: 1, type: "subscribe", adapter: "codex", threadId: "limit-overflow" }));
+  const subscriptionOverflowCloseCode = await overflowClose;
+
+  const { socket: invalid } = await openSocket(root, { cookie, origin });
+  const invalidCloseCode = waitForCloseCode(invalid);
+  invalid.send("not json");
+  const { socket: invalidFrame } = await openSocket(root, { cookie, origin });
+  const invalidFrameCloseCode = waitForCloseCode(invalidFrame);
+  invalidFrame.send(JSON.stringify({ v: 1, type: "subscribe", adapter: "codex", threadId: "task-1", extra: true }));
+
+  process.stdout.write(JSON.stringify({
+    rejected, noLiveEventsStatus, messages,
+    taskTwoReceived: messages.some((value) => value.threadId === "task-2"),
+    invalidCloseCode: await invalidCloseCode,
+    invalidFrameCloseCode: await invalidFrameCloseCode,
+    subscriptionOverflowCloseCode,
+  }) + "\\n");
+} finally {
+  await server.close();
+  fs.rmSync(directory, { recursive: true, force: true });
+}
+`, "utf8");
+    const result = await promisify(execFile)(
+      "node",
+      ["--experimental-transform-types", fixture],
+      { timeout: 12_000 },
+    ).finally(() => fs.rmSync(fixtureDirectory, { recursive: true, force: true }));
+    expect(JSON.parse(result.stdout)).toEqual({
+      rejected: [401, 403, 404, 404, 404, 401],
+      noLiveEventsStatus: 404,
+      messages: [
+        { v: 1, type: "hello" },
+        { v: 1, type: "pong" },
+        { v: 1, type: "changed", adapter: "codex", threadId: "task-1", revision: "revision-1" },
+        { v: 1, type: "tasks-changed", adapter: "claude" },
+        { v: 1, type: "pong" },
+      ],
+      taskTwoReceived: false,
+      invalidCloseCode: 1008,
+      invalidFrameCloseCode: 1008,
+      subscriptionOverflowCloseCode: 1008,
+    });
+  });
+
+  test("prewarm model reads use cachedOnly and map a cache miss to 204", async () => {
+    const authStore = createAuthStore("live prewarm password");
+    const reads: Array<{ threadId: string; adapter?: string; cachedOnly?: boolean }> = [];
+    const server = await startCodexMobileServer({
+      host: "127.0.0.1", port: 0, lanAddress: "127.0.0.1",
+      accessToken: "mobile-secret", relayPrewarmToken: "prewarm-secret", authStore,
+      listTasks: async () => [{ threadId: "task-1", title: "任务", status: "idle" }],
+      readTaskModel: async (threadId, adapter, readOptions) => {
+        reads.push({ threadId, adapter, cachedOnly: readOptions?.cachedOnly });
+        return readOptions?.cachedOnly
+          ? null
+          : { currentModel: "sol", options: [{ id: "sol" }], canChange: true };
+      },
+      readMessages: async () => ({ messages: [], queuedMessages: [] }),
+      sendMessage: async () => ({ queued: false }),
+    });
+    try {
+      const response = await fetch(
+        `http://127.0.0.1:${server.port}/api/tasks/task-1/model?adapter=codex`,
+        {
+          headers: {
+            "x-werelay-relay": "1",
+            "x-werelay-relay-prewarm": "prewarm-secret",
+          },
+        },
+      );
+      expect(response.status).toBe(204);
+      expect(await response.text()).toBe("");
+      expect(reads).toEqual([{
+        threadId: "task-1",
+        adapter: "codex",
+        cachedOnly: true,
+      }]);
+    } finally {
+      await server.close();
+    }
+  });
+});
+
 test("new task catalog and first-message settings do not mutate an existing task", async () => {
   const authStore = createAuthStore("draft settings fixture");
   const inputs: unknown[] = [];
@@ -87,6 +327,64 @@ test("new task catalog and first-message settings do not mutate an existing task
     expect((await send("local-new-draft",{model:42})).status).toBe(400);
     expect(inputs).toHaveLength(1);
   } finally {await server.close();}
+});
+
+test("passes existing-task settings with the next mobile message", async () => {
+  const authStore = createAuthStore("task settings fixture");
+  const inputs: Array<{
+    threadId: string;
+    taskSettings?: { model?: string; reasoningEffort?: string };
+  }> = [];
+  const server = await startCodexMobileServer({
+    host: "127.0.0.1",
+    port: 0,
+    lanAddress: "127.0.0.1",
+    accessToken: "fixture",
+    authStore,
+    listTasks: async () => {
+      throw new Error("Existing-task settings must not list tasks");
+    },
+    readMessages: async () => ({ messages: [], queuedMessages: [] }),
+    sendMessage: async (threadId, input) => {
+      inputs.push({ threadId, taskSettings: input.taskSettings });
+      return { accepted: true, status: "accepted", messageId: input.clientId };
+    },
+  });
+  try {
+    const root = `http://127.0.0.1:${server.port}`;
+    const headers = {
+      cookie: `codex_mobile_session=${authStore.createSessionToken()}`,
+      "content-type": "application/json",
+    };
+    const send = (threadId: string, taskSettings: unknown) => fetch(
+      `${root}/api/tasks/${threadId}/messages?adapter=codex`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ clientId: "task-settings", text: "检查", taskSettings }),
+      },
+    );
+
+    const accepted = await send("thread-settings", {
+      model: "gpt-5.6-sol",
+      reasoningEffort: "high",
+    });
+    expect(accepted.status).toBe(202);
+    expect(inputs).toEqual([{
+      threadId: "thread-settings",
+      taskSettings: { model: "gpt-5.6-sol", reasoningEffort: "high" },
+    }]);
+
+    const invalid = await send("thread-settings", { model: 42 });
+    expect(invalid.status).toBe(400);
+
+    const localNew = await send("local-new-task", { model: "gpt-5.6-sol" });
+    expect(localNew.status).toBe(400);
+    expect(await localNew.json()).toEqual({ error: "新任务请使用预选设置。" });
+    expect(inputs).toHaveLength(1);
+  } finally {
+    await server.close();
+  }
 });
 
 describe("mobile cache freshness", () => {
@@ -1311,93 +1609,55 @@ function createAuthStore(password?: string): CodexMobileAuthStore {
   return store;
 }
 
-test("mobile composer accepts a message while the desktop is switching models", () => {
+test("resolves complete task settings ids without listing tasks", async () => {
+  let listCalls = 0;
+  const listTasks = async () => {
+    listCalls += 1;
+    return [];
+  };
+
+  expect(await resolveTaskSettingsThreadId(
+    "thread.123:task~one",
+    listTasks,
+    "codex",
+  )).toBe("thread.123:task~one");
+  expect(listCalls).toBe(0);
+});
+
+test("mobile composer consumes the selected model in the next message request", () => {
   const start = CODEX_MOBILE_APP_JS.indexOf('  async function submitComposer(');
   const end = CODEX_MOBILE_APP_JS.indexOf('  authForm.addEventListener("submit"', start);
   const submit = CODEX_MOBILE_APP_JS.slice(start, end);
-  expect(submit).not.toContain("if (state.modelChanging || state.reasoningChanging)");
-  expect(submit).toContain("pending.requiredTaskSettings =");
-  expect(submit.indexOf("pending.requiredTaskSettings ="))
+  expect(submit).not.toContain("requiredTaskSettings");
+  expect(submit).toContain("pending.taskSettings = Object.assign({}, nextSettings)");
+  expect(submit.indexOf("clearNextTaskSettings(pendingSettingsKey)"))
     .toBeLessThan(submit.indexOf("composerInput.value = \"\""));
   const sendStart = CODEX_MOBILE_APP_JS.indexOf("  async function submitPendingMessage(pending)");
   const sendEnd = CODEX_MOBILE_APP_JS.indexOf("  function beginOptimisticRunIfNeeded", sendStart);
   const send = CODEX_MOBILE_APP_JS.slice(sendStart, sendEnd);
-  expect(send.indexOf("await confirmPendingTaskSettings("))
-    .toBeLessThan(send.indexOf('"/messages"'));
+  expect(send).not.toContain("confirmPendingTaskSettings");
+  expect(send).toContain("taskSettings: !String(requestedThreadId).startsWith(\"local-new-\")");
+  expect(send).toContain("pending.taskSettings");
+  expect(send).toContain("newTaskSettings: String(requestedThreadId).startsWith(\"local-new-\")");
 });
 
-test("pending message waits for its original model choice and never sends after a rejected switch", async () => {
-  const start = CODEX_MOBILE_APP_JS.indexOf("  async function confirmPendingTaskSettings(");
-  const end = CODEX_MOBILE_APP_JS.indexOf("  async function submitPendingMessage(pending)", start);
-  expect(start).toBeGreaterThan(-1);
-  expect(end).toBeGreaterThan(start);
-  let resolveSwitch!: (value: unknown) => void;
-  const switchPromise = new Promise((resolve) => {
-    resolveSwitch = resolve;
+test("legacy pending model requirements migrate to taskSettings without another settings request", () => {
+  const sanitize = new Function(
+    `${CODEX_MOBILE_APP_JS.slice(
+      CODEX_MOBILE_APP_JS.indexOf("  function sanitizePersistentMessage("),
+      CODEX_MOBILE_APP_JS.indexOf("  function sanitizePersistentMessages("),
+    )}\nreturn sanitizePersistentMessage;`,
+  )() as (message: Record<string, unknown>) => Record<string, unknown>;
+  expect(sanitize({
+    clientId: "legacy",
+    requiredTaskSettings: { model: "gpt-6-sol", ignored: true },
+  })).toEqual({
+    clientId: "legacy",
+    taskSettings: { model: "gpt-6-sol" },
   });
-  const calls: string[] = [];
-  let ownerModel = "gpt-6-luna";
-  const state = {
-    taskSettingSync: {
-      adapter: "codex", threadId: "task-a",
-      model: "gpt-6-sol", promise: switchPromise,
-    },
-  };
-  const confirm = new Function("state", "api", "adapterApiPath", "persistMobileCacheNow",
-    `${CODEX_MOBILE_APP_JS.slice(start, end)}\nreturn confirmPendingTaskSettings;`)(
-      state,
-      async (path: string) => { calls.push(path); return { currentModel: ownerModel }; },
-      (path: string) => path,
-      () => {},
-    ) as (pending: Record<string, unknown>, adapter: string, threadId: string) => Promise<void>;
-  const pending: Record<string, unknown> = { requiredTaskSettings: { model: "gpt-6-sol" } };
-  let settled = false;
-  const wait = confirm(pending, "codex", "task-a").then(() => { settled = true; });
-  await Promise.resolve();
-  expect(settled).toBe(false);
-  expect(calls).toEqual([]);
-  resolveSwitch({ currentModel: "gpt-6-sol" });
-  await wait;
-  expect(pending.requiredTaskSettings).toBeUndefined();
-  const failed: Record<string, unknown> = { requiredTaskSettings: { model: "gpt-6-sol" } };
-  state.taskSettingSync.promise = Promise.reject(new Error("桌面端拒绝切换"));
-  await expect(confirm(failed, "codex", "task-a")).rejects.toThrow("消息未发送");
-  expect(failed.requiredTaskSettings).toEqual({ model: "gpt-6-sol" });
-  ownerModel = "gpt-6-sol";
-  const lostReply: Record<string, unknown> = { requiredTaskSettings: { model: "gpt-6-sol" } };
-  await confirm(lostReply, "codex", "task-a");
-  expect(lostReply.requiredTaskSettings).toBeUndefined();
 });
 
-test("restored pending messages recheck the chosen model before delivery", async () => {
-  const start = CODEX_MOBILE_APP_JS.indexOf("  async function confirmPendingTaskSettings(");
-  const end = CODEX_MOBILE_APP_JS.indexOf("  async function submitPendingMessage(pending)", start);
-  const calls: Array<{ path: string; method: string }> = [];
-  let currentModel = "gpt-6-luna";
-  const confirm = new Function("state", "api", "adapterApiPath", "persistMobileCacheNow",
-    `${CODEX_MOBILE_APP_JS.slice(start, end)}\nreturn confirmPendingTaskSettings;`)(
-      { taskSettingSync: null },
-      async (path: string, options?: { method?: string }) => {
-        calls.push({ path, method: options?.method || "GET" });
-        if (options?.method === "PUT") currentModel = "gpt-6-sol";
-        return { currentModel };
-      },
-      (path: string, adapter: string) => `${adapter}${path}`,
-      () => {},
-    ) as (pending: Record<string, unknown>, adapter: string, threadId: string) => Promise<void>;
-  const pending: Record<string, unknown> = { requiredTaskSettings: { model: "gpt-6-sol" } };
-  await confirm(pending, "codex", "task-a");
-  expect(calls).toEqual([
-    { path: "codex/api/tasks/task-a/model", method: "GET" },
-    { path: "codex/api/tasks/task-a/model", method: "PUT" },
-  ]);
-  expect(pending.requiredTaskSettings).toBeUndefined();
-  calls.length = 0;
-  await confirm({ requiredTaskSettings: { model: "gpt-6-sol" } }, "codex", "task-a");
-  expect(calls).toEqual([{ path: "codex/api/tasks/task-a/model", method: "GET" }]);
-});
-
-test("mobile model and reasoning requests cannot overtake each other", () => {
+test("mobile model and reasoning selections do not issue model PUT requests", () => {
   const modelStart = CODEX_MOBILE_APP_JS.indexOf("  async function selectCurrentTaskModel(model)");
   const reasoningStart = CODEX_MOBILE_APP_JS.indexOf("  async function selectCurrentTaskReasoningEffort(reasoningEffort)");
   const modelSelection = CODEX_MOBILE_APP_JS.slice(modelStart, reasoningStart);
@@ -1405,10 +1665,148 @@ test("mobile model and reasoning requests cannot overtake each other", () => {
     reasoningStart,
     CODEX_MOBILE_APP_JS.indexOf("  function resetTaskStateForAdapterSwitch()", reasoningStart),
   );
-  expect(modelSelection.indexOf("if (state.reasoningChanging)"))
-    .toBeLessThan(modelSelection.indexOf("method: \"PUT\""));
-  expect(reasoningSelection.indexOf("if (state.modelChanging)"))
-    .toBeLessThan(reasoningSelection.indexOf("method: \"PUT\""));
+  for (const source of [modelSelection, reasoningSelection]) {
+    expect(source).not.toContain("method: \"PUT\"");
+    expect(source).not.toContain("modelChanging");
+    expect(source).not.toContain("reasoningChanging");
+    expect(source).not.toContain("taskSettingSync");
+  }
+  expect(modelSelection).toContain("setNextTaskSettings(selection)");
+  expect(reasoningSelection).toContain("setNextTaskSettings(selection)");
+});
+
+function loadNextTaskSettingsSelectionRuntime(state: Record<string, any>) {
+  const source = CODEX_MOBILE_APP_JS.slice(
+    CODEX_MOBILE_APP_JS.indexOf("  function currentTaskModelKey()"),
+    CODEX_MOBILE_APP_JS.indexOf("  function resetTaskStateForAdapterSwitch()"),
+  );
+  const toasts: string[] = [];
+  const requests: string[] = [];
+  const runtime = new Function(
+    "state", "showToast", "api", "persistMobileCacheNow", "schedulePersistentMobileCacheWrite",
+    "MAX_CONVERSATION_SNAPSHOTS",
+    `function conversationStateKey(adapterId, threadId) { return String(adapterId || "") + "\\u0000" + String(threadId || ""); }
+function setBoundedConversationValue(values, order, key, value, limit) {
+  values[key] = value;
+  var index = order.indexOf(key);
+  if (index >= 0) order.splice(index, 1);
+  order.push(key);
+  while (order.length > limit) delete values[order.shift()];
+}
+function deleteConversationValue(values, order, key) {
+  delete values[key];
+  var index = order.indexOf(key);
+  if (index >= 0) order.splice(index, 1);
+}
+var composerView = { closeMenu: function() {}, renderModel: function() {}, renderSession: function() {} };
+function currentTask(){ return {threadId: state.currentThreadId}; }
+function taskNeedsCreation(){ return false; }
+function saveDraftModelSelection(){}
+${source}
+return {
+  selectCurrentTaskModel,
+  selectCurrentTaskReasoningEffort,
+  projectedTaskModelState,
+  latestPendingTaskSettings
+};`,
+  )(
+    state,
+    (text: string) => toasts.push(text),
+    async (path: string) => { requests.push(path); throw new Error("network must not be used"); },
+    () => {},
+    () => {},
+    12,
+  );
+  return { ...runtime, toasts, requests };
+}
+
+test("existing task model selection is local, merges reasoning, and clears a confirmed choice", async () => {
+  const key = runtimeKey("codex", "task");
+  const state: Record<string, any> = {
+    currentAdapter: "codex",
+    currentThreadId: "task",
+    pendingMessages: [],
+    outboundMessages: [],
+    nextTaskSettings: { [key]: { model: "terra", reasoningEffort: "high" } },
+    nextTaskSettingsOrder: [key],
+    taskPermissions: {},
+    taskModels: {
+      [key]: {
+        canChange: true,
+        canChangeReasoningEffort: true,
+        currentModel: "sol",
+        currentReasoningEffort: "medium",
+        options: [
+          { id: "sol", label: "Sol", reasoningEffortOptions: [{ id: "low" }, { id: "medium" }] },
+          {
+            id: "terra",
+            label: "Terra",
+            defaultReasoningEffort: "low",
+            reasoningEffortOptions: [{ id: "low" }, { id: "high" }],
+          },
+        ],
+      },
+    },
+  };
+  const runtime = loadNextTaskSettingsSelectionRuntime(state);
+
+  await runtime.selectCurrentTaskModel("terra");
+  expect(state.nextTaskSettings[key]).toEqual({ model: "terra", reasoningEffort: "high" });
+  expect(runtime.projectedTaskModelState()).toMatchObject({
+    currentModel: "terra",
+    currentReasoningEffort: "high",
+  });
+  expect(runtime.toasts.at(-1)).toBe("已选择，下一条消息使用：Terra");
+
+  state.nextTaskSettings[key] = { model: "terra", reasoningEffort: "low" };
+  await runtime.selectCurrentTaskReasoningEffort("high");
+  expect(state.nextTaskSettings[key]).toEqual({ model: "terra", reasoningEffort: "high" });
+
+  await runtime.selectCurrentTaskModel("sol");
+  expect(state.nextTaskSettings[key]).toBeUndefined();
+  expect(state.nextTaskSettingsOrder).not.toContain(key);
+  expect(runtime.requests).toEqual([]);
+});
+
+test("pending model settings drive the button until the owner confirms them", () => {
+  const key = runtimeKey("codex", "task");
+  const state: Record<string, any> = {
+    currentAdapter: "codex",
+    currentThreadId: "task",
+    nextTaskSettings: {},
+    nextTaskSettingsOrder: [],
+    taskPermissions: {},
+    pendingMessages: [{
+      adapter: "codex",
+      threadId: "task",
+      taskSettings: { model: "terra", reasoningEffort: "high" },
+    }],
+    outboundMessages: [],
+    taskModels: {
+      [key]: {
+        canChange: true,
+        currentModel: "sol",
+        currentReasoningEffort: "medium",
+        options: [
+          { id: "sol", reasoningEffortOptions: [{ id: "medium" }] },
+          { id: "terra", reasoningEffortOptions: [{ id: "high" }] },
+        ],
+      },
+    },
+  };
+  const runtime = loadNextTaskSettingsSelectionRuntime(state);
+
+  expect(runtime.latestPendingTaskSettings(key)).toEqual({ model: "terra", reasoningEffort: "high" });
+  expect(runtime.projectedTaskModelState()).toMatchObject({
+    currentModel: "terra",
+    currentReasoningEffort: "high",
+  });
+  state.taskModels[key].currentModel = "terra";
+  state.taskModels[key].currentReasoningEffort = "high";
+  expect(runtime.projectedTaskModelState()).toMatchObject({
+    currentModel: "terra",
+    currentReasoningEffort: "high",
+  });
 });
 
 function loadMobileFetchJson(
@@ -2002,6 +2400,59 @@ return { restoreConversationSnapshot, setBoundedConversationValue, conversationS
     conversationStateKey: (adapter: string, threadId: string) => string;
   };
   return { ...runtime, renderEvents };
+}
+
+function loadMobileTemporaryConversationMigration(state: Record<string, any>): (
+  temporaryThreadId: string,
+  realThreadId: string,
+  adapter?: string,
+) => void {
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function migrateTemporaryConversation(");
+  const end = CODEX_MOBILE_APP_JS.indexOf("\n  async function createTask(", start);
+  const conversationStart = CODEX_MOBILE_APP_JS.indexOf("  function conversationStateKey");
+  const conversationEnd = CODEX_MOBILE_APP_JS.indexOf("  var PERSISTENT_MOBILE_CACHE_STORAGE_NAME", conversationStart);
+  const settingsStart = CODEX_MOBILE_APP_JS.indexOf("  function findReusableLocalTask");
+  const settingsEnd = CODEX_MOBILE_APP_JS.indexOf("  function saveComposerDraft", settingsStart);
+  if (start < 0 || end < 0 || conversationStart < 0 || settingsStart < 0) {
+    throw new Error("Mobile temporary conversation migration not found");
+  }
+  const source = [
+    CODEX_MOBILE_APP_JS.slice(conversationStart, conversationEnd),
+    CODEX_MOBILE_APP_JS.slice(settingsStart, settingsEnd),
+    CODEX_MOBILE_APP_JS.slice(start, end),
+  ].join("\n");
+  const location = {
+    href: `https://werelay.example/?adapter=${state.currentAdapter}&task=${state.currentThreadId}`,
+    pathname: "/",
+    search: `?adapter=${state.currentAdapter}&task=${state.currentThreadId}`,
+    hash: "",
+  };
+  const history = { replaceState: (_state: unknown, _title: string, url: string) => { location.href = `https://werelay.example${url}`; } };
+  return new Function(
+    "state", "messagesEl", "window", "history", "MAX_CONVERSATION_SNAPSHOTS",
+    "MAX_COMPOSER_DRAFTS", "saveComposerDraft", "saveCurrentConversationSnapshot",
+    "taskById", "moveConversationValue",
+    `${source}
+return migrateTemporaryConversation;`,
+  )(
+    state,
+    { dataset: {} },
+    { location },
+    history,
+    12,
+    40,
+    () => {},
+    () => {},
+    (threadId: string) => state.tasks.find((task: Record<string, unknown>) => task.threadId === threadId) ?? null,
+    (values: Record<string, unknown>, order: string[], fromKey: string, toKey: string) => {
+      if (!values || !order) return;
+      if (!Object.prototype.hasOwnProperty.call(values, fromKey)) return;
+      values[toKey] = values[fromKey];
+      delete values[fromKey];
+      order.splice(order.indexOf(fromKey), 1);
+      order.push(toKey);
+    },
+  ) as ReturnType<typeof loadMobileTemporaryConversationMigration>;
 }
 
 function loadMobileTaskSelector(): <T extends { threadId: string }>(
@@ -2658,9 +3109,73 @@ describe("Codex mobile conversation cache", () => {
       "finishLocalTaskDraft(payload.resolvedThreadId);",
     );
     expect(CODEX_MOBILE_JS).toContain(
+      "finishLocalTaskDraft(result.threadId);",
+    );
+    expect(CODEX_MOBILE_JS).toContain(
       "var waitingForTaskCreation = taskNeedsCreation(task);",
     );
   });
+
+  test.each(["codex", "claude", "deepseek", "pi"])(
+    "moves a created %s task into the real task exactly once",
+    (adapter) => {
+      const temporaryThreadId = "local-new-1";
+      const realThreadId = `${adapter}-real-task`;
+      const temporaryKey = `${adapter}\u0000${temporaryThreadId}`;
+      const realKey = `${adapter}\u0000${realThreadId}`;
+      const state: Record<string, any> = {
+        currentAdapter: adapter,
+        currentThreadId: temporaryThreadId,
+        tasks: [{
+          threadId: temporaryThreadId,
+          title: "新任务",
+          status: "idle",
+          localCreationState: "ready",
+          localCreationError: "",
+          localSourceThreadId: "source-task",
+        }],
+        taskModels: {},
+        taskPermissions: {},
+        pendingMessages: [{ threadId: temporaryThreadId, text: "首条消息" }],
+        nextTaskSettings: {
+          [temporaryKey]: {
+            model: "terra",
+            reasoningEffort: "high",
+          },
+        },
+        nextTaskSettingsOrder: [temporaryKey],
+        conversationSnapshots: {},
+        conversationSnapshotOrder: [],
+        composerDrafts: {},
+        composerDraftOrder: [],
+        localTaskDrafts: {
+          [adapter]: {
+            threadId: temporaryThreadId,
+            localCreationState: "ready",
+          },
+        },
+      };
+      const migrate = loadMobileTemporaryConversationMigration(state);
+
+      migrate(temporaryThreadId, realThreadId, adapter);
+
+      expect(state.currentThreadId).toBe(realThreadId);
+      expect(state.pendingMessages[0].threadId).toBe(realThreadId);
+      expect(state.tasks).toHaveLength(1);
+      expect(state.tasks[0]).toMatchObject({ threadId: realThreadId });
+      expect(state.tasks[0].localCreationState).toBeUndefined();
+      expect(state.tasks[0].localCreationError).toBeUndefined();
+      expect(state.tasks[0].localSourceThreadId).toBeUndefined();
+      expect(state.localTaskDrafts[adapter]).toBeUndefined();
+      expect(state.tasks.some((task: Record<string, any>) => task.threadId === temporaryThreadId)).toBe(false);
+      expect(state.nextTaskSettings).toEqual({
+        [realKey]: {
+          model: "terra",
+          reasoningEffort: "high",
+        },
+      });
+    },
+  );
 
   test("shows a local task immediately and lets the persisted first message create it in the background", () => {
     const start = CODEX_MOBILE_APP_JS.indexOf("  async function createTask(");
@@ -2776,7 +3291,7 @@ describe("Codex mobile persistent cache", () => {
     state.boardTasks = [{ adapter: "codex", threadId: "child", title: "内部评审" }];
     runtime.persistMobileCacheNow();
     const oldPayload = JSON.parse(storage.getItem(runtime.storageKey)!);
-    delete oldPayload.taskListPolicyVersion;
+    oldPayload.taskListPolicyVersion = 1; // Previous policy omitted Harness origins.
     storage.setItem(runtime.storageKey, JSON.stringify(oldPayload));
     const restored = createPersistentCacheTestState();
     const reader = loadMobilePersistentCacheRuntime({ state: restored, storage, nowMs });
@@ -2793,7 +3308,7 @@ describe("Codex mobile persistent cache", () => {
     const runtime = loadMobilePersistentCacheRuntime({ state, storage, nowMs });
     storage.setItem(runtime.storageKey, JSON.stringify({
       schemaVersion: runtime.schemaVersion,
-      taskListPolicyVersion: 1,
+      taskListPolicyVersion: 2,
       savedAtMs: nowMs - 2_000,
       currentAdapter: "codex",
       adapters: [
@@ -2954,6 +3469,12 @@ describe("Codex mobile persistent cache", () => {
     state.queuedMessages = [{ text: "secret queued input" }];
     state.composerDrafts[runtimeKey("codex", "shared-id")] = { text: "保留草稿" };
     state.composerDraftOrder.push(runtimeKey("codex", "shared-id"));
+    const settingsKey = runtimeKey("codex", "shared-id");
+    state.nextTaskSettings[settingsKey] = {
+      model: "gpt-6-sol",
+      reasoningEffort: "high",
+    };
+    state.nextTaskSettingsOrder.push(settingsKey);
     const runtime = loadMobilePersistentCacheRuntime({ state, storage, nowMs });
 
     expect(runtime.persistMobileCacheNow()).toBe(true);
@@ -2970,6 +3491,10 @@ describe("Codex mobile persistent cache", () => {
       { id: "codex", label: "Codex", status: "" },
       { id: "deepseek", label: "DSH", status: "" },
     ]);
+    expect(payload.nextTaskSettings[settingsKey]).toEqual({
+      model: "gpt-6-sol",
+      reasoningEffort: "high",
+    });
     expect(raw).not.toContain("SECRET_IMAGE");
     expect(raw).not.toContain("secret approval");
     expect(raw).not.toContain("secret queued input");
@@ -2983,6 +3508,82 @@ describe("Codex mobile persistent cache", () => {
     });
     expect(otherRuntime.restorePersistentMobileCache("grok", "shared-id")).toBe(false);
     expect(otherState.serverMessages).toEqual([]);
+  });
+
+  test("persists and restores per-conversation next-message settings across reloads", () => {
+    const storage = createMemoryStorage();
+    const nowMs = 1_800_000_000_000;
+    const state = createPersistentCacheTestState();
+    state.authenticated = true;
+    state.tasks = [
+      { threadId: "first", title: "第一项", status: "idle" },
+      { threadId: "second", title: "第二项", status: "idle" },
+    ];
+    state.taskSnapshots = {
+      codex: { currentThreadId: "first", tasks: [{ ...state.tasks[0], lastUpdatedAt: new Date(nowMs).toISOString() }] },
+      deepseek: { currentThreadId: "second", tasks: [{ ...state.tasks[1], lastUpdatedAt: new Date(nowMs).toISOString() }] },
+    };
+    state.taskSnapshotOrder = ["codex", "deepseek"];
+    const firstKey = runtimeKey("codex", "first");
+    const secondKey = runtimeKey("deepseek", "second");
+    state.nextTaskSettings = {
+      [firstKey]: { model: "terra", reasoningEffort: "high" },
+      [secondKey]: { reasoningEffort: "low" },
+      invalid: { model: 42, reasoningEffort: null },
+    };
+    state.nextTaskSettingsOrder = [firstKey, secondKey, "invalid"];
+    const runtime = loadMobilePersistentCacheRuntime({ state, storage, nowMs });
+
+    expect(runtime.persistMobileCacheNow()).toBe(true);
+    const restored = createPersistentCacheTestState();
+    const reader = loadMobilePersistentCacheRuntime({
+      state: restored,
+      storage,
+      nowMs: nowMs + 1,
+      withDateParse: true,
+    });
+    expect(reader.restorePersistentMobileCache("codex", "first")).toBe(true);
+    expect(restored.nextTaskSettings).toEqual({
+      [firstKey]: { model: "terra", reasoningEffort: "high" },
+      [secondKey]: { reasoningEffort: "low" },
+    });
+    expect(restored.nextTaskSettingsOrder).toEqual([firstKey, secondKey]);
+    restored.currentAdapter = "codex";
+    restored.currentThreadId = "first";
+    restored.taskModels = Object.create(null);
+    expect(loadNextTaskSettingsSelectionRuntime(restored).projectedTaskModelState()).toBeNull();
+    restored.taskModels[firstKey] = {
+      canChange: true,
+      canChangeReasoningEffort: true,
+      currentModel: "sol",
+      currentReasoningEffort: "medium",
+      options: [
+        { id: "sol", reasoningEffortOptions: [{ id: "medium" }] },
+        { id: "terra", reasoningEffortOptions: [{ id: "high" }] },
+      ],
+    };
+    expect(loadNextTaskSettingsSelectionRuntime(restored).projectedTaskModelState()).toMatchObject({
+      currentModel: "terra",
+      currentReasoningEffort: "high",
+    });
+    restored.currentThreadId = "second";
+    expect(loadNextTaskSettingsSelectionRuntime(restored).projectedTaskModelState()).toBeNull();
+    const boundedState = createPersistentCacheTestState();
+    for (let index = 0; index < 15; index += 1) {
+      const key = runtimeKey("codex", `task-${index}`);
+      boundedState.nextTaskSettings[key] = { model: `model-${index}` };
+      boundedState.nextTaskSettingsOrder.push(key);
+    }
+    const boundedStorage = createMemoryStorage();
+    boundedState.authenticated = true;
+    const boundedRuntime = loadMobilePersistentCacheRuntime({
+      state: boundedState,
+      storage: boundedStorage,
+      nowMs,
+    });
+    expect(boundedRuntime.persistMobileCacheNow()).toBe(true);
+    expect(JSON.parse(boundedStorage.getItem(boundedRuntime.storageKey) || "{}")
+      .nextTaskSettingsOrder).toHaveLength(12);
   });
 
   test("falls back silently when browser storage is unavailable and clears cache on logout", () => {
@@ -3189,6 +3790,46 @@ describe("Codex mobile web rendering", () => {
     );
     expect(renderBlock).toContain('messagesEl.setAttribute("aria-busy", "false")');
     expect(switchBlock).toContain('state.switchingAdapter = false;\n      renderMessages(false);');
+  });
+
+  test("keeps the mobile task header on one stable, vertically centered row", () => {
+    const topbarRule = CODEX_MOBILE_CSS.match(/\.topbar\s*\{[^}]*\}/)?.[0] ?? "";
+    const topbarCopyRule = CODEX_MOBILE_CSS.match(/\.topbar-copy\s*\{[^}]*\}/)?.[0] ?? "";
+    const topbarActionsRule = CODEX_MOBILE_CSS.match(/\.topbar-actions\s*\{[^}]*\}/)?.[0] ?? "";
+    const mobileTopbarRule = CODEX_MOBILE_CSS.match(
+      /\.topbar \{ position: absolute;[^}]*\}/,
+    )?.[0] ?? "";
+
+    expect(topbarRule).toContain("height: 52px");
+    expect(topbarRule).toContain("flex-wrap: nowrap");
+    expect(topbarRule).toContain("align-items: center");
+    expect(topbarCopyRule).toContain("min-height: 0");
+    expect(topbarCopyRule).toContain("overflow: hidden");
+    expect(topbarActionsRule).toContain("height: 100%");
+    expect(topbarActionsRule).toContain("align-items: center");
+    expect(mobileTopbarRule).toContain("height: calc(52px + env(safe-area-inset-top))");
+    expect(mobileTopbarRule).toContain("overflow: hidden");
+    expect(CODEX_MOBILE_CSS).toContain(".topbar-title { min-width: 0;");
+    expect(CODEX_MOBILE_CSS).toContain(".cache-sync-slot {");
+    expect(CODEX_MOBILE_HTML).toContain(
+      '<div class="cache-sync-slot" aria-hidden="false">',
+    );
+  });
+
+  test("shows only a real project name in the mobile task header", () => {
+    const start = CODEX_MOBILE_JS.indexOf("  function updateHeader()");
+    const end = CODEX_MOBILE_JS.indexOf("\n  function setTaskView", start);
+    const source = CODEX_MOBILE_JS.slice(start, end);
+
+    expect(source).toContain("var projectName = state.switchingAdapter ? \"\" : scopedTaskProjectName(task);");
+    expect(source).toContain("metaEl.textContent = projectName;");
+    expect(source).toContain("metaEl.hidden = !projectName;");
+    expect(source).not.toContain('"输入内容会保留，发送后开始执行"');
+    expect(source).not.toContain('"正在后台创建，可以先输入"');
+    expect(CODEX_MOBILE_JS).toContain("function scopedTaskProjectName(task)");
+    expect(CODEX_MOBILE_JS).toContain(
+      String.raw`/^(?:workspace|\u5DE5\u4F5C\u533A|\u672A\u547D\u540D\u9879\u76EE)$/i.test(projectName)`,
+    );
   });
 
   test("combines reasoning and permission into one concise composer menu", () => {
@@ -4696,6 +5337,7 @@ describe("Codex mobile server", () => {
   test("reads and switches the selected task model through the mobile API", async () => {
     const authStore = createAuthStore("a configured mobile password");
     const sessionCookie = `codex_mobile_session=${authStore.createSessionToken()}`;
+    let listCalls = 0;
     const writes: Array<{
       threadId: string;
       update: { model?: string; reasoningEffort?: string };
@@ -4707,11 +5349,14 @@ describe("Codex mobile server", () => {
       lanAddress: "127.0.0.1",
       accessToken: "mobile-secret",
       authStore,
-      listTasks: async () => [{
-        threadId: "thread-model",
-        title: "模型切换",
-        status: "idle",
-      }],
+      listTasks: async () => {
+        listCalls += 1;
+        return [{
+          threadId: "thread-model",
+          title: "模型切换",
+          status: "idle",
+        }];
+      },
       readTaskModel: async (threadId, adapter) => ({
         currentModel: threadId === "thread-model" ? "gpt-5.6-sol" : undefined,
         options: [{ id: "gpt-5.6-sol", label: "GPT-5.6 Sol" }],
@@ -4795,6 +5440,49 @@ describe("Codex mobile server", () => {
         update: { reasoningEffort: "low" },
         adapter: "codex",
       });
+      expect(listCalls).toBe(0);
+    } finally {
+      await server.close();
+    }
+  });
+
+  test("resolves a short task settings prefix from the mobile task list", async () => {
+    const authStore = createAuthStore("a configured mobile password");
+    const sessionCookie = `codex_mobile_session=${authStore.createSessionToken()}`;
+    let listCalls = 0;
+    const reads: Array<{ threadId: string; adapter?: string }> = [];
+    const server = await startCodexMobileServer({
+      host: "127.0.0.1",
+      port: 0,
+      lanAddress: "127.0.0.1",
+      accessToken: "mobile-secret",
+      authStore,
+      listTasks: async () => {
+        listCalls += 1;
+        return [
+          { threadId: "prefix-task-model", title: "模型任务", status: "idle" },
+        ];
+      },
+      readTaskModel: async (threadId, adapter) => {
+        reads.push({ threadId, adapter });
+        return { currentModel: "gpt-5.6-sol", options: [], canChange: true };
+      },
+      readMessages: async (threadId) => ({
+        threadId,
+        messages: [],
+        queuedMessages: [],
+      }),
+      sendMessage: async () => ({ queued: false }),
+    });
+
+    try {
+      const response = await fetch(
+        `http://127.0.0.1:${server.port}/api/tasks/prefix-/model?adapter=codex`,
+        { headers: { cookie: sessionCookie } },
+      );
+      expect(response.status).toBe(200);
+      expect(listCalls).toBe(1);
+      expect(reads).toEqual([{ threadId: "prefix-task-model", adapter: "codex" }]);
     } finally {
       await server.close();
     }
@@ -4803,6 +5491,7 @@ describe("Codex mobile server", () => {
   test("reads and switches the selected task permission through the mobile API", async () => {
     const authStore = createAuthStore("a configured mobile password");
     const sessionCookie = `codex_mobile_session=${authStore.createSessionToken()}`;
+    let listCalls = 0;
     const writes: Array<{ threadId: string; permission: string; adapter?: string }> = [];
     const server = await startCodexMobileServer({
       host: "127.0.0.1",
@@ -4810,11 +5499,14 @@ describe("Codex mobile server", () => {
       lanAddress: "127.0.0.1",
       accessToken: "mobile-secret",
       authStore,
-      listTasks: async () => [{
-        threadId: "thread-permission",
-        title: "权限切换",
-        status: "idle",
-      }],
+      listTasks: async () => {
+        listCalls += 1;
+        return [{
+          threadId: "thread-permission",
+          title: "权限切换",
+          status: "idle",
+        }];
+      },
       readTaskPermission: async (threadId, adapter) => ({
         currentPermission: threadId === "thread-permission" ? "workspace-write" : undefined,
         options: [
@@ -4885,6 +5577,7 @@ describe("Codex mobile server", () => {
         },
       );
       expect(invalidResponse.status).toBe(400);
+      expect(listCalls).toBe(0);
     } finally {
       await server.close();
     }
@@ -5974,7 +6667,7 @@ describe("Codex mobile server", () => {
       expect(js).toContain("loadAdapters");
       expect(js).toContain("loadCurrentTaskModel");
       expect(js).toContain("selectCurrentTaskModel");
-      expect(js).toContain('adapterApiPath("/api/tasks/" + encodeURIComponent(state.currentThreadId) + "/model")');
+      expect(js).toContain('adapterApiPath(draft ? "/api/new-task/model" : "/api/tasks/" + encodeURIComponent(state.currentThreadId) + "/model")');
       expect(js).toContain("loadTaskBoard");
       expect(js).toContain('api("/api/task-board")');
       expect(js).toContain("openTaskFromBoard");
@@ -7065,6 +7758,8 @@ function createPersistentCacheTestState(): Record<string, any> {
     conversationSnapshotOrder: [],
     composerDrafts: Object.create(null),
     composerDraftOrder: [],
+    nextTaskSettings: Object.create(null),
+    nextTaskSettingsOrder: [],
     persistentCacheRestored: false,
     persistentCacheWriteTimer: null,
     boardTasks: [],
@@ -7103,6 +7798,7 @@ function loadMobilePersistentCacheRuntime(params: {
     removeItem: (key: string) => void;
   };
   nowMs: number;
+  withDateParse?: boolean;
 }): {
   storageKey: string;
   schemaVersion: number;
@@ -7120,6 +7816,9 @@ function loadMobilePersistentCacheRuntime(params: {
   const source = CODEX_MOBILE_APP_JS.slice(start, end);
   const composerInput = { value: "", placeholder: "" };
   const renderEvents: string[] = [];
+  const runtimeDate = params.withDateParse
+    ? Object.assign(function () { return new Date(params.nowMs); }, { now: () => params.nowMs, parse: Date.parse })
+    : { now: () => params.nowMs };
   const runtime = new Function(
     "state",
     "localStorage",
@@ -7159,7 +7858,7 @@ return {
   )(
     params.state,
     params.storage,
-    { now: () => params.nowMs },
+    runtimeDate,
     composerInput,
     { disabled: false },
     { scrollTop: 0 },
@@ -7371,6 +8070,7 @@ test("unchanged task polling preserves the open reasoning menu's clickable nodes
   const dependencies: Record<string, unknown> = {
     state: { currentThreadId: "original", sessionMenuOpen: true },
     currentTaskModelState: () => model, currentTaskPermissionState: () => ({ options: [], canChange: false }),
+    projectedTaskModelState: () => model, unconfirmedTaskSettings: () => null,
     currentTaskModelKey: () => "pi:original", composerView,
     composerSessionLabelEl: {}, composerSessionMenu: menu, closeSessionMenu: () => {}, syncComposerSettingsVisibility: () => {},
     currentTask: () => ({}), taskNeedsCreation: () => false, draftSettingsSubmitted: () => false,
@@ -7385,16 +8085,189 @@ test("unchanged task polling preserves the open reasoning menu's clickable nodes
   composerView.destroy();
 });
 
-test("background model refresh cannot steal an in-flight model or reasoning selection", async () => {
+test("background model refresh skips a duplicate request for the same task", async () => {
+  const cached = { currentModel: "one", loadedAtMs: 0 };
+  const state = {
+    currentAdapter: "codex",
+    currentThreadId: "original",
+    modelRequestId: 7,
+    modelRequestInFlight: true,
+    modelRequestKey: runtimeKey("codex", "original"),
+    taskModels: { [runtimeKey("codex", "original")]: cached },
+  };
+  const load = loadCurrentTaskModelRuntime(state, async () => {
+    throw new Error("must not request");
+  });
+  expect(await load(true)).toBe(cached);
+  expect(await load(false)).toBe(cached);
+  expect(state.modelRequestId).toBe(7);
+});
+
+function loadCurrentTaskModelRuntime(
+  state: Record<string, any>,
+  api: (path: string, options?: Record<string, unknown>) => Promise<unknown>,
+) {
   const start = CODEX_MOBILE_APP_JS.indexOf("  async function loadCurrentTaskModel(force)");
   const end = CODEX_MOBILE_APP_JS.indexOf("  async function loadCurrentTaskPermission(force)", start);
-  for (const flag of ["modelChanging", "reasoningChanging"]) {
-    const cached = { currentModel: "one", loadedAtMs: 0 };
-    const state = { currentThreadId: "original", modelRequestId: 7, taskModels: { original: cached }, [flag]: true };
-    let calls = 0;
-    const load = new Function("state", "renderModelControl", "currentTaskModelKey", "api",
-      `${CODEX_MOBILE_APP_JS.slice(start, end)}\nreturn loadCurrentTaskModel;`)(state, () => {}, () => "original", () => { calls++; }) as (force: boolean) => Promise<unknown>;
-    expect(await load(true)).toBe(cached); expect(await load(false)).toBe(cached);
-    expect(state.modelRequestId).toBe(7); expect(calls).toBe(0);
-  }
+  return new Function(
+    "state", "api", "renderModelControl", "currentTaskModelKey", "currentTask", "taskNeedsCreation",
+    "adapterApiPath", "AbortController", "setTimeout", "clearTimeout", "Date", "MODEL_CACHE_TTL_MS",
+    `function applyDraftModelSelection(payload, selection) { return Object.assign({}, payload, selection); }
+${CODEX_MOBILE_APP_JS.slice(start, end)}
+return loadCurrentTaskModel;`,
+  )(
+    state,
+    api,
+    () => {},
+    () => runtimeKey(state.currentAdapter, state.currentThreadId),
+    () => ({ threadId: state.currentThreadId }),
+    () => false,
+    (path: string) => path,
+    AbortController,
+    setTimeout,
+    clearTimeout,
+    Date,
+    60 * 1000,
+  ) as (force?: boolean) => Promise<Record<string, any> | null>;
+}
+
+test("model refresh preserves a cached catalog as usable stale state when the owner fails", async () => {
+  const key = runtimeKey("codex", "task");
+  const cached = {
+    currentModel: "sol",
+    options: [{ id: "sol" }, { id: "terra" }],
+    canChange: true,
+    currentReasoningEffort: "medium",
+    reasoningEffortOptions: [{ id: "medium" }, { id: "high" }],
+    canChangeReasoningEffort: true,
+    loadError: true,
+    loadedAtMs: 0,
+  };
+  const state = {
+    currentAdapter: "codex",
+    currentThreadId: "task",
+    taskModels: { [key]: cached },
+    modelRequestInFlight: false,
+    modelRequestKey: "",
+    modelRequestId: 0,
+  };
+  const load = loadCurrentTaskModelRuntime(state, async () => {
+    throw new Error("电脑暂时没有响应");
+  });
+
+  await load(true);
+  expect(state.taskModels[key]).toMatchObject({
+    currentModel: "sol",
+    canChange: true,
+    canChangeReasoningEffort: true,
+    stale: true,
+    staleReason: "电脑暂时没有响应",
+  });
+  expect(state.taskModels[key].loadError).toBe(false);
+  expect(state.taskModels[key].options).toHaveLength(2);
+});
+
+test("model refresh reports loadError only when there is no cached option catalog", async () => {
+  const key = runtimeKey("codex", "task");
+  const state = {
+    currentAdapter: "codex",
+    currentThreadId: "task",
+    taskModels: { [key]: { currentModel: "sol", loadedAtMs: 0 } },
+    modelRequestInFlight: false,
+    modelRequestKey: "",
+    modelRequestId: 0,
+  };
+  const load = loadCurrentTaskModelRuntime(state, async () => {
+    throw new Error("读取失败");
+  });
+
+  await load(true);
+  expect(state.taskModels[key]).toMatchObject({
+    loadError: true,
+    canChange: false,
+    currentModel: "sol",
+    unavailableReason: "读取失败",
+  });
+});
+
+test("server stale model metadata keeps the cached controls usable", async () => {
+  const key = runtimeKey("codex", "task");
+  const cached = {
+    currentModel: "sol",
+    options: [{ id: "sol" }, { id: "terra" }],
+    canChange: true,
+    currentReasoningEffort: "medium",
+    reasoningEffortOptions: [{ id: "medium" }, { id: "high" }],
+    canChangeReasoningEffort: true,
+    loadedAtMs: 0,
+  };
+  const state = {
+    currentAdapter: "codex",
+    currentThreadId: "task",
+    taskModels: { [key]: cached },
+    modelRequestInFlight: false,
+    modelRequestKey: "",
+    modelRequestId: 0,
+  };
+  const load = loadCurrentTaskModelRuntime(state, async () => ({
+    stale: true,
+    staleReason: "电脑暂时没有响应",
+    currentModel: "sol",
+  }));
+
+  await load(true);
+  expect(state.taskModels[key]).toMatchObject({
+    currentModel: "sol",
+    canChange: true,
+    canChangeReasoningEffort: true,
+    stale: true,
+    staleReason: "电脑暂时没有响应",
+    loadError: false,
+  });
+  expect(state.taskModels[key].options).toHaveLength(2);
+});
+
+test("model refresh honors the 60 second cache and skips duplicate in-flight reads", async () => {
+  const key = runtimeKey("codex", "task");
+  let calls = 0;
+  let resolveRequest!: (value: unknown) => void;
+  const cached = { currentModel: "sol", options: [{ id: "sol" }], canChange: true, loadedAtMs: Date.now() };
+  const state = {
+    currentAdapter: "codex",
+    currentThreadId: "task",
+    taskModels: { [key]: cached },
+    modelRequestInFlight: false,
+    modelRequestKey: "",
+    modelRequestId: 0,
+  };
+  const load = loadCurrentTaskModelRuntime(state, () => {
+    calls += 1;
+    return new Promise((resolve) => { resolveRequest = resolve; });
+  });
+
+  expect(await load(false)).toBe(cached);
+  expect(calls).toBe(0);
+  const refreshing = load(true);
+  await Promise.resolve();
+  expect(await load(true)).toBe(cached);
+  expect(calls).toBe(1);
+  resolveRequest({ currentModel: "terra", options: [{ id: "terra" }], canChange: true });
+  await refreshing;
+  expect(calls).toBe(1);
+});
+
+test("live refresh does not await model or permission reads", () => {
+  const start = CODEX_MOBILE_APP_JS.indexOf("  function scheduleLiveRefresh(delayMs)");
+  const end = CODEX_MOBILE_APP_JS.indexOf('\n  window.addEventListener("online"', start);
+  const poll = CODEX_MOBILE_APP_JS.slice(start, end);
+  expect(poll).toContain("void loadCurrentTaskModel(false)");
+  expect(poll).toContain("void loadCurrentTaskPermission(false)");
+  expect(poll).not.toContain("loadCurrentTaskModel(false),\n            loadCurrentTaskPermission(false)");
+
+  const visibilityStart = CODEX_MOBILE_APP_JS.indexOf('  document.addEventListener("visibilitychange"');
+  const visibilityEnd = CODEX_MOBILE_APP_JS.indexOf('\n  window.addEventListener("werelay:open-task"', visibilityStart);
+  const visibility = CODEX_MOBILE_APP_JS.slice(visibilityStart, visibilityEnd);
+  expect(visibility).toContain("void loadCurrentTaskModel(true)");
+  expect(visibility).toContain("void loadCurrentTaskPermission(true)");
+  expect(visibility).not.toContain("loadCurrentTaskModel(true),\n            loadCurrentTaskPermission(true)");
 });

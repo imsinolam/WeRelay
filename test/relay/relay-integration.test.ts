@@ -328,7 +328,7 @@ describe("WeRelay application relay", () => {
       pollTimeoutMs: 20,
       deviceOfflineMs: 500,
       warmCacheFreshMs: 0,
-      warmCacheTtlMs: 500,
+      warmCacheTtlMs: 60_000,
     });
     closers.push(() => relay.close());
     const client = startWeRelayRelayClient({
@@ -412,7 +412,7 @@ describe("WeRelay application relay", () => {
     expect(requestCounts.get(messagesPath)).toBe(initialMessageRequests);
   });
 
-  test("invalidates every browser warm cache after a successful write", async () => {
+  test("invalidates every browser warm cache after creating a task", async () => {
     const sessionOne = `v1.${Date.now() + 60_000}.one.signature`;
     const sessionTwo = `v1.${Date.now() + 60_000}.two.signature`;
     let version = 1;
@@ -456,7 +456,7 @@ describe("WeRelay application relay", () => {
       deviceToken: "test-device-token",
       pollTimeoutMs: 30,
       deviceOfflineMs: 200,
-      warmRefreshIntervalMs: 1_000,
+      warmRefreshIntervalMs: 60_000,
     });
     closers.push(() => relay.close());
     const client = startWeRelayRelayClient({
@@ -481,10 +481,10 @@ describe("WeRelay application relay", () => {
       .headers.get("x-werelay-cache")).toBe("warm");
 
     version = 2;
-    const sent = await fetch(`${relay.baseUrl}/api/tasks/thread-1/messages?adapter=codex`, {
+    const sent = await fetch(`${relay.baseUrl}/api/tasks`, {
       method: "POST",
       headers: { ...headersOne, "content-type": "application/json" },
-      body: JSON.stringify({ text: "更新缓存", images: [] }),
+      body: JSON.stringify({ title: "新建任务" }),
     });
     expect(sent.status).toBe(200);
     const refreshed = await fetch(`${relay.baseUrl}${modelPath}`, { headers: headersTwo });
@@ -679,6 +679,276 @@ describe("WeRelay application relay", () => {
     expect(response.headers.get("location")).toContain(
       "/?task=0000000a-0000-7000-8000-00000000000a&adapter=workbuddy&appv=",
     );
+  });
+});
+
+describe("WeRelay relay persistent warm snapshots", () => {
+  test("serves a persisted device snapshot after restart even beyond the browser cache TTL", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "werelay-relay-snapshot-"));
+    const snapshotFile = path.join(directory, "relay-warm-snapshot.bin");
+    const sessionToken = `v1.${Date.now() + 60_000}.snapshot.signature`;
+    let version = 1;
+    const local = http.createServer((request, response) => {
+      response.setHeader("content-type", "application/json; charset=utf-8");
+      if (request.method === "POST") {
+        response.end(JSON.stringify({ queued: false }));
+        return;
+      }
+      const url = new URL(request.url ?? "/", "http://werelay.local");
+      if (url.pathname === "/api/auth/status") {
+        response.end(JSON.stringify({ authenticated: true, configured: true }));
+        return;
+      }
+      if (url.pathname.endsWith("/messages")) {
+        response.end(JSON.stringify({
+          messages: [{ role: "assistant", text: `缓存版本 ${version}` }],
+        }));
+        return;
+      }
+      response.end(JSON.stringify({ currentModel: `model-${version}`, options: [] }));
+    });
+    const localPort = await new Promise<number>((resolve, reject) => {
+      local.once("error", reject);
+      local.listen(0, "127.0.0.1", () => {
+        const address = local.address();
+        if (!address || typeof address === "string") reject(new Error("missing local address"));
+        else resolve(address.port);
+      });
+    });
+    closers.push(async () => {
+      await new Promise<void>((resolve) => {
+        local.close(() => resolve());
+        local.closeAllConnections?.();
+      });
+    });
+
+    const first = await startWeRelayRelayServer({
+      host: "127.0.0.1",
+      port: 0,
+      deviceId: "snapshot-device",
+      deviceToken: "snapshot-device-token",
+      warmSnapshotFile: snapshotFile,
+      warmCacheFreshMs: 0,
+      warmCacheTtlMs: 60_000,
+      warmSnapshotRetentionMs: 60_000,
+      warmRefreshIntervalMs: 20,
+      deviceOfflineMs: 60_000,
+      pollTimeoutMs: 20,
+    });
+    closers.push(() => first.close());
+    const client = startWeRelayRelayClient({
+      transport: "long-poll",
+      relayUrl: first.baseUrl,
+      deviceId: "snapshot-device",
+      deviceToken: "snapshot-device-token",
+      localBaseUrl: `http://127.0.0.1:${localPort}`,
+      retryDelayMs: 5,
+    });
+    closers.push(() => client.close());
+    await waitUntilOnline(first.baseUrl);
+    const headers = { cookie: `codex_mobile_session=${sessionToken}` };
+    const storedModelPath = "/api/tasks/thread-1/model?adapter=codex";
+    await fetch(`${first.baseUrl}${storedModelPath}`, { headers });
+    await fetch(`${first.baseUrl}${storedModelPath}`, { headers });
+    const cachedModel = await fetch(`${first.baseUrl}${storedModelPath}`, { headers });
+    expect(cachedModel.headers.get("x-werelay-cache")).toBe("warm");
+    await first.close();
+    client.close();
+    await Bun.sleep(2_100);
+
+    const restored = await startWeRelayRelayServer({
+      host: "127.0.0.1",
+      port: 0,
+      deviceId: "snapshot-device",
+      deviceToken: "snapshot-device-token",
+      warmSnapshotFile: snapshotFile,
+      warmCacheFreshMs: 0,
+      warmCacheTtlMs: 60_000,
+      warmSnapshotRetentionMs: 60_000,
+      warmRefreshIntervalMs: 20,
+      deviceOfflineMs: 60_000,
+      pollTimeoutMs: 20,
+    });
+    closers.push(() => restored.close());
+    const restoredClient = startWeRelayRelayClient({
+      transport: "long-poll",
+      relayUrl: restored.baseUrl,
+      deviceId: "snapshot-device",
+      deviceToken: "snapshot-device-token",
+      localBaseUrl: `http://127.0.0.1:${localPort}`,
+      retryDelayMs: 5,
+    });
+    closers.push(() => restoredClient.close());
+    await waitUntilOnline(restored.baseUrl);
+    await fetch(`${restored.baseUrl}/api/auth/status`, { headers });
+    await restoredClient.close();
+    await Bun.sleep(100);
+    version = 2;
+    const cached = await fetch(`${restored.baseUrl}${storedModelPath}`, { headers });
+    expect(cached.status).toBe(200);
+    expect(cached.headers.get("x-werelay-cache")).toBe("warm");
+    expect(await cached.json()).toMatchObject({ currentModel: "model-1" });
+  });
+});
+
+describe("WeRelay relay targeted invalidation", () => {
+  test("keeps another task warm after a task message write", async () => {
+    const sessionToken = `v1.${Date.now() + 60_000}.targeted.signature`;
+    let version = 1;
+    const local = http.createServer((request, response) => {
+      response.setHeader("content-type", "application/json; charset=utf-8");
+      if (request.method === "POST") {
+        response.end(JSON.stringify({ queued: false, adapter: "codex" }));
+        return;
+      }
+      const url = new URL(request.url ?? "/", "http://werelay.local");
+      if (url.pathname === "/api/auth/status") {
+        response.end(JSON.stringify({ authenticated: true }));
+        return;
+      }
+      if (url.pathname.endsWith("/messages")) {
+        const threadId = decodeURIComponent(url.pathname.split("/")[3] ?? "");
+        response.end(JSON.stringify({
+          threadId,
+          messages: [{ role: "assistant", text: `${threadId}-${version}` }],
+        }));
+        return;
+      }
+      if (url.pathname === "/api/task-board" || url.pathname === "/api/tasks") {
+        response.end(JSON.stringify({ tasks: [], version }));
+        return;
+      }
+      response.end(JSON.stringify({ currentModel: `model-${version}`, options: [] }));
+    });
+    const localPort = await new Promise<number>((resolve, reject) => {
+      local.once("error", reject);
+      local.listen(0, "127.0.0.1", () => {
+        const address = local.address();
+        if (!address || typeof address === "string") reject(new Error("missing local address"));
+        else resolve(address.port);
+      });
+    });
+    closers.push(async () => {
+      await new Promise<void>((resolve) => {
+        local.close(() => resolve());
+        local.closeAllConnections?.();
+      });
+    });
+    const relay = await startWeRelayRelayServer({
+      host: "127.0.0.1",
+      port: 0,
+      deviceId: "targeted-device",
+      deviceToken: "targeted-token",
+      warmCacheTtlMs: 60_000,
+      warmRefreshIntervalMs: 60_000,
+      pollTimeoutMs: 20,
+      deviceOfflineMs: 5_000,
+    });
+    closers.push(() => relay.close());
+    const client = startWeRelayRelayClient({
+      transport: "long-poll",
+      relayUrl: relay.baseUrl,
+      deviceId: "targeted-device",
+      deviceToken: "targeted-token",
+      localBaseUrl: `http://127.0.0.1:${localPort}`,
+      retryDelayMs: 5,
+    });
+    closers.push(() => client.close());
+    await waitUntilOnline(relay.baseUrl);
+    const headers = { cookie: `codex_mobile_session=${sessionToken}` };
+    await fetch(`${relay.baseUrl}/api/auth/status`, { headers });
+    const pathFor = (threadId: string) =>
+      `/api/tasks/${threadId}/messages?limit=5&adapter=codex`;
+    for (const threadId of ["task-x", "task-y"]) {
+      await fetch(`${relay.baseUrl}${pathFor(threadId)}`, { headers });
+      expect((await fetch(`${relay.baseUrl}${pathFor(threadId)}`, { headers }))
+        .headers.get("x-werelay-cache")).toBe("warm");
+    }
+    version = 2;
+    const sent = await fetch(
+      `${relay.baseUrl}/api/tasks/task-x/messages?adapter=codex`,
+      {
+        method: "POST",
+        headers: { ...headers, "content-type": "application/json" },
+        body: JSON.stringify({ text: "更新 X" }),
+      },
+    );
+    expect(sent.status).toBe(200);
+    const untouched = await fetch(`${relay.baseUrl}${pathFor("task-y")}`, { headers });
+    expect(untouched.headers.get("x-werelay-cache")).toBe("warm");
+    expect(await untouched.json()).toMatchObject({ threadId: "task-y" });
+  });
+
+  test("still clears all warm entries after creating a task", async () => {
+    const sessionToken = `v1.${Date.now() + 60_000}.create.signature`;
+    let version = 1;
+    const local = http.createServer((request, response) => {
+      response.setHeader("content-type", "application/json; charset=utf-8");
+      if (request.method === "POST") {
+        response.end(JSON.stringify({ threadId: "new-task" }));
+        return;
+      }
+      const url = new URL(request.url ?? "/", "http://werelay.local");
+      if (url.pathname === "/api/auth/status") {
+        response.end(JSON.stringify({ authenticated: true }));
+      } else if (url.pathname.endsWith("/messages")) {
+        response.end(JSON.stringify({
+          messages: [{ role: "assistant", text: `缓存 ${version}` }],
+        }));
+      } else {
+        response.end(JSON.stringify({ currentModel: `model-${version}`, options: [] }));
+      }
+    });
+    const localPort = await new Promise<number>((resolve, reject) => {
+      local.once("error", reject);
+      local.listen(0, "127.0.0.1", () => {
+        const address = local.address();
+        if (!address || typeof address === "string") reject(new Error("missing local address"));
+        else resolve(address.port);
+      });
+    });
+    closers.push(async () => {
+      await new Promise<void>((resolve) => {
+        local.close(() => resolve());
+        local.closeAllConnections?.();
+      });
+    });
+    const relay = await startWeRelayRelayServer({
+      host: "127.0.0.1",
+      port: 0,
+      deviceId: "create-device",
+      deviceToken: "create-token",
+      warmCacheTtlMs: 60_000,
+      warmRefreshIntervalMs: 60_000,
+      pollTimeoutMs: 20,
+      deviceOfflineMs: 5_000,
+    });
+    closers.push(() => relay.close());
+    const client = startWeRelayRelayClient({
+      transport: "long-poll",
+      relayUrl: relay.baseUrl,
+      deviceId: "create-device",
+      deviceToken: "create-token",
+      localBaseUrl: `http://127.0.0.1:${localPort}`,
+      retryDelayMs: 5,
+    });
+    closers.push(() => client.close());
+    await waitUntilOnline(relay.baseUrl);
+    const headers = { cookie: `codex_mobile_session=${sessionToken}` };
+    await fetch(`${relay.baseUrl}/api/auth/status`, { headers });
+    const modelPath = "/api/tasks/thread-1/model?adapter=codex";
+    await fetch(`${relay.baseUrl}${modelPath}`, { headers });
+    expect((await fetch(`${relay.baseUrl}${modelPath}`, { headers }))
+      .headers.get("x-werelay-cache")).toBe("warm");
+    version = 2;
+    expect((await fetch(`${relay.baseUrl}/api/tasks`, {
+      method: "POST",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({ title: "新任务" }),
+    })).status).toBe(200);
+    const refreshed = await fetch(`${relay.baseUrl}${modelPath}`, { headers });
+    expect(refreshed.headers.get("x-werelay-cache")).toBeNull();
+    expect(await refreshed.json()).toMatchObject({ currentModel: "model-2" });
   });
 });
 

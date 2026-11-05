@@ -49,10 +49,13 @@ export type DaemonAdapterMessageActivity = {
 export type DaemonAdapterUsageOrder = {
   adapters: DaemonAdapterKind[];
   updatedAt: string;
+  windowMs?: number;
 };
 
 const MAX_ADAPTER_MESSAGE_ACTIVITIES = 2_000;
-const ADAPTER_MESSAGE_ACTIVITY_RETENTION_MS = 48 * 60 * 60_000;
+// The visible ordering only needs three days, but retaining a week keeps the
+// approximation useful across weekends and avoids frequent full recomputes.
+const ADAPTER_MESSAGE_ACTIVITY_RETENTION_MS = 7 * 24 * 60 * 60_000;
 
 export type DaemonMobileApprovalResultAction =
   | "confirm"
@@ -284,6 +287,11 @@ function normalizeAdapterUsageOrder(
   return {
     adapters,
     updatedAt: value.updatedAt.trim(),
+    ...(typeof value.windowMs === "number" &&
+      Number.isSafeInteger(value.windowMs) &&
+      value.windowMs > 0
+      ? { windowMs: value.windowMs }
+      : {}),
   };
 }
 
@@ -621,6 +629,9 @@ export class DaemonWorkspaceStateStore {
             adapterUsageOrder: {
               adapters: [...this.state.adapterUsageOrder.adapters],
               updatedAt: this.state.adapterUsageOrder.updatedAt,
+              ...(this.state.adapterUsageOrder.windowMs
+                ? { windowMs: this.state.adapterUsageOrder.windowMs }
+                : {}),
             },
           }
         : {}),
@@ -847,6 +858,9 @@ export class DaemonWorkspaceStateStore {
       ? {
           adapters: [...this.state.adapterUsageOrder.adapters],
           updatedAt: this.state.adapterUsageOrder.updatedAt,
+          ...(this.state.adapterUsageOrder.windowMs
+            ? { windowMs: this.state.adapterUsageOrder.windowMs }
+            : {}),
         }
       : null;
   }
