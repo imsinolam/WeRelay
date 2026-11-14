@@ -1,13 +1,13 @@
 # Repository Guidelines
 
 ## 当前工作基线（先检查，再修改）
-本地目录名仍可能是 `DeskRelay`；本地 `main` 是现行 WeRelay 源码整合线，但不等于已部署并验活的运行基线。旧 DeskRelay 主线已归档，不能作为开发起点。开发前在目标 worktree 根目录运行 `npm run baseline:check -- --active`；若旧工作树没有此命令，不要以“缺少脚本”为理由继续修改，先在现行 WeRelay worktree 中确认 `refs/werelay/active-baseline` 指向已部署候选，再从该提交新建工作树移植旧补丁。此引用由唯一体验整合负责人在候选**成功部署并验活后**更新，不由普通开发 Agent 自行推进。本机共享 Git `pre-commit` 守卫会拒绝旧历史或旧产品身份的提交；不要用 `--no-verify` 规避。旧工作树只供只读审查与提取补丁，不直接作为新功能起点。
+本地目录名仍可能是 `DeskRelay`；本地 `main` 是现行 WeRelay 源码整合线，但不等于已部署并验活的运行基线。旧 DeskRelay 主线已归档，不能作为开发起点。开发前在目标 worktree 根目录运行 `npm run baseline:check -- --active`；若旧工作树没有此命令，不要以“缺少脚本”为理由继续修改，先在现行 WeRelay worktree 中确认 `refs/werelay/active-baseline` 指向已部署候选，确认最新本地 `main` 包含该运行基线后，从最新 `main` 新建工作树移植旧补丁。此引用由唯一体验整合负责人在候选**成功部署并验活后**更新，不由普通开发 Agent 自行推进。本机共享 Git `pre-commit` 守卫会拒绝旧历史或旧产品身份的提交；不要用 `--no-verify` 规避。旧工作树只供只读审查与提取补丁，不直接作为新功能起点。
 
 ## 统一版本规则（2026-11-05）
-用户已于 2026-11-05 指定 1.0.0 为正式版。所有新版本统一用 `1.x.x`，只递增最后一位（如 `1.0.0 → 1.0.1`），不再创建 preview/rc 或“转正式”版本。每版对应已提交源码与唯一 tarball，同版本禁止覆盖不同内容。部署与 GitHub 公开仍分别授权，但使用同一版本、同一产物；开发只提交，发布 Agent 负责整合、部署与公开，不增设中间角色。真实 Agent/ClawBot 验活由用户自行完成，不能冒称通过，也不额外阻止用户已授权的公开。详见 `docs/发布/体验部署与正式发布.md`。
+用户已于 2026-11-05 指定 1.0.0 为正式版。所有新版本统一用 `1.x.x`，只递增最后一位（如 `1.0.0 → 1.0.1`），不再创建 preview/rc 或“转正式”版本。每版对应已提交源码与唯一 tarball，同版本禁止覆盖不同内容。部署与 GitHub 公开仍分别授权，但使用同一版本、同一产物；开发负责自测、精确提交并合入本地 `main`，发布 Agent 只从 `main` 锁定版本、部署与公开，不增设中间角色。真实 Agent/ClawBot 验活由用户自行完成，不能冒称通过，也不额外阻止用户已授权的公开。详见 `docs/发布/体验部署与正式发布.md`。
 
-## 当前交付边界（2026-09-13）
-开发完成必须验证、创建提交并登记完整 SHA；没有提交只能报告“未完成交付”。开发提交不自动部署，用户明确要求统一部署后，发布负责人同时盘点本机与开发服务器的提交、逐项恢复已完成但漏提交的工作，记录纳入或暂缓理由，不能静默排除。体验部署不等于 GitHub 正式发布。
+## 当前交付边界（2026-11-14）
+每一个需求完成后，开发负责人必须自测通过、精确提交、合入最新本地 `main` 并核验，登记需求提交和合入后的完整 SHA，才算开发交付完成。只有提交但未合入 `main`，必须报告“未完成交付（待合主线）”；冲突和合入相关回归由该需求负责人处理，不能留到发版时临时拼分支。并发合流须串行、安全快进，不覆盖他人前进或修改他人工作区，具体入口见 `docs/开发协作/多Agent协作规范.md`。合入 `main` 不自动部署、不改版本、不唤起发版任务；发布负责人只从已合入的 `main` 锁定发布范围，未合入需求不随版、不阻塞发布。体验部署不等于 GitHub 正式发布。
 
 
 ## Required Reading For Every Agent
@@ -144,13 +144,13 @@ The package name `werelay` is retained only as the local tarball and installed C
 Do not describe npm Registry as an installation, update, or release channel for WeRelay. Third-party Agent installation commands that legitimately use npm are unaffected.
 
 ## Multi-Agent Git And Release Ownership
-WeRelay may be edited by multiple Agents at the same time. Every ordinary development Agent must work in its own branch and worktree, preserve existing dirty state, stage only explicitly owned files, and finish with one or more local commits. Development Agents must not push, merge to `main`, create tags, bump the public version, run `npm publish`, deploy shared environments, or perform any GitHub write operation.
+WeRelay may be edited by multiple Agents at the same time. Every ordinary development Agent must work in its own branch and worktree, preserve existing dirty state, stage only explicitly owned files, and finish with scoped validation, explicit local commits, and verified integration into the latest local `main`. The requirement owner resolves conflicts and reruns affected checks before safely fast-forwarding local `main`; concurrent landings must be serialized and must never overwrite another worktree or discard main advances. Development Agents must not push, create tags, bump the public version, run `npm publish`, deploy shared environments, or perform any GitHub write operation.
 
 Before modifying any file, every Agent must first check the repository up to the latest state and record the baseline SHA; repeat that check whenever the task, branch, or worktree changes. This repository has no GitHub remote configured — GitHub writes happen only on the dedicated publishing server — so "latest state" means the newest local branches, worktrees, and commits, not `git fetch`. If the baseline branch has moved, rebase or reopen the worktree onto the new baseline before editing rather than continuing from a stale one. See `docs/开发协作/多Agent协作规范.md` for the exact commands.
 
-Development and release are the only two roles. A development Agent validates, commits and registers its full SHA as pending; it never deploys automatically. Only an explicit user request starts a batch deployment or GitHub publication, serialized by one release Agent.
+Development and release are the only two roles. A development Agent validates, commits, lands the requirement into local `main` and registers both full SHAs as landed but not deployed; it never deploys automatically. Only an explicit user request starts a batch deployment or GitHub publication, serialized by one release Agent.
 
-The release Agent inventories all worktrees, branches, dirty files and candidate commits, integrates explicit SHAs in an isolated worktree, reruns validation after conflicts, and never packages an uncommitted shared tree. Use one plain `1.x.x` version for source, tarball, local installation, Relay and GitHub. Increment only the last number for every new artifact; do not create new preview/rc versions or overwrite an allocated version with different content. Deployment and GitHub publication remain separately authorized operations, not separate version lines. Historical prerelease support stays read-only for compatibility.
+The release Agent locks a committed local `main` SHA in an isolated release worktree and runs release gates. It does not collect requirement branches, cherry-pick unlanded work, or recover missing development commits during release. Unlanded and dirty work is recorded and preserved for its owner, excluded without blocking the release. Release-only metadata commits must also be safely landed into local `main` before packaging; if main advances, integrate the latest main and rerun affected gates before refreezing. Never package an uncommitted shared tree. Use one plain `1.x.x` version for source, tarball, local installation, Relay and GitHub. Increment only the last number for every new artifact; do not create new preview/rc versions or overwrite an allocated version with different content. Deployment and GitHub publication remain separately authorized operations, not separate version lines. Historical prerelease support stays read-only for compatibility.
 
 GitHub writes, fetch, public commits, candidate-branch CI, fast-forward main, tags and remote verification run only on the publishing server. No Mac push fallback. Real Agent/ClawBot acceptance belongs to the user; report pending honestly without inventing a separate wait before an explicitly authorized publication.
 
@@ -160,9 +160,9 @@ Chinese release notes are the user-facing source of truth. Write them in plain, 
 用户明确要求“发布，不要部署”时，不安装、不重启、不修改公网服务、不推进活动运行基线；公开版本必须有完整审查和门禁证据，用户体验状态单独如实记录。发布授权不自动包含部署。面向已安装用户的 ClawBot 更新检测包含已发布的正式及预发布 Release；提醒本身不安装，只有用户明确回复“更新”才下载对应 tag 源码、构建 tarball 并安装，不自动重启，不从草稿、裸 tag 或 main 分支安装。旧运行端必须先安装此能力才会生效；这不授予开发 Agent 部署或发布权限。
 
 ## Release Process
-- Development completion requires scoped validation, a local commit and registration of the full SHA as pending integration. It does not automatically authorize deployment or wake the release Agent. Only an explicit user request starts a batch deployment, owned by one integration Agent. Report committed-but-not-deployed work clearly; never claim deployment until the same candidate tarball is installed and verified. Documentation-only, test-description or CI-maintenance commits do not restart runtime services when packaged runtime behavior is unchanged.
+- Development completion requires scoped self-tests, explicit commits, verified integration into latest local `main`, and registration of requirement and main SHAs. A commit alone is incomplete delivery. It does not automatically authorize deployment or wake the release Agent. Only an explicit user request starts a batch deployment, owned by one release Agent. Report landed-but-not-deployed work clearly; never claim deployment until the same candidate tarball is installed and verified. Documentation-only, test-description or CI-maintenance commits do not restart runtime services when packaged runtime behavior is unchanged.
 - Deployment is not GitHub publication. Both use the same plain `1.x.x` version and immutable tarball; record source SHA and tarball SHA-256, retain a rollback artifact, and report actual installed and published states separately.
-- If any source or packaged content changes during observation, create a new commit, rerun the complete gates, rebuild and redeploy a new candidate, and restart the observation baseline. Rolling back a service must not delete or rewrite Git history.
+- If any source or packaged content changes during observation, create and validate a new commit, land it into local `main`, rerun the complete release gates, rebuild and redeploy a new candidate, and restart the observation baseline. Rolling back a service must not delete or rewrite Git history.
 - Only an explicit user instruction to publish a GitHub version authorizes public writes. Review all completed commits, run full gates and disclose pending user experience. A combined publish-and-deploy request may complete both operations with one artifact; it does not require a separately numbered preview.
 - Keep README focused on product relationships and the shortest successful setup; move command matrices and advanced configuration into `docs/`.
 - Add one release note for the current public baseline instead of rewriting historical release notes to pretend they used the new name.
@@ -171,7 +171,7 @@ Chinese release notes are the user-facing source of truth. Write them in plain, 
 - The publishing server must push the public commit to a one-time candidate branch first, wait for Secret scan plus Linux, macOS, and Windows quality checks, then fast-forward the same SHA to protected `main`. The public release Agent must also verify the latest CI run triggered by the `main` push.
 - Protected `main` must keep strict required checks for `Secret scan` and all three quality jobs, with force pushes and deletion disabled. Do not weaken this rule to bypass a failed release.
 - The publishing server must use an isolated WeRelay directory, reject non-fast-forward updates, verify the final remote SHA, and avoid touching unrelated server projects.
-- If the change only updates repository policy, CI, or release documentation and does not affect runtime files, create a local commit but do not bump the product version or redeploy the Relay unless the user explicitly requests that repository-only content be published.
+- If the change only updates repository policy, CI, or release documentation and does not affect runtime files, validate, commit and land into local `main`, but do not bump the product version or redeploy the Relay unless the user explicitly requests that repository-only content be published.
 
 ## Commit And PR Guidance
 Use Conventional Commit prefixes such as `feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `build:`, and `chore:`. Keep subjects imperative and behavior-focused, for example `fix: preserve daemon visible companion occupancy`.
@@ -199,7 +199,7 @@ Prefer surgical fixes backed by focused tests. Avoid broad rewrites of adapter f
 
 ## Agent Experience Records
 - **部署后 Agent 与 ClawBot 的真实验活由用户自行完成（2026-10-28）。** 部署 Agent 只做质量门禁、安装及服务／版本／网页只读 API／设备在线等基础检查，不再自动发验活消息、操作真实审批、切换恢复任务或重启 Agent 应用；报告“已部署，体验由用户验收”，保留实际异常，不能把待用户确认写成通过或失败。用户另行明确要求专项验活时才执行；历史专用任务不等于持续授权。已验收活动基线仍须用户反馈；公开操作按当次明确授权与完整门禁处理，详见 `docs/发布/体验部署与正式发布.md`。
-- **开发提交不等于部署：开发完成须验证、提交并登记，只有用户明确要求集中部署后才实际安装和验活。** 用户明确指出其他 Agent 提交后并不会自然让服务器运行新版本；commit 只是交付物，负责当前任务的 Agent 仍必须实际完成整合、安装和验活，做不到时要明确报告“已提交但尚未部署”，否则会让用户误以为线上已经更新。
+- **开发完成必须自测、提交并合入本地 main，合入不等于部署。** 只留下任务分支会把冲突与遗漏推迟到发版；需求负责人必须完成合流并核验，发布负责人只从 main 发布。只有用户明确要求部署后才安装和验活，未执行时报告“已合入 main，尚未部署”，不能让用户误以为线上已更新。
 - **具备多客户端后端的 CLI Agent 应直接共享一个长期 owner，不能让远程端和电脑 TUI 各自启动独立 ACP。** Grok 已验证可用工作区级 `agent leader` 同时承载 ACP 客户端和可见 TUI；共享 socket、稳定 sessionId 和关闭时清理 owner，才能让手机消息实时出现在电脑终端并避免会话分叉。
 - **对外说明“支持某个 Agent”时必须分别标明原任务继续、电脑端可见和已打开界面实时同步，不能把能读取历史、启动命令或加载 ACP 会话统称为完整支持。** 这些能力对应不同的数据 owner 和同步强度；混写会让用户误以为手机消息一定进入当前桌面窗口，掩盖真实 owner 边界，并重新制造对话分叉风险。
 - **恢复用户明确选择的持久任务失败时必须直接报告不可用，不能自动新建任务或切换到“最近任务”。** 相同界面里静默换成另一个 session 会让用户以为仍在原上下文中继续，实际却已产生不可见分叉；Claude、OpenCode、Grok 和 CodeBuddy 等适配器都要保留原任务身份并让用户决定如何恢复。

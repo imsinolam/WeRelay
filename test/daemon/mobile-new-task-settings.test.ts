@@ -13,7 +13,7 @@ function loadDraftModelRuntime(api: (path: string) => Promise<unknown>, schedule
     function currentTaskModelKey() { return 'draft'; }
     function renderModelControl() {}
     function adapterApiPath(path) { return path; }
-    function applyDraftModelSelection(payload) { return payload; }
+    ${CODEX_MOBILE_APP_JS.slice(CODEX_MOBILE_APP_JS.indexOf("  function applyDraftModelSelection("), CODEX_MOBILE_APP_JS.indexOf("  function draftSettingsSubmitted("))}
     ${CODEX_MOBILE_APP_JS.slice(start, end)}
     return loadCurrentTaskModel;
   `)(state, api, task, schedule);
@@ -128,4 +128,44 @@ test("a stalled catalog request becomes a visible retryable timeout", async () =
   timeout!();
   await loading;
   expect(h.state.taskModels.draft).toMatchObject({loadError:true,unavailableReason:"读取模型超时，请点击重新获取模型。"});
+});
+
+
+test("a new draft reuses its Agent catalog and preserves its own selection on a read failure", async () => {
+  const h = loadDraftModelRuntime(async () => { throw new Error("电脑响应慢"); });
+  h.task.newTaskSettings = { model: "b" };
+  h.state.taskModels["codex\u0000new-task-catalog"] = {
+    options: [{ id: "a" }, { id: "b" }], canChange: true, currentModel: "a", loadedAtMs: 0,
+  };
+  await h.load(false);
+  expect(h.state.taskModels.draft).toMatchObject({ canChange: true, currentModel: "b", stale: true, loadError: false });
+  expect(h.state.taskModels.draft.options).toHaveLength(2);
+});
+
+test("a fresh draft can reuse another same-Agent task's options while refreshing", async () => {
+  const h = loadDraftModelRuntime(async () => { throw new Error("网络暂断"); });
+  h.state.taskModels["codex\u0000existing"] = { options: [{ id: "a" }], canChange: true, currentModel: "a" };
+  h.state.taskModels["pi\u0000existing"] = { options: [{ id: "pi-only" }], canChange: true };
+  await h.load(false);
+  expect(h.state.taskModels.draft).toMatchObject({ options: [{ id: "a" }], canChange: true, currentModel: "", stale: true });
+});
+
+test("a failed catalog is retried on the next refresh instead of being cached as disabled for a minute", async () => {
+  let calls = 0;
+  const h = loadDraftModelRuntime(async () => {
+    if (++calls === 1) throw new Error("暂时断开");
+    return { options: [{ id: "recovered" }], canChange: true };
+  });
+  await h.load(false);
+  expect(h.state.taskModels.draft.loadError).toBe(true);
+  await h.load(false);
+  expect(calls).toBe(2);
+  expect(h.state.taskModels.draft.canChange).toBe(true);
+});
+
+test("new drafts do not borrow model choices from a different Agent", async () => {
+  const h = loadDraftModelRuntime(async () => { throw new Error("暂断"); });
+  h.state.taskModels["pi\u0000existing"] = { options: [{ id: "pi-only" }], canChange: true };
+  await h.load(false);
+  expect(h.state.taskModels.draft).toMatchObject({ options: [], loadError: true, canChange: false });
 });

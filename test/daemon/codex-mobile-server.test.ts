@@ -738,7 +738,7 @@ describe("mobile terminal switcher status", () => {
     expect(CODEX_MOBILE_CSS).toContain("animation: task-dot-breathe");
     expect(CODEX_MOBILE_CSS).toContain(".task-dot.running, .adapter-menu-running-dot");
     expect(CODEX_MOBILE_JS).toContain('deepseek: "DeepSeek Harness"');
-    expect(CODEX_MOBILE_JS).toContain('runningDot.hidden = adapter.status !== "busy";');
+    expect(CODEX_MOBILE_JS).toContain('runningDot.hidden = switching || adapter.status !== "busy";');
     expect(CODEX_MOBILE_JS).toContain("syncCurrentAdapterStatusFromTasks();");
     const loadTasksStart = CODEX_MOBILE_APP_JS.indexOf("  async function loadTasks");
     const loadTasksEnd = CODEX_MOBILE_APP_JS.indexOf("\n  function syncComposerInset", loadTasksStart);

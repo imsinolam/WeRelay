@@ -1,6 +1,6 @@
 {
   "name": "werelay",
-  "version": "1.0.0",
+  "version": "1.0.4",
   "private": true,
   "description": "Extend real desktop coding-agent sessions to WeChat, LAN web, and an optional public relay without forking context",
   "type": "module",
@@ -25,7 +25,14 @@
     "docs/images/werelay-relationship.png",
     "docs/images/werelay-four-panel-white-paper-boy-v10-handoff-comic.png",
     "docs/images/werelay-relationship-simple.svg",
-    "deploy/"
+    "deploy/",
+    "vendor/message-journal/src/parser.mjs",
+    "vendor/message-journal/src/scanner.mjs",
+    "vendor/message-journal/panel/core.mjs",
+    "vendor/message-journal/panel/index.html",
+    "vendor/message-journal/panel/app.js",
+    "vendor/message-journal/panel/panel.css",
+    "vendor/message-journal/provenance.json"
   ],
   "keywords": [
     "wechat",
@@ -90,12 +97,12 @@
   "scripts": {
     "postinstall": "node scripts/ensure-node-pty-permissions.mjs",
     "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
-    "build": "npm run clean && tsc -p tsconfig.build.json",
+    "build": "npm run journal:check && npm run clean && tsc -p tsconfig.build.json",
     "prepack": "npm run typecheck:src && npm run build",
     "lint": "eslint bin scripts src test",
     "lint:fix": "eslint bin src test --fix",
     "typecheck:src": "tsc -p tsconfig.typecheck.src.json --noEmit --pretty false",
-    "quality": "npm run privacy:check && npm run lint && npm run typecheck:src && bun test test && npm run build",
+    "quality": "npm run journal:check && npm run privacy:check && npm run lint && npm run typecheck:src && bun test test && npm run build",
     "smoke:global": "node scripts/smoke-global-install.mjs",
     "setup": "node --no-warnings --experimental-strip-types src/wechat/setup.ts",
     "start": "node --no-warnings --experimental-strip-types src/wechat/wechat-channel.ts",
@@ -139,7 +146,9 @@
     "codebuddy:start": "node --no-warnings --experimental-strip-types src/companion/local-companion-start.ts --adapter codebuddy",
     "reasonix:companion": "node --no-warnings --experimental-strip-types src/companion/local-companion.ts --adapter reasonix",
     "reasonix:start": "node --no-warnings --experimental-strip-types src/companion/local-companion-start.ts --adapter reasonix",
-    "github:publish:server": "node scripts/publish-github-via-server.mjs"
+    "github:publish:server": "node scripts/publish-github-via-server.mjs",
+    "journal:sync": "node scripts/sync-message-journal.mjs",
+    "journal:check": "node scripts/sync-message-journal.mjs --check"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",
@@ -168,9 +177,10 @@
   "overrides": {
     "ip-address": "10.7.4",
     "zod": "4.6.7",
-    "@hono/node-server": "2.1.3",
+    "@hono/node-server": "2.1.6",
     "body-parser": "2.4.0",
     "fast-uri": "3.1.9",
-    "qs": "6.16.1"
+    "qs": "6.16.1",
+    "hono": "4.13.16"
   }
 }

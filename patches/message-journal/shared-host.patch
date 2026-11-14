@@ -1,0 +1,131 @@
+--- a/panel/app.js
++++ b/panel/app.js
+@@ -1,8 +1,8 @@
+ /* Local service UI; only the outer shell talks to Magpie's official bridge. */
+ (function(){
+ 'use strict';
+-const $=id=>document.getElementById(id),C=window.JournalCore,host=window.magpie;
+-if(!window.__JOURNAL_SERVICE__&&!window.__MESSAGE_JOURNAL__){
++const $=id=>document.getElementById(id),C=window.JournalCore,host=window.magpie,journalHost=window.JournalHost;
++if(!journalHost&&!window.__JOURNAL_SERVICE__&&!window.__MESSAGE_JOURNAL__){
+  (async()=>{try{await host?.ready;const options=await host?.options?.get()||{},port=Number(options.port)||34893;
+   location.replace(host?.service||`http://127.0.0.1:${port}/`);
+  }catch(e){$('error').hidden=false;$('error').textContent='本地服务未就绪，请重新打开页面或重载消息日历插件。';}})();return;
+@@ -15,12 +15,12 @@
+ function projectLabels(paths){const counts=new Map();for(const p of paths)counts.set(projectName(p),(counts.get(projectName(p))||0)+1);const seen=new Map();return new Map(paths.map(p=>{const n=projectName(p),i=(seen.get(n)||0)+1;seen.set(n,i);return [p,counts.get(n)>1?`${n} · ${i}`:n];}));}
+ function highlight(node,text){const words=$('query').value.trim().split(/\s+/).filter(Boolean).sort((a,b)=>b.length-a.length);if(!words.length){node.textContent=text;return;}const re=new RegExp(words.map(w=>w.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')).join('|'),'gi');let last=0;for(const m of text.matchAll(re)){node.append(document.createTextNode(text.slice(last,m.index)),el('mark','',m[0]));last=m.index+m[0].length;}node.append(document.createTextNode(text.slice(last)));}
+ function fillSelect(id,values,all,getLabel){const s=$(id),prior=s.value,signature=JSON.stringify([all,...values.map(v=>[v,getLabel(v)])]);if(s.dataset.options===signature)return;s.dataset.options=signature;s.replaceChildren(el('option','',all));s.firstChild.value='';for(const v of values){const o=el('option','',getLabel(v));o.value=v;s.append(o);}s.value=values.includes(prior)?prior:'';}
+-async function api(path,body){if(!window.__JOURNAL_SERVICE__)throw new Error('分类服务未连接，请重新打开插件页面。');const response=await fetch(new URL('api/'+path,location.href),{method:body?'POST':'GET',headers:{'X-Journal-Token':window.__JOURNAL_SERVICE__.token,...body?{'Content-Type':'application/json'}:{}},body:body?JSON.stringify(body):undefined,signal:AbortSignal.timeout(25000)});const result=await response.json();if(!response.ok)throw new Error(result.error||'本地服务请求失败。');return result;}
++async function api(path,body){if(journalHost)return journalHost.request(path,body);if(!window.__JOURNAL_SERVICE__)throw new Error('分类服务未连接，请重新打开插件页面。');const response=await fetch(new URL('api/'+path,location.href),{method:body?'POST':'GET',headers:{'X-Journal-Token':window.__JOURNAL_SERVICE__.token,...body?{'Content-Type':'application/json'}:{}},body:body?JSON.stringify(body):undefined,signal:AbortSignal.timeout(25000)});const result=await response.json();if(!response.ok)throw new Error(result.error||'本地服务请求失败。');return result;}
+ function error(message){$('error').textContent=message;$('error').hidden=!message;}
+ function filters(){return {query:$('query').value,agent:$('agent').value,project:projectChoice(),from:selectedDate,to:selectedDate};}
+ function projectChoice(){const select=$('project'),value=select.value;if(!value)return '';return [...select.children].some(o=>o.value===value)?value:'';}
+ function chooseDate(date,mode='custom'){if(!C.shiftDay(date))return;selectedDate=date;dayMode=mode;limits.clear();closeDetail(false);render();resetView();}
+-function receive(next){if(!Array.isArray(next?.messages))throw new Error('本地索引格式无效。');const changed=!data||next.generatedAt!==data.generatedAt||JSON.stringify(next.messages.map(C.messageIdentity))!==JSON.stringify(data.messages.map(C.messageIdentity))||JSON.stringify(Object.entries(next.classifications||{}).map(([p,c])=>[p,c.updatedAt]))!==JSON.stringify(Object.entries(data.classifications||{}).map(([p,c])=>[p,c.updatedAt]));data=next;fillSelect('agent',[...new Set(data.messages.map(m=>m.agent))].sort(),'全部 Agent',label);$('updated').textContent=`最近 ${data.lookbackDays||30} 天 · ${data.generatedAt?stamp(data.generatedAt)+' 更新':'等待更新'}`;
++function receive(next){if(!Array.isArray(next?.messages))throw new Error('本地索引格式无效。');const changed=!data||next.loading!==data.loading||next.generatedAt!==data.generatedAt||JSON.stringify(next.messages.map(C.messageIdentity))!==JSON.stringify(data.messages.map(C.messageIdentity))||JSON.stringify(Object.entries(next.classifications||{}).map(([p,c])=>[p,c.updatedAt]))!==JSON.stringify(Object.entries(data.classifications||{}).map(([p,c])=>[p,c.updatedAt]));data=next;fillSelect('agent',[...new Set(data.messages.map(m=>m.agent))].sort(),'全部 Agent',label);$('updated').textContent=`最近 ${data.lookbackDays||30} 天 · ${data.generatedAt?stamp(data.generatedAt)+' 更新':'等待更新'}`;
+  const statuses={ok:'已读取',missing:'未发现日志',disabled:'未获授权',error:'读取失败'};$('source-list').replaceChildren();for(const s of data.sources||[])$('source-list').append(el('span','source',`${label(s.agent)}：${statuses[s.status]||s.status} · ${s.messages||0} 条${s.errors?' · 部分读取失败':''}`));
+  error(data.error||((data.sources||[]).some(s=>s.errors||s.malformed)?'部分日志被跳过，见右上角“数据详情”。':''));if(changed)render({keepDate:true,keepView:true});updateClassifier();
+  if(dayMode!=='custom'&&selectedDate!==C.shiftDay(C.dayKey(Date.now()),dayMode==='yesterday'?-1:0))render({keepView:true});}
+@@ -32,7 +32,7 @@
+  $('summary').textContent=data?.loading?'首次索引正在生成…':`${selectedDate} · ${filtered.length} 条消息 · ${paths.length} 个项目`;
+  $('list').replaceChildren();$('canvas-empty').hidden=!!paths.length;$('canvas-empty').textContent=hasFilter||f.project?'没有匹配消息，试试重置筛选。':'这一天没有用户消息，试试昨日或指定日期。';
+  for(const [i,p]of paths.entries()){const messages=filtered.filter(m=>(m.project||'')===p.path),classification=data?.classifications?.[p.path],node=el('section','project-node');node.dataset.project=p.path;node.dataset.x=String(i*360);node.style.left=`${i*360}px`;node.style.top='0px';node.setAttribute('aria-label',names.get(p.path));
+-  const head=el('header','project-head'),toggle=el('button','project-toggle',names.get(p.path)),count=el('span','project-count',`${messages.length} 条`),classify=el('button','classify-button',classification?.tasks?.length?'整理任务':'任务分类');toggle.type=classify.type='button';const pk='p:'+p.path;toggle.setAttribute('aria-expanded',String(!folded.has(pk)));head.append(toggle,count,classify);node.append(head);const content=el('div','project-content');content.hidden=folded.has(pk);node.append(content);toggle.addEventListener('click',()=>{content.hidden=!content.hidden;toggle.setAttribute('aria-expanded',String(!content.hidden));content.hidden?folded.add(pk):folded.delete(pk);});classify.addEventListener('click',()=>openClassifier(p.path,classify));
++  const head=el('header','project-head'),toggle=el('button','project-toggle',names.get(p.path)),count=el('span','project-count',`${messages.length} 条`),classify=el('button','classify-button',classification?.tasks?.length?'整理任务':'任务分类');toggle.type=classify.type='button';classify.hidden=journalHost?.readOnly===true;const pk='p:'+p.path;toggle.setAttribute('aria-expanded',String(!folded.has(pk)));head.append(toggle,count,classify);node.append(head);const content=el('div','project-content');content.hidden=folded.has(pk);node.append(content);toggle.addEventListener('click',()=>{content.hidden=!content.hidden;toggle.setAttribute('aria-expanded',String(!content.hidden));content.hidden?folded.add(pk):folded.delete(pk);});classify.addEventListener('click',()=>openClassifier(p.path,classify));
+   for(const branch of C.taskBranches(messages,classification,$('order').value)){
+    if(!branch.id){content.append(makeStream(branch.messages,pk,p.path,null));continue;}
+    const tree=el('section','task-branch'),btn=el('button','task-toggle'),title=el('span','task-name',branch.title),n=el('span','task-count',String(branch.messages.length));btn.type='button';btn.append(title,n);const tk=pk+':'+branch.id,body=el('div','task-content');body.hidden=folded.has(tk);btn.setAttribute('aria-expanded',String(!body.hidden));btn.addEventListener('click',()=>{body.hidden=!body.hidden;btn.setAttribute('aria-expanded',String(!body.hidden));body.hidden?folded.add(tk):folded.delete(tk);});
+@@ -63,9 +63,9 @@
+  $('classify-start').disabled=!!running||!pending.length||!$('model').value||!$('classify-consent').checked;$('model').disabled=!!running;$('classify-clear').disabled=!!running;$('classify-cancel').hidden=!running;$('classify-cancel').disabled=job?.status==='cancelling';
+  if(job?.project===classProject){const p=job.progress||{};$('classify-status').textContent=running?`${job.status==='cancelling'?'正在取消':'正在分类'} · 第 ${p.batch||0}/${p.batches||0} 批 · ${p.total||0} 条`:job.status==='done'?`分类已保存 · 仍有 ${pending.length} 条未分类，可继续整理。`:job.error||'';}}
+ async function loadModels(){if(modelLoading)return;modelLoading=true;$('models-reload').disabled=true;try{const result=await api('models');models=result.models||[];fillSelect('model',models.map(m=>m.id),'请选择模型',id=>models.find(m=>m.id===id).name);if(!models.length)$('classify-status').textContent='Magpie 暂无可用模型。';}catch(e){$('classify-status').textContent=e.message;}finally{modelLoading=false;$('models-reload').disabled=false;updateClassifier();}}
+-function openClassifier(project,button){closeDetail(false);closeSources();opener=button;classProject=project;$('classifier').hidden=false;$('classify-consent').checked=false;$('clear-consent').checked=false;$('clear-confirm').hidden=true;$('classify-status').textContent='';updateClassifier();positionFloat($('classifier'),button);$('classifier-title').focus({preventScroll:true});if(!models.length)void loadModels();}
++function openClassifier(project,button){if(journalHost?.readOnly)return;closeDetail(false);closeSources();opener=button;classProject=project;$('classifier').hidden=false;$('classify-consent').checked=false;$('clear-consent').checked=false;$('clear-confirm').hidden=true;$('classify-status').textContent='';updateClassifier();positionFloat($('classifier'),button);$('classifier-title').focus({preventScroll:true});if(!models.length)void loadModels();}
+ async function action(fn){try{await fn();}catch(e){$('classify-status').textContent=e.message;}}
+-async function load(){if(busy)return;busy=true;$('reload').disabled=true;try{receive(window.__JOURNAL_SERVICE__?await api('data'):window.__MESSAGE_JOURNAL__);}catch(e){error(e.message);}finally{busy=false;$('reload').disabled=false;}}
++async function load(){if(busy)return;busy=true;$('reload').disabled=true;try{receive(journalHost||window.__JOURNAL_SERVICE__?await api('data'):window.__MESSAGE_JOURNAL__);}catch(e){error(e.message);}finally{busy=false;$('reload').disabled=false;}}
+ $('query').addEventListener('input',()=>{clearTimeout(debounce);debounce=setTimeout(()=>{closeDetail(false);render();resetView();},160);});for(const id of ['agent','project','order'])$(id).addEventListener('change',()=>{closeDetail(false);render();resetView();});
+ $('prev-day').addEventListener('click',()=>{const target=C.shiftDay(selectedDate,-1);if(target&&!$('prev-day').disabled)chooseDate(target);});$('next-day').addEventListener('click',()=>{const target=C.shiftDay(selectedDate,1);if(target&&!$('next-day').disabled)chooseDate(target);});$('date-label').addEventListener('click',()=>{const input=$('date');try{input.showPicker();}catch{input.focus();input.click();}});$('date').addEventListener('change',()=>chooseDate($('date').value));
+ function syncOrderIcon(){const latest=$('order').value==='desc',button=$('order-toggle');button.setAttribute('aria-pressed',String(latest));button.title=latest?'最新在前（点击改为最早在前）':'最早在前（点击改为最新在前）';button.setAttribute('aria-label',latest?'消息排序：最新在前':'消息排序：最早在前');}
+@@ -85,5 +85,5 @@
+ document.addEventListener('click',e=>{if(suppressClick)return;if(!$('sources').hidden&&!$('sources').contains(e.target)&&!$('sources-toggle').contains(e.target))closeSources();if(!e.target.closest('button,input,select,.floating,.data-popover')){closeDetail(false);closeClassifier(false);}});
+ document.addEventListener('keydown',e=>{if(e.key==='Escape'){e.preventDefault();if(!$('sources').hidden)closeSources(true);else if(!$('classifier').hidden)closeClassifier();else closeDetail();}if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'){e.preventDefault();$('query').focus();}});
+ window.addEventListener?.('resize',()=>{closeDetail(false);closeClassifier(false);});
+-syncOrderIcon();void load();setInterval(()=>{if(!document.hidden)void load();},3000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)void load();});
++syncOrderIcon();void load();setInterval(()=>{if(!document.hidden)void load();},journalHost?.refreshMs||3000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)void load();});
+ })();
+--- a/src/scanner.mjs
++++ b/src/scanner.mjs
+@@ -69,10 +69,10 @@
+   const sources=[],messages=[],dedup=new Set(),visited=new Set();let reads={},permissionError='';
+   try{reads=await (options.getReads||sessionReads)();}catch{permissionError='无法读取 Magpie 会话权限；本次未读取任何消息。';}
+   let metadata={},metadataError='';
+-  if(allowedAgent(reads,'pi-desktop'))try{metadata=await (options.desktopMetadata||desktopMetadata)();}catch{metadataError='无法读取 PI-Desktop 项目数据库（需要 sqlite3）；该来源本次跳过。';}
++  if((options.allowedAgent||allowedAgent)(reads,'pi-desktop'))try{metadata=await (options.desktopMetadata||desktopMetadata)();}catch{metadataError='无法读取 PI-Desktop 项目数据库（需要 sqlite3）；该来源本次跳过。';}
+   for(const {agent,root} of roots){
+    const source={agent,files:0,parsed:0,messages:0,errors:0,malformed:0,status:'ok'};sources.push(source);
+-   if(!allowedAgent(reads,agent)){source.status='disabled';continue;}
++   if(!(options.allowedAgent||allowedAgent)(reads,agent)){source.status='disabled';continue;}
+    if(agent==='pi-desktop'&&metadataError){source.status='error';source.error=metadataError;continue;}
+    const files=[];
+    try{await walk(root,files);}catch(e){source.status=e.code==='ENOENT'?'missing':'error';source.error=e.code==='ENOENT'?'未发现日志目录':'日志目录无法读取';continue;}
+--- a/tests/panel.test.mjs
++++ b/tests/panel.test.mjs
+@@ -19,12 +19,12 @@
+ }
+ function descendants(n){return n.children.flatMap(c=>[c,...descendants(c)]);}
+ const byClass=(n,c)=>descendants(n).filter(x=>x.className===c);
+-async function boot(messages,classifications={}){
++async function boot(messages,classifications={},journalHost=null){
+  const html=await readFile(new URL('index.html',panel),'utf8'),nodes=Object.fromEntries([...html.matchAll(/\bid="([^"]+)"/g)].map(([,id])=>[id,new Element()]));
+  for(const [,id]of html.matchAll(/\bid="([^"]+)"[^>]*\bhidden/g))nodes[id].hidden=true;
+  nodes.order.value='asc';const data={generatedAt:Date.now(),messages,classifications,sources:[]},events={};
+  const document={hidden:false,getElementById:id=>nodes[id],createElement:t=>new Element(t),createTextNode:text=>{const n=new Element();n.textContent=text;return n;},addEventListener(k,fn){events[k]=fn;}};
+- const context=vm.createContext({document,console,setTimeout:fn=>{fn();return 1;},clearTimeout(){},setInterval(){},Date});context.window={innerWidth:1280,innerHeight:800,magpie:{ready:Promise.resolve()},__MESSAGE_JOURNAL__:data};
++ const context=vm.createContext({document,console,setTimeout:fn=>{fn();return 1;},clearTimeout(){},setInterval(){},Date});context.window={innerWidth:1280,innerHeight:800,magpie:{ready:Promise.resolve()},...(journalHost?{JournalHost:journalHost}:{__MESSAGE_JOURNAL__:data})};
+  vm.runInContext(await readFile(new URL('core.js',panel),'utf8'),context);vm.runInContext(await readFile(new URL('app.js',panel),'utf8'),context);await new Promise(r=>setImmediate(r));return{nodes,data,events};
+ }
+ const noon=()=>{const d=new Date();d.setHours(12,0,0,0);return+d;};
+@@ -146,3 +146,19 @@
+  const models=byClass(nodes.list,'bubble-model');assert.equal(models.length,1);assert.equal(models[0].title,'vendor/model-a');assert.equal(byClass(nodes.list,'bubble-agent').length,2);
+  const css=await readFile(new URL('panel.css',panel),'utf8');assert.match(css,/\.bubble-model\{[^}]*color:var\(--j-muted\)/);assert.match(css,/\.bubble-model\{[^}]*text-overflow:ellipsis/);
+ });
++
++test('shared host contract reads through host API and hides classification in read-only mode',async()=>{
++ const app=await readFile(new URL('app.js',panel),'utf8');
++ assert.match(app,/journalHost=window.JournalHost/);
++ assert.match(app,/if\(journalHost\)return journalHost.request\(path,body\)/);
++ assert.match(app,/classify.hidden=journalHost\?\.readOnly===true/);
++ assert.match(app,/if\(journalHost\?\.readOnly\)return/);
++});
++
++ test('shared host renders data without Magpie or a local service token',async()=>{
++ const calls=[],message=m('shared',noon());
++ const {nodes}=await boot([],{}, {readOnly:true,request:async(path)=>{calls.push(path);return {generatedAt:1,messages:[message],sources:[]};}});
++ assert.deepEqual(calls,['data']);assert.match(nodes.summary.textContent,/1 条消息/);
++ const buttons=byClass(nodes.list,'classify-button');assert.equal(buttons.length,1);assert.equal(buttons[0].hidden,true);
++ buttons[0].events.click();assert.equal(nodes.classifier.hidden,true);assert.deepEqual(calls,['data']);
++ });
+--- a/tests/scanner.test.mjs
++++ b/tests/scanner.test.mjs
+@@ -32,3 +32,11 @@
+  const result=await scanner.run();assert.equal(result.messages.length,1);assert.equal(result.messages[0].text,'new');
+  }finally{await rm(dir,{recursive:true,force:true});}
+ });
++
++ test('a host can authorize Pi and PI-Desktop independently without reading excluded metadata',async()=>{
++ const dir=await mkdtemp(join(tmpdir(),'journal-source-'));try{
++ let metadataReads=0;
++ const scanner=createScanner({roots:[{agent:'pi-desktop',root:dir}],getReads:async()=>({asked:true,all:true}),allowedAgent:(_reads,agent)=>agent==='pi',desktopMetadata:async()=>{metadataReads++;return {};}});
++ const result=await scanner.run();assert.equal(metadataReads,0);assert.equal(result.sources[0].status,'disabled');
++ }finally{await rm(dir,{recursive:true,force:true});}
++ });
+--- a/README.md
++++ b/README.md
+@@ -105,0 +106,6 @@
++
++## 任务台复用
++
++画布支持可选的 `window.JournalHost = { request(path, body), readOnly, refreshMs }` 宿主接口；未提供时继续使用原有 Magpie 服务。`readOnly:true` 隐藏并禁用分类入口，浏览和搜索仍使用同一份画布代码。扫描器也可注入 `allowedAgent(reads, agent)`，供其他宿主使用独立来源授权；Magpie 默认权限规则保持不变。
++
++DeskRelay 构建时通过白名单同步本项目的解析、扫描、纯函数、画布与样式，并记录内容哈希；私人索引和分类不参与同步。源码更新在任务台下一次构建和正式发布后生效，不会直接热更新正在运行的服务。

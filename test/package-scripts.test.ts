@@ -110,7 +110,8 @@ describe("package quality scripts", () => {
     const npmLock = JSON.parse(fs.readFileSync(path.join(root, "package-lock.json"), "utf8"));
     const bunLock = fs.readFileSync(path.join(root, "bun.lock"), "utf8");
     for (const [name, version] of Object.entries({
-      "@hono/node-server": "2.1.3",
+      "@hono/node-server": "2.1.6",
+      hono: "4.13.16",
       "body-parser": "2.4.0",
       "fast-uri": "3.1.9",
       qs: "6.16.1",

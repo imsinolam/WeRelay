@@ -5994,3 +5994,4 @@ test("new task model choices read only the catalog without opening or creating a
   expect(await adapter.getNewSessionModelState()).toMatchObject({currentModel:"model-a",canChange:true,currentReasoningEffort:"medium",canChangeReasoningEffort:true});
   expect(calls).toEqual(["model/list"]);
 });
+

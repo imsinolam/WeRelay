@@ -34,3 +34,6 @@ bin/*.mjs text eol=lf
 *.docx binary
 *.xlsx binary
 bun.lockb binary
+
+# Reviewed snapshot digests must stay byte-identical on Windows checkouts.
+vendor/message-journal/** text eol=lf

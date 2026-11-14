@@ -13,13 +13,17 @@ export class ChatElement {
   value = "";
   title = "";
   id = "";
-  style: Record<string, string> = {};
+  style: Record<string, string>;
+  styleHistory: Record<string, string>[] = [];
   dataset: Record<string, string> = {};
   attributes: Record<string, string> = {};
   listeners = new Map<string, Set<(event: any) => void>>();
   ownerDocument: any;
   offsetHeight = 100;
-  scrollHeight = 30;
+  contentHeight = 30;
+  scrollTop = 0;
+  selectionStart = 0;
+  selectionEnd = 0;
   isConnected = true;
   html = "";
   classList = {
@@ -49,24 +53,68 @@ export class ChatElement {
   querySelector(_selector: string): ChatElement | null { return null; }
   querySelectorAll(_selector: string): ChatElement[] { return []; }
   getClientRects() { return [{}]; }
+  remove() { this.isConnected = false; }
+  get clientHeight() {
+    const height = Number.parseFloat(this.style.height);
+    return Number.isFinite(height) ? height : this.offsetHeight;
+  }
+  get computedHeight() {
+    const height = Number.parseFloat(this.style.height);
+    return Number.isFinite(height) ? this.style.height : "auto";
+  }
+  get scrollHeight() {
+    return this.contentHeight;
+  }
+  set scrollHeight(value: number) {
+    this.contentHeight = value;
+  }
   all(): ChatElement[] { return [this, ...this.children.flatMap(child => child.all())]; }
   requestSubmit() { this.emit("submit"); }
+
+  constructor() {
+    this.style = new Proxy({}, {
+      set: (target, key, value) => {
+        target[String(key)] = String(value);
+        this.styleHistory.push({ [String(key)]: String(value) });
+        return true;
+      },
+      deleteProperty: (target, key) => {
+        delete target[String(key)];
+        this.styleHistory.push({ [String(key)]: "" });
+        return true;
+      },
+    });
+  }
 }
 
-export function composerHarness(actions: Record<string, unknown> = {}) {
+export function composerHarness(actions: Record<string, unknown> = {}, nativeSizing = false) {
   const document = new ChatElement();
   const frames = new Map<number, () => void>();
+  const measurements: string[] = [];
   let frameId = 0;
   const window = {
+    CSS: { supports: () => nativeSizing },
     performance: { now: () => 0 },
     matchMedia: () => ({ matches: true }),
-    getComputedStyle: () => ({ width: "20px" }),
+    getComputedStyle: (element: ChatElement | null) => {
+      const result = {
+        boxSizing: "border-box", width: "360px", lineHeight: "24px", paddingTop: "6px", paddingBottom: "6px",
+        borderTopWidth: "0px", borderBottomWidth: "0px", minHeight: "36px", maxHeight: "164px",
+        height: element?.computedHeight || "auto",
+      };
+      if (element) measurements.push(result.height);
+      return result;
+    },
     requestAnimationFrame: (fn: () => void) => { frames.set(++frameId, fn); return frameId; },
     cancelAnimationFrame: (id: number) => frames.delete(id),
   };
   const doc = Object.assign(document, {
     defaultView: window,
-    createElement: () => new ChatElement(), createElementNS: () => new ChatElement(),
+    createElement: (tag: string) => {
+      const element = new ChatElement();
+      if (tag === "textarea") Object.defineProperty(element, "scrollHeight", { get: () => parts.get('[data-chat-part="composer-input"]')?.contentHeight || 36 });
+      return element;
+    }, createElementNS: () => new ChatElement(),
   });
   const root = new ChatElement();
   root.ownerDocument = doc;
@@ -76,5 +124,5 @@ export function composerHarness(actions: Record<string, unknown> = {}) {
     return parts.get(selector)!;
   };
   const view = chatUI().createComposer(root, { actions });
-  return { view, root, document: doc, frames, part: (name: string): ChatElement => view.part(name) };
+  return { view, root, document: doc, frames, measurements, part: (name: string): ChatElement => view.part(name) };
 }

@@ -58,6 +58,10 @@ export const CODEX_MOBILE_HTML = `<!doctype html>
         </button>
       </div>
       <nav class="sidebar-primary-nav" aria-label="工作区视图">
+        <a class="sidebar-primary-button" href="/journal/">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="15" rx="2"/><path d="M8 3v4M16 3v4M4 10h16M8 14h2M14 14h2"/></svg>
+          <span>消息日历</span>
+        </a>
         <button class="sidebar-primary-button" id="task-board-open" type="button" aria-pressed="false">
           <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="6" height="16" rx="1.5"/><rect x="14" y="4" width="6" height="9" rx="1.5"/></svg>
           <span>任务看板</span>
@@ -456,7 +460,8 @@ button:focus-visible { outline: 2px solid var(--border-strong); outline-offset: 
 .auth-hint { margin-top: 18px !important; font-size: 12px !important; text-align: center; }
 svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
 
-.app-shell { display: grid; grid-template-columns: 260px minmax(0, 1fr); width: 100%; height: 100dvh; }
+.app-shell { display: grid; grid-template-columns: 260px minmax(0, 1fr); width: 100%; height: var(--mobile-viewport-height, 100dvh); }
+.app-shell.mobile-viewport-override { position: relative; top: var(--mobile-viewport-offset, 0px); }
 .sidebar {
   height: 100%;
   min-height: 0;
@@ -487,7 +492,7 @@ svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.75; stro
 .icon-button:active { background: #dfdfdf; }
 .sidebar-close { display: none; margin-left: auto; }
 .sidebar-primary-nav { flex: 0 0 auto; margin: 0 2px 8px; }
-.sidebar-primary-button {
+.sidebar-primary-button { text-decoration: none;
   width: 100%;
   min-height: 38px;
   display: grid;
@@ -692,7 +697,7 @@ svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.75; stro
 .task-project[hidden] { display: none; }
 .sidebar-overlay { display: none; }
 
-.main-panel { position: relative; min-width: 0; display: flex; flex-direction: column; height: 100dvh; overflow: hidden; background: var(--page); }
+.main-panel { position: relative; min-width: 0; display: flex; flex-direction: column; height: var(--mobile-viewport-height, 100dvh); overflow: hidden; background: var(--page); }
 .topbar {
   height: 52px;
   flex: 0 0 auto;
@@ -712,22 +717,24 @@ svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.75; stro
 .topbar-meta[hidden] { display: none; }
 .topbar-title + .topbar-meta::before { content: "·"; margin-right: 7px; color: var(--border-strong); }
 @keyframes switch-spin { to { transform: rotate(360deg); } }
-.adapter-menu { display: flex; flex: 0 0 auto; flex-wrap: nowrap; align-items: flex-start; gap: 4px; min-width: 0; margin: 0 2px 10px; padding: 3px 1px 7px; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
+.adapter-menu { display: flex; flex: 0 0 auto; flex-wrap: nowrap; align-items: center; gap: 4px; min-width: 0; margin: 0 2px 8px; padding: 4px 3px 6px; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; scrollbar-width: none; }
+.adapter-menu::-webkit-scrollbar { display: none; }
 .adapter-menu.has-more { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 36px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 36px), transparent); }
-.adapter-menu-item { position: relative; flex: 0 0 calc((100% - 12px) / 3.5); min-width: 0; min-height: 0; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 7px 4px 8px; border: 0; border-radius: 9px; background: transparent; color: var(--muted-strong); font: inherit; cursor: pointer; }
-.adapter-menu-icon { position: relative; display: grid; place-items: center; width: 38px; height: 38px; flex: 0 0 auto; border-radius: 8px; background: #fff; }
-.adapter-menu-icon img { display: block; width: 34px; height: 34px; object-fit: contain; }
-.adapter-menu-label { display: block; width: calc(100% + 8px); margin-inline: -4px; white-space: normal; word-break: normal; overflow-wrap: normal; hyphens: none; text-align: center; font-size: 10px; font-weight: 500; line-height: 13px; }
-.adapter-menu-running-dot { position: absolute; right: -2px; bottom: -2px; width: 6px; height: 6px; border-radius: 50%; background: var(--green); animation: task-dot-breathe 1.6s ease-in-out infinite; }
-.adapter-menu-item:hover { background: var(--surface-hover); color: var(--text); }
-.adapter-menu-item.is-active { color: var(--text); }
-.adapter-menu-item.is-active .adapter-menu-icon { background: var(--surface-selected); box-shadow: inset 0 0 0 1px var(--border); }
-.adapter-menu-item.is-active .adapter-menu-label { font-weight: 600; }
-.adapter-menu-item.is-active:hover { background: var(--surface-hover); }
-.adapter-menu-item:focus-visible { outline: 2px solid var(--green); outline-offset: 1px; }
-.adapter-menu-item:disabled { cursor: wait; }
+.adapter-menu-item { position: relative; flex: 0 0 44px; min-width: 44px; width: 44px; height: 44px; min-height: 44px; display: grid; place-items: center; padding: 3px 6px 9px; border: 0; border-radius: 8px; background: transparent; color: var(--muted-strong); font: inherit; cursor: pointer; transition: background .15s ease; }
+.adapter-menu-icon { position: relative; display: grid; place-items: center; width: 32px; height: 32px; flex: 0 0 auto; border-radius: 7px; background: #fff; color: #212529; }
+.adapter-menu-icon img { display: block; width: 30px; height: 30px; object-fit: contain; }
+.adapter-menu-running-dot { position: absolute; right: 0; bottom: 0; width: 5px; height: 5px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 2px var(--sidebar); animation: task-dot-breathe 1.6s ease-in-out infinite; }
+@media (hover: hover) { .adapter-menu-item:not(:disabled):hover { background: var(--surface-hover); color: var(--text); } }
+.adapter-menu-item.is-active { background: transparent; color: var(--text); }
+.adapter-menu-item.is-active::before { content: ""; position: absolute; width: 14px; height: 2px; bottom: 1px; left: 50%; transform: translateX(-50%); border-radius: 2px; background: var(--muted-strong); }
+.adapter-menu-item[data-adapter-id="deepseek"] .adapter-menu-icon { background: #fff; }
+.adapter-menu-item:not(:disabled):active { background: var(--surface-hover); }
+.adapter-menu-item:focus-visible { outline: 2px solid var(--green); outline-offset: 0; }
+.adapter-menu-item:disabled { cursor: progress; }
+.adapter-menu-item:disabled:not(.is-switching) { opacity: 1; }
+.adapter-menu-item.is-switching { background: transparent; }
 .adapter-menu-item.is-switching .adapter-menu-icon::after { content: ""; position: absolute; inset: -3px; border: 1.5px solid var(--border); border-top-color: var(--green); border-radius: 50%; animation: switch-spin .8s linear infinite; }
-@media (prefers-reduced-motion: reduce) { .adapter-menu-item.is-switching .adapter-menu-icon::after { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .adapter-menu-item { transition: none; } .adapter-menu-item.is-switching .adapter-menu-icon::after, .adapter-menu-running-dot { animation: none; } }
 .topbar-actions { flex: 0 0 auto; height: 100%; display: flex; flex-wrap: nowrap; align-items: center; gap: 4px; }
 .cache-sync-slot { width: 0; height: 100%; flex: 0 0 auto; display: flex; align-items: center; justify-content: flex-end; overflow: hidden; }
 .cache-sync-indicator { height: 24px; display: inline-flex; align-items: center; gap: 5px; padding: 0 7px; border-radius: 999px; color: var(--muted); background: var(--surface); font-size: 11px; line-height: 1; white-space: nowrap; }
@@ -1355,7 +1362,7 @@ ${CHILD_TASK_LINKS_JS}
       state.composerRevision += 1;
       if (state.nativeComposerDraft) state.nativeComposerDraft.awaitingValidation = false;
       if (!state.editingQueuedMessageId) saveComposerDraft(state.currentAdapter, state.currentThreadId);
-      resizeComposer();
+      updateHeader();
     },
     onEscape: function (event) {
       if (state.editingQueuedMessageId) { event.preventDefault(); cancelQueuedMessageEdit(); }
@@ -1422,6 +1429,7 @@ ${CHILD_TASK_LINKS_JS}
     currentAdapter: "codex",
     switchingAdapter: false,
     switchingAdapterId: "",
+    switchingFromAdapterId: "",
     switchStartedAtMs: 0,
     adapterError: "",
     adapterConnectionNotice: null,
@@ -1539,6 +1547,7 @@ ${CHILD_TASK_LINKS_JS}
     prewarmIdleHandle: null,
     prewarmRunId: 0,
     runClockTimer: null,
+    sidebarActivityTimer: null,
     appUpdateChecking: false,
     lastAppVersionCheckAtMs: 0,
     connectionMode: "unknown",
@@ -1840,6 +1849,7 @@ ${CHILD_TASK_LINKS_JS}
       "threadId", "title", "status", "lastUpdatedAt", "startedAtMs", "completedAt",
       "completedAtMs", "durationMs", "activeTurnId", "selected", "projectId",
       "projectName", "projectOrder", "projectThreadOrder", "canRename",
+      "recentMessageCount", "activityObservedAt",
       "canCreateInProject", "canCreateTask", "localCreationState", "localCreationError",
       "localSourceThreadId", "newTaskSettings"
     ].forEach(function (key) {
@@ -2397,6 +2407,7 @@ ${CHILD_TASK_LINKS_JS}
       return false;
     }
     state.appStarted = true;
+    startSidebarActivityRefresh();
     state.boardView = pageUrl.searchParams.get("board") === "completed"
       ? "completed"
       : "active";
@@ -2568,7 +2579,8 @@ ${CHILD_TASK_LINKS_JS}
     try {
       var payload = await api(adapterApiPath("/api/tasks/" + encodeURIComponent(threadId) + "/composer-draft", adapter), { cache: "no-store" });
       if (request !== state.nativeComposerDraftRequest || adapter !== state.currentAdapter || threadId !== state.currentThreadId ||
-          editRevision !== state.composerRevision || textBeforeRead !== composerInput.value || state.editingQueuedMessageId || state.preparingMessage) return;
+          editRevision !== state.composerRevision || textBeforeRead !== composerInput.value || state.editingQueuedMessageId || state.preparingMessage ||
+          document.activeElement === composerInput) return;
       if (!payload || !payload.supported) return;
       var incoming = payload.draft;
       if (incoming && (typeof incoming.text !== "string" || typeof incoming.revision !== "string")) return;
@@ -3709,6 +3721,8 @@ ${CHILD_TASK_LINKS_JS}
 
   function renderAdapterMenu() {
     updateActiveDocumentTitle();
+    var activeAdapterId = state.switchingAdapter && state.switchingFromAdapterId
+      ? state.switchingFromAdapterId : state.currentAdapter;
     var previousAdapter = adapterMenu.dataset.activeAdapter;
     var previousOrder = Array.from(adapterMenu.children).map(function (button) {
       return button.dataset.adapterId;
@@ -3720,7 +3734,7 @@ ${CHILD_TASK_LINKS_JS}
       if (!state.adapters.some(function (adapter) { return adapter.id === button.dataset.adapterId; })) button.remove();
     });
     state.adapters.forEach(function (adapter, index) {
-      var active = adapter.id === state.currentAdapter;
+      var active = adapter.id === activeAdapterId;
       var switching = state.switchingAdapter && adapter.id === state.switchingAdapterId;
       var button = buttons[adapter.id];
       if (!button) {
@@ -3737,11 +3751,9 @@ ${CHILD_TASK_LINKS_JS}
         runningDot.className = "adapter-menu-running-dot";
         icon.appendChild(image);
         icon.appendChild(runningDot);
-        var label = document.createElement("span");
-        label.className = "adapter-menu-label";
         button.appendChild(icon);
-        button.appendChild(label);
         button.addEventListener("click", function () {
+          if (button.disabled) return;
           void switchAdapter(adapter.id);
         });
       }
@@ -3752,19 +3764,18 @@ ${CHILD_TASK_LINKS_JS}
       var status = switching ? "切换中" : adapterStateLabel(adapter.status);
       button.title = adapter.label + (active ? " · 当前" : "") + (status ? " · " + status : "");
       button.setAttribute("aria-label", button.title);
-      button.querySelector(".adapter-menu-label").textContent = adapter.label;
       var runningDot = button.querySelector(".adapter-menu-running-dot");
-      runningDot.hidden = adapter.status !== "busy";
+      runningDot.hidden = switching || adapter.status !== "busy";
       if (adapterMenu.children[index] !== button) adapterMenu.insertBefore(button, adapterMenu.children[index] || null);
     });
     if (focusedId && buttons[focusedId] && document.activeElement !== buttons[focusedId] && !buttons[focusedId].disabled) {
       buttons[focusedId].focus({ preventScroll: true });
     }
-    adapterMenu.dataset.activeAdapter = state.currentAdapter;
+    adapterMenu.dataset.activeAdapter = activeAdapterId;
     var nextOrder = Array.from(adapterMenu.children).map(function (button) {
       return button.dataset.adapterId;
     }).join("\u0000");
-    if (previousAdapter !== state.currentAdapter || previousOrder !== nextOrder) {
+    if (previousAdapter !== activeAdapterId || previousOrder !== nextOrder || state.switchingAdapter) {
       requestAnimationFrame(revealActiveAdapter);
     }
     updateAdapterScrollFade();
@@ -3775,7 +3786,7 @@ ${CHILD_TASK_LINKS_JS}
   }
 
   function revealActiveAdapter() {
-    var button = adapterMenu.querySelector(".is-active");
+    var button = adapterMenu.querySelector(".is-switching") || adapterMenu.querySelector(".is-active");
     if (!button || !adapterMenu.clientWidth) return;
     var left = button.offsetLeft - adapterMenu.offsetLeft;
     var centered = left - (adapterMenu.clientWidth - button.offsetWidth) / 2;
@@ -3792,6 +3803,16 @@ ${CHILD_TASK_LINKS_JS}
     }
     renderAdapterMenu();
     return payload;
+  }
+
+  function startSidebarActivityRefresh() {
+    if (state.sidebarActivityTimer) return;
+    // Reuse cached tasks and existing DOM nodes; no global loader or transcript scan.
+    state.sidebarActivityTimer = setInterval(function () {
+      if (!state.authenticated || document.hidden || state.cachePreviewMode || state.switchingAdapter || state.creatingTask) return;
+      if (state.taskView === "projects") renderTasks();
+      void loadAdapters().catch(function () {});
+    }, 5 * 60 * 1000);
   }
 
   function currentTaskModelKey() {
@@ -4048,7 +4069,7 @@ ${CHILD_TASK_LINKS_JS}
     if (!visible || !canChange) closeModelMenu();
     composerView.renderModel({
       key: currentTaskModelKey(), visible: visible, open: state.modelMenuOpen, canChange: canChange,
-      retry: Boolean(modelState && modelState.loadError), changing: false,
+      retry: Boolean(modelState && (modelState.loadError || taskNeedsCreation(currentTask()) && !canChange)), changing: false,
       value: currentModel, options: options, activeGroup: state.activeModelGroup,
       label: currentOption && currentOption.label || currentModel ||
         (modelState && modelState.loadError ? "重新获取模型" : !modelState ? "获取中" : "选择模型"),
@@ -4112,7 +4133,25 @@ ${CHILD_TASK_LINKS_JS}
       return null;
     }
     var key = currentTaskModelKey();
+    var draft = taskNeedsCreation(currentTask());
+    var catalogKey = state.currentAdapter + "\u0000new-task-catalog";
     var cached = state.taskModels[key];
+    // 新任务复用同一 Agent 已确认的目录；草稿选择仍各自保存，不继承其他任务的选择。
+    if (draft && (!cached || !cached.options || !cached.options.length)) {
+      var catalog = state.taskModels[catalogKey];
+      if (!catalog || !catalog.canChange || !catalog.options || !catalog.options.length) {
+        var prefix = state.currentAdapter + "\u0000";
+        Object.keys(state.taskModels).some(function (entryKey) {
+          var entry = state.taskModels[entryKey];
+          if (entryKey.indexOf(prefix) !== 0 || !entry || !entry.canChange || !entry.options || !entry.options.length) return false;
+          catalog = Object.assign({}, entry, { currentModel: "", currentReasoningEffort: "", loadedAtMs: 0, stale: true });
+          return true;
+        });
+      }
+      if (catalog && catalog.options && catalog.options.length) {
+        cached = state.taskModels[key] = Object.assign({}, applyDraftModelSelection(catalog, currentTask().newTaskSettings));
+      }
+    }
     renderModelControl();
     var reusingStaleInFlight = state.modelRequestInFlight && state.modelRequestKey === key;
     if (reusingStaleInFlight) {
@@ -4120,7 +4159,7 @@ ${CHILD_TASK_LINKS_JS}
     }
     var awaitingSentSettings = state.sentTaskSettings && state.sentTaskSettings[key];
     var modelCacheTtlMs = awaitingSentSettings ? 5000 : 60000;
-    if (!force && cached && Date.now() - Number(cached.loadedAtMs || 0) < modelCacheTtlMs) {
+    if (!force && cached && !cached.loadError && !cached.stale && Date.now() - Number(cached.loadedAtMs || 0) < modelCacheTtlMs) {
       return cached;
     }
     var requestId = ++state.modelRequestId;
@@ -4131,7 +4170,6 @@ ${CHILD_TASK_LINKS_JS}
     var modelAbort = new AbortController();
     var modelTimeout;
     try {
-      var draft = taskNeedsCreation(currentTask());
       var path = adapterApiPath(draft ? "/api/new-task/model" : "/api/tasks/" + encodeURIComponent(state.currentThreadId) + "/model");
       var payload = await Promise.race([
         api(path, { cache: "no-store", signal: modelAbort.signal }),
@@ -4147,7 +4185,14 @@ ${CHILD_TASK_LINKS_JS}
         requestedAdapter !== state.currentAdapter ||
         requestedThreadId !== state.currentThreadId
       ) return null;
-      if (draft) payload = applyDraftModelSelection(payload, currentTask().newTaskSettings);
+      if (draft) {
+        if (payload && payload.canChange && Array.isArray(payload.options) && payload.options.length) {
+          state.taskModels[catalogKey] = Object.assign({}, payload, { loadedAtMs: Date.now() });
+        } else if (cached && cached.options && cached.options.length) {
+          payload = Object.assign({}, cached, { stale: true, staleReason: payload && payload.unavailableReason || "模型目录暂时不可用" });
+        }
+        payload = applyDraftModelSelection(payload, currentTask().newTaskSettings);
+      }
       else if (payload && payload.stale) {
         payload = Object.assign({}, cached || {}, payload, {
           loadError: false,
@@ -4171,7 +4216,7 @@ ${CHILD_TASK_LINKS_JS}
         requestedThreadId === state.currentThreadId
       ) {
         state.taskModels[key] = cached && Array.isArray(cached.options) && cached.options.length
-          ? Object.assign({}, cached, {
+          ? Object.assign({}, draft ? applyDraftModelSelection(cached, currentTask().newTaskSettings) : cached, {
               loadError: false,
               stale: true,
               staleReason: error.message || "电脑暂时没响应，显示上次缓存。"
@@ -4469,8 +4514,11 @@ ${CHILD_TASK_LINKS_JS}
     }
     saveCurrentConversationSnapshot();
     rememberCurrentTaskSnapshot();
+    var previousAdapterId = state.currentAdapter;
+    var previousThreadId = state.currentThreadId;
     state.switchingAdapter = true;
     state.switchingAdapterId = adapterId;
+    state.switchingFromAdapterId = previousAdapterId;
     state.switchStartedAtMs = Date.now();
     state.currentAdapter = adapterId;
     resetTaskStateForAdapterSwitch();
@@ -4490,6 +4538,7 @@ ${CHILD_TASK_LINKS_JS}
         { method: "POST" }
       );
       state.currentAdapter = result.activeAdapter || adapterId;
+      state.switchingFromAdapterId = state.currentAdapter;
       if (state.currentAdapter !== adapterId) {
         resetTaskStateForAdapterSwitch();
         restoreCachedAdapterState(state.currentAdapter, "");
@@ -4506,11 +4555,24 @@ ${CHILD_TASK_LINKS_JS}
       updateHeader();
       showToast("切换失败：" + (error.message || "请稍后重试"));
       await loadAdapters().catch(function () {});
+      // Keep the confirmed terminal selected when a connection attempt fails.
+      // The old conversation snapshot was saved before the optimistic switch.
+      if (state.switchingFromAdapterId === previousAdapterId && previousAdapterId !== adapterId) {
+        state.currentAdapter = previousAdapterId;
+        resetTaskStateForAdapterSwitch();
+        restoreCachedAdapterState(previousAdapterId, previousThreadId);
+        syncLiveSubscriptions();
+        canonicalUrl.searchParams.set("adapter", previousAdapterId);
+        if (previousThreadId) canonicalUrl.searchParams.set("task", previousThreadId);
+        else canonicalUrl.searchParams.delete("task");
+        history.replaceState(null, "", canonicalUrl.pathname + canonicalUrl.search + canonicalUrl.hash);
+      }
       return false;
     } finally {
       state.switchingAdapter = false;
       renderMessages(false);
       state.switchingAdapterId = "";
+      state.switchingFromAdapterId = "";
       state.switchStartedAtMs = 0;
       renderAdapterMenu();
       renderTasks();
@@ -4616,6 +4678,7 @@ ${CHILD_TASK_LINKS_JS}
     var shouldValidateCachedContent = Boolean(resumedCachedPreview || restoredCache);
     var needsInitialTask = firstStart || !state.currentThreadId;
     state.appStarted = true;
+    startSidebarActivityRefresh();
     if (!state.runClockTimer) {
       state.runClockTimer = setInterval(updateRunHeaderClock, 1000);
     }
@@ -5527,7 +5590,39 @@ ${CHILD_TASK_LINKS_JS}
     syncChildOrder(taskList, nodes);
   }
 
+  function projectActivityByKey(tasks, nowMs) {
+    var activity = Object.create(null);
+    var cutoffMs = nowMs - 24 * 60 * 60 * 1000;
+    tasks.forEach(function (task) {
+      var key = taskGroupKey(task);
+      var entry = activity[key] || (activity[key] = { recentMessageCount: 0, latestAtMs: 0, recent: false });
+      var updatedAtMs = taskRecencyMs(task);
+      if (updatedAtMs > nowMs) updatedAtMs = 0;
+      entry.latestAtMs = Math.max(entry.latestAtMs, updatedAtMs);
+      var recent = updatedAtMs > 0 && updatedAtMs >= cutoffMs;
+      entry.recent = entry.recent || recent;
+      var observedAtMs = Date.parse(task.activityObservedAt || "");
+      var count = task.recentMessageCount;
+      if (observedAtMs >= cutoffMs && observedAtMs <= nowMs && Number.isSafeInteger(count) && count > 0) {
+        entry.recent = true;
+        entry.recentMessageCount += count;
+      }
+    });
+    return activity;
+  }
+
+  function compareProjectActivity(left, right) {
+    if (left.key === "recent" && right.key !== "recent") return 1;
+    if (right.key === "recent" && left.key !== "recent") return -1;
+    var a = left.activity;
+    var b = right.activity;
+    return Number(b.recent) - Number(a.recent) ||
+      (a.recent && b.recent ? b.recentMessageCount - a.recentMessageCount : 0) ||
+      b.latestAtMs - a.latestAtMs || left.firstTaskIndex - right.firstTaskIndex;
+  }
+
   function renderProjectTasks(filtered, searching) {
+    var activity = projectActivityByKey(state.tasks, Date.now());
     var groupByKey = Object.create(null);
     var groups = [];
     filtered.forEach(function (task, taskIndex) {
@@ -5538,17 +5633,13 @@ ${CHILD_TASK_LINKS_JS}
         group = {
           key: key,
           title: projectName || "最近",
-          projectOrder: Number.isFinite(task.projectOrder) ? task.projectOrder : Number.MAX_SAFE_INTEGER,
+          activity: activity[key],
           firstTaskIndex: taskIndex,
           tasks: []
         };
         groupByKey[key] = group;
         groups.push(group);
       }
-      group.projectOrder = Math.min(
-        group.projectOrder,
-        Number.isFinite(task.projectOrder) ? task.projectOrder : Number.MAX_SAFE_INTEGER
-      );
       group.tasks.push({ task: task, sourceIndex: taskIndex });
     });
 
@@ -5564,11 +5655,7 @@ ${CHILD_TASK_LINKS_JS}
       });
       group.tasks = group.tasks.map(function (entry) { return entry.task; });
     });
-    groups.sort(function (left, right) {
-      if (left.key === "recent") return 1;
-      if (right.key === "recent") return -1;
-      return left.projectOrder - right.projectOrder || left.firstTaskIndex - right.firstTaskIndex;
-    });
+    groups.sort(compareProjectActivity);
 
     var activeGroupKeys = Object.create(null);
     var groupNodes = groups.map(function (group) {
@@ -6616,6 +6703,58 @@ ${CHILD_TASK_LINKS_JS}
   function syncComposerInset() {
     var composerHeight = composerForm.offsetHeight;
     messagesEl.style.paddingBottom = Math.max(96, composerHeight + 16) + "px";
+  }
+
+  var mobileViewportFrame = null;
+  function clearMobileViewportOverride() {
+    app.classList.remove("mobile-viewport-override");
+    app.style.removeProperty("--mobile-viewport-height");
+    app.style.removeProperty("--mobile-viewport-offset");
+  }
+
+  function syncMobileViewportOverride() {
+    var viewport = window.visualViewport;
+    var focused = document.activeElement === composerInput;
+    if (document.hidden || !viewport || !focused || Math.abs(Number(viewport.scale || 0) - 1) > .01) {
+      clearMobileViewportOverride();
+      return;
+    }
+    var offsetTop = Math.max(0, Number(viewport.offsetTop) || 0);
+    var height = Math.min(window.innerHeight - offsetTop, Number(viewport.height) || 0);
+    if (height <= 0 || window.innerHeight - height < 120) {
+      clearMobileViewportOverride();
+      return;
+    }
+    app.classList.add("mobile-viewport-override");
+    app.style.setProperty("--mobile-viewport-height", height + "px");
+    app.style.setProperty("--mobile-viewport-offset", offsetTop + "px");
+  }
+
+  function scheduleMobileViewportSync() {
+    if (mobileViewportFrame !== null) return;
+    mobileViewportFrame = requestAnimationFrame(function () {
+      mobileViewportFrame = null;
+      syncMobileViewportOverride();
+    });
+  }
+
+  function registerMobileViewportListeners() {
+    composerInput.addEventListener("focus", scheduleMobileViewportSync);
+    composerInput.addEventListener("blur", scheduleMobileViewportSync);
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener("resize", scheduleMobileViewportSync);
+      window.visualViewport.addEventListener("scroll", scheduleMobileViewportSync);
+    }
+    window.addEventListener("pageshow", scheduleMobileViewportSync);
+    window.addEventListener("pagehide", function () {
+      if (mobileViewportFrame !== null) cancelAnimationFrame(mobileViewportFrame);
+      mobileViewportFrame = null;
+      clearMobileViewportOverride();
+    });
+    document.addEventListener("visibilitychange", function () {
+      if (document.hidden) clearMobileViewportOverride();
+      else scheduleMobileViewportSync();
+    });
   }
 
   function queuedMessageDisplayText(message) {
@@ -8348,18 +8487,19 @@ ${CHILD_TASK_LINKS_JS}
           (emptyTask.localCreationState === "failed"
             ? '任务创建失败'
             : emptyTask.localCreationState === "ready"
-              ? '继续填写新任务'
+              ? '新任务'
               : '正在后台创建任务') +
-          '</h1><p>' +
+          '</h1>' +
+          (emptyTask.localCreationState === "ready" ? '' : '<p>' +
           (emptyTask.localCreationState === "failed"
             ? '输入内容和图片都已保留；再次点“新建任务”会自动重试。' +
               (emptyCreationError
                 ? '<br>失败原因：' + escapeHtml(taskCreationErrorText(emptyTask))
                 : '')
             : emptyTask.localCreationState === "ready"
-              ? '尚未发送的内容会一直保留；发送第一条消息后才开始执行。'
+              ? ''
               : '现在就可以输入；提交后会在任务创建成功时自动发送。') +
-          '</p></div>';
+          '</p>') + '</div>';
       } else if (state.adapterError) {
         var capabilityLimited = isAdapterCapabilityError();
         messagesEl.innerHTML = '<div class="empty-state"><div class="empty-wordmark">' + escapeHtml(currentAdapterName()) + '</div><h1>' +
@@ -9477,9 +9617,8 @@ ${CHILD_TASK_LINKS_JS}
     if (!text) return;
     var start = composerInput.selectionStart || 0;
     var end = composerInput.selectionEnd || start;
-    composerInput.value =
-      composerInput.value.slice(0, start) + text + composerInput.value.slice(end);
-    composerInput.selectionStart = composerInput.selectionEnd = start + text.length;
+    composerInput.setRangeText(text, start, end, "end");
+    state.composerRevision += 1;
     saveComposerDraft(state.currentAdapter, state.currentThreadId);
     resizeComposer();
   }
@@ -9974,7 +10113,7 @@ ${CHILD_TASK_LINKS_JS}
 
   function toggleComposerModel() {
     var modelState = projectedTaskModelState();
-    if (!modelState || modelState.loadError) {
+    if (!modelState || modelState.loadError || taskNeedsCreation(currentTask()) && !modelState.canChange) {
       void loadCurrentTaskModel(true).then(function (loaded) {
         if (loaded && loaded.canChange) { state.modelMenuOpen = true; renderModelControl(); }
       });
@@ -10114,7 +10253,9 @@ ${CHILD_TASK_LINKS_JS}
     updateAdapterScrollFade();
     syncComposerInset();
     closeTaskContextMenu();
+    scheduleMobileViewportSync();
   });
+  registerMobileViewportListeners();
   taskList.addEventListener("scroll", closeTaskContextMenu, { passive: true });
   messagesEl.addEventListener("scroll", function () {
     updateUserMessageNavigation();

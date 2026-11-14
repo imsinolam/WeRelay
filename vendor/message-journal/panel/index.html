@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>消息日历</title><link rel="stylesheet" href="panel.css">
+<script src="_magpie/bridge.js"></script><script src="core.js" defer></script><script src="app.js" defer></script>
+</head>
+<body>
+<!-- THESIS: 项目任务画布，不以会话切断任务上下文。
+OWN-WORLD: 继承 Magpie 的主题、字体与基础控件，灰色时间和轻量树分支。
+STORY: 选日期浏览项目，按时间阅读，显式选择模型整理任务。
+FIRST VIEWPORT: 紧凑工具栏与右上数据详情，项目节点占据剩余画布。
+FORM: 可平移缩放画布，项目→可折叠任务→消息；原地详情浮层。
+FINISH: 回归测试、合成浏览器验收及边界记录后交付。 -->
+<main class="journal">
+ <div class="toolbar">
+  <div class="date-stepper" role="group" aria-label="选择查看日期">
+   <button id="prev-day" type="button" class="step" aria-label="前一天">‹</button>
+   <button id="date-label" type="button" class="date-label" aria-haspopup="dialog" title="选择日期">—</button>
+   <button id="next-day" type="button" class="step" aria-label="后一天">›</button>
+   <input id="date" type="date" class="date-picker" aria-label="指定日期" tabindex="-1">
+  </div>
+  <input id="query" type="search" aria-label="搜索消息" placeholder="搜索消息…" autocomplete="off">
+  <select id="agent" aria-label="Agent"><option value="">全部 Agent</option></select><select id="project" aria-label="项目"><option value="">全部项目</option></select>
+  <div class="icon-group" role="group" aria-label="排序与刷新">
+   <select id="order" class="visually-hidden" aria-hidden="true" tabindex="-1"><option value="asc">最早在前</option><option value="desc">最新在前</option></select>
+   <button id="order-toggle" type="button" class="icon-btn" aria-label="消息排序" aria-pressed="false" title="最早在前">
+    <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 3v10M4 3L2 5M4 3l2 2M12 13V3M12 13l-2-2M12 13l2-2"/></svg>
+   </button>
+   <button id="reset" type="button" class="icon-btn" aria-label="重置筛选" title="重置筛选">
+    <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13 8a5 5 0 1 1-1.5-3.6M13 2v3h-3"/></svg>
+   </button>
+   <button id="reload" type="button" class="icon-btn" aria-label="刷新" title="刷新">
+    <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8a5 5 0 0 1 8.5-3.5M13 8a5 5 0 0 1-8.5 3.5M11.5 2v2.5H14M4.5 14v-2.5H2"/></svg>
+   </button>
+  </div>
+  <div class="toolbar-end"><button id="sources-toggle" type="button" class="quiet" aria-expanded="false" aria-controls="sources">数据详情</button></div>
+  <section id="sources" class="data-popover" aria-label="数据详情" hidden><div class="popover-head"><h2>数据详情</h2><button id="sources-close" type="button" class="icon-close" aria-label="关闭数据详情">×</button></div><p id="updated"></p><div id="source-list"></div><p>仅收录用户消息，不含助手回复与工具输出。附件仅显示类型提示，日期按本机时区。</p><p>索引与分类保存在本机；浏览、搜索不联网。仅在确认分类时，将所选项目消息发送给选择的 Magpie 模型，可能产生费用。不读取项目源码、不自动路由。</p><p>读取权限遵循 Magpie「设置 → 隐私 → Agent 会话历史」。默认最近 30 天，不代表完整历史。</p></section>
+ </div>
+ <div class="results-head"><p id="summary" role="status" aria-live="polite">正在读取本地索引…</p><span class="canvas-hint">拖动空白平移 · ⌘/Ctrl＋滚轮缩放</span></div><p id="error" role="alert" hidden></p>
+ <section id="canvas" class="canvas" tabindex="0" aria-label="项目任务无限画布"><div id="list" class="canvas-world"></div><p id="canvas-empty" class="empty" hidden></p></section>
+ <div class="canvas-tools" role="group" aria-label="画布工具"><button id="zoom-out" type="button" class="icon-btn" aria-label="缩小画布" title="缩小"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8h10"/></svg></button><output id="zoom-value">100%</output><button id="zoom-in" type="button" class="icon-btn" aria-label="放大画布" title="放大"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8h10M8 3v10"/></svg></button><button id="canvas-reset" type="button" class="icon-btn" aria-label="复位画布" title="复位"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13 8a5 5 0 1 1-1.5-3.6M13 2v3h-3"/></svg></button><button id="canvas-fit" type="button" class="icon-btn" aria-label="阅览全部项目" title="阅览全部"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 5V2h3M11 2h3v3M14 11v3h-3M5 14H2v-3M3 3l4 4M13 3L9 7M13 13L9 9M3 13l4-4"/></svg></button></div>
+</main>
+</main>
+<section id="detail" class="detail floating" role="dialog" aria-labelledby="detail-title" hidden>
+ <header class="popover-head detail-head"><h2 id="detail-title" tabindex="-1">项目详情</h2><button id="close" type="button" class="icon-close" aria-label="关闭详情">×</button></header>
+ <div class="detail-scroll" id="detail-scroll"><div id="detail-meta" class="detail-meta"></div><label class="scope"><input id="whole" type="checkbox">显示全部已收录日期</label><div id="detail-messages"></div><button id="detail-more" type="button" hidden>显示更多消息</button></div>
+</section>
+<section id="classifier" class="classifier floating" role="dialog" aria-labelledby="classifier-title" hidden>
+ <header class="popover-head"><h2 id="classifier-title" tabindex="-1">整理项目任务</h2><button id="classifier-close" type="button" class="icon-close" aria-label="关闭任务分类">×</button></header>
+ <div class="classifier-body"><p id="classifier-scope"></p><p class="muted">按功能、模块、代码线索及上下文关联分类；相关任务跨会话汇合，无关任务分开。结果仅供参考，可清除后重分。</p><label class="model-field">Magpie 模型<select id="model" aria-label="分类模型"><option value="">请选择模型</option></select></label><button id="models-reload" type="button" class="quiet">重新读取模型</button><p class="privacy-note">确认后发送本项目已收录且尚未分类的用户消息及既有任务摘要；每次最多 600 条，每条最多 9,000 字。代码线索仅取自消息，不读取源码。可能产生模型费用。</p><label class="consent"><input id="classify-consent" type="checkbox">我同意将上述消息发送给所选模型</label><p id="classify-status" role="status" aria-live="polite"></p><div class="classifier-actions"><button id="classify-start" type="button">开始分类</button><button id="classify-cancel" type="button" hidden>取消执行</button><button id="classify-clear" type="button" class="quiet">清除分类</button></div><label id="clear-confirm" class="consent" hidden><input id="clear-consent" type="checkbox">确认清除本项目分类（消息保留）</label></div>
+</section>
+<noscript>此页面需要 JavaScript。</noscript>
+</body></html>

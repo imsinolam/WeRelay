@@ -5,16 +5,17 @@ function harness() {
   const state:any={authenticated:true,currentAdapter:"pi",currentThreadId:"a",composerRevision:0,composerDrafts:Object.create(null),composerDraftOrder:[],
     nativeComposerDraft:null,nativeComposerDraftRequest:0,nativeComposerDraftConsumed:Object.create(null),pendingMessages:[],outboundMessages:[],pendingImages:[],editingQueuedMessageId:""};
   const input={value:""};
+  const browserDocument: { activeElement: unknown } = { activeElement: null };
   let result:any={supported:true,draft:{text:"  桌面草稿\n\n完整内容  ",revision:"r1"}};
   let deferred:Promise<any>|null=null;
   const notices:string[]=[];
   const start=CODEX_MOBILE_APP_JS.indexOf("  function saveComposerDraft(");
   const end=CODEX_MOBILE_APP_JS.indexOf("  function saveCurrentConversationSnapshot(",start);
-  const api=new Function("state","composerInput","conversationStateKey","getBoundedConversationValue","setBoundedConversationValue","deleteConversationValue","MAX_COMPOSER_DRAFTS","schedulePersistentMobileCacheWrite","resizeComposer","api","adapterApiPath","showToast",
+  const api=new Function("state","composerInput","conversationStateKey","getBoundedConversationValue","setBoundedConversationValue","deleteConversationValue","MAX_COMPOSER_DRAFTS","schedulePersistentMobileCacheWrite","resizeComposer","api","adapterApiPath","showToast","document",
     CODEX_MOBILE_APP_JS.slice(start,end)+"\nreturn {saveComposerDraft,restoreComposerDraft,loadNativeComposerDraft,nativeComposerDraftReference,consumeNativeComposerDraft};")(
     state,input,(a:string,t:string)=>a+"/"+t,
-    (v:any,_o:any,k:string)=>v[k],(v:any,o:any,k:string,x:any)=>{v[k]=x;if(!o.includes(k))o.push(k);},(v:any,_o:any,k:string)=>delete v[k],40,()=>{},()=>{},()=>deferred||Promise.resolve(result),(p:string,a:string)=>p+"?adapter="+a,(s:string)=>notices.push(s));
-  return {state,input,api,notices,set:(value:any)=>{result=value;},defer:(value:Promise<any>)=>{deferred=value;}};
+    (v:any,_o:any,k:string)=>v[k],(v:any,o:any,k:string,x:any)=>{v[k]=x;if(!o.includes(k))o.push(k);},(v:any,_o:any,k:string)=>delete v[k],40,()=>{},()=>{},()=>deferred||Promise.resolve(result),(p:string,a:string)=>p+"?adapter="+a,(s:string)=>notices.push(s), browserDocument);
+  return {state,input,api,notices,browserDocument,set:(value:any)=>{result=value;},defer:(value:Promise<any>)=>{deferred=value;}};
 }
 
 test("web imports full native text then clears an unedited draft when sent on desktop",async()=>{
@@ -86,4 +87,16 @@ test("local web drafts and empty local edits are never overwritten; imported dra
   await third.api.loadNativeComposerDraft();expect(third.input.value).toContain("完整内容");
   const revision = third.state.composerRevision;
   await third.api.loadNativeComposerDraft();expect(third.state.composerRevision).toBe(revision);
+});
+
+
+test("a desktop draft response cannot move the caret while the web composer is focused", async () => {
+  const h = harness();
+  h.browserDocument.activeElement = h.input;
+  await h.api.loadNativeComposerDraft();
+  expect(h.input.value).toBe("");
+  expect(h.state.composerRevision).toBe(0);
+  h.browserDocument.activeElement = null;
+  await h.api.loadNativeComposerDraft();
+  expect(h.input.value).toContain("完整内容");
 });

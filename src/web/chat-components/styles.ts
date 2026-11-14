@@ -191,6 +191,10 @@ ${COMPOSER_BEAM_CSS}
 .composer-image-button:hover { background: var(--surface); }
 .composer-image-button svg { width: 19px; height: 19px; stroke-width: 1.7; }
 .composer textarea { grid-column: 1 / -1; min-width: 0; min-height: 36px; max-height: 164px; resize: none; border: 0; outline: 0; padding: 6px 8px; background: transparent; color: var(--text); font-size: 16px; line-height: 24px; }
+@supports (field-sizing: content) {
+  .composer textarea { field-sizing: content; width: 100%; }
+}
+.composer textarea { overflow-y: auto; }
 .composer textarea::placeholder { color: #8f8f8f; }
 .send-button { grid-column: 3; background: var(--accent); color: white; transition: background-color .14s ease, color .14s ease, opacity .14s ease, transform .14s ease; }
 .send-button:hover:not(:disabled) { transform: translateY(-1px); }

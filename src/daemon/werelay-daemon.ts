@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { createMessageJournal } from "../message-journal/journal.ts";
 import { resolveWorkBuddyDesktopSocketPath } from "../bridge/workbuddy-desktop-rpc.ts";
 import { ScreenNotificationPolicy } from "./screen-notification-policy.ts";
 import { assertMobileTaskPermission, ensureMobileTaskWritablePermission, mobileTaskPermissionState } from "./mobile-task-permissions.ts";
@@ -742,10 +743,9 @@ const MOBILE_CREATED_TASK_CACHE_MAX_SIZE = 256;
 const MOBILE_CREATED_TASK_CACHE_TTL_MS = 15 * 60_000;
 const MOBILE_MESSAGE_OUTBOX_MAX_ATTEMPTS = 5;
 const MOBILE_MESSAGE_FAILURE_NOTIFICATION_RETRY_MS = 30_000;
-const MOBILE_ADAPTER_USAGE_WINDOW_MS = 3 * 24 * 60 * 60_000;
-const MOBILE_ADAPTER_USAGE_REFRESH_INTERVAL_MS = 24 * 60 * 60_000;
-const MOBILE_ADAPTER_USAGE_IDLE_DELAY_MS = 30_000;
-const MOBILE_ADAPTER_USAGE_BUSY_RETRY_MS = 5 * 60_000;
+const MOBILE_ADAPTER_USAGE_WINDOW_MS = 24 * 60 * 60_000;
+const MOBILE_ADAPTER_USAGE_REFRESH_INTERVAL_MS = 5 * 60_000;
+const MOBILE_ADAPTER_USAGE_REFRESH_DELAY_MS = 5 * 60_000;
 const SINGLE_BRIDGE_STOP_TIMEOUT_MS = 10_000;
 const SINGLE_BRIDGE_FORCE_STOP_TIMEOUT_MS = 3_000;
 const SINGLE_BRIDGE_STOP_POLL_MS = 250;
@@ -770,19 +770,41 @@ export function sortAdaptersByRecentMessageActivity(
   activities: readonly DaemonAdapterMessageActivity[],
   nowMs: number,
   windowMs = MOBILE_ADAPTER_USAGE_WINDOW_MS,
+  taskUpdatedAtByAdapter: ReadonlyMap<DaemonAdapterKind, string | undefined> = new Map(),
 ): DaemonAdapterKind[] {
-  const counts = new Map<DaemonAdapterKind, number>();
+  const messageEventKeysByAdapter = new Map<DaemonAdapterKind, Set<string>>();
   const cutoffMs = nowMs - windowMs;
   for (const activity of activities) {
     const occurredAtMs = Date.parse(activity.occurredAt);
     if (!Number.isFinite(occurredAtMs) || occurredAtMs < cutoffMs || occurredAtMs > nowMs) {
       continue;
     }
-    counts.set(activity.adapter, (counts.get(activity.adapter) ?? 0) + 1);
+    const eventKeys = messageEventKeysByAdapter.get(activity.adapter) ?? new Set<string>();
+    eventKeys.add(activity.eventKey);
+    messageEventKeysByAdapter.set(activity.adapter, eventKeys);
   }
   return adapters
-    .map((adapter, index) => ({ adapter, index, count: counts.get(adapter) ?? 0 }))
-    .sort((left, right) => right.count - left.count || left.index - right.index)
+    .map((adapter, index) => {
+      const updatedAtMs = Date.parse(taskUpdatedAtByAdapter.get(adapter) ?? "");
+      const hasValidUpdatedAt = Number.isFinite(updatedAtMs) && updatedAtMs <= nowMs;
+      const count = messageEventKeysByAdapter.get(adapter)?.size ?? 0;
+      return {
+        adapter,
+        index,
+        count,
+        hasRecentTask: count > 0 ||
+          (hasValidUpdatedAt &&
+          updatedAtMs >= cutoffMs &&
+          updatedAtMs <= nowMs),
+        taskUpdatedAtMs: hasValidUpdatedAt ? updatedAtMs : 0,
+      };
+    })
+    .sort((left, right) =>
+      Number(right.hasRecentTask) - Number(left.hasRecentTask) ||
+      right.count - left.count ||
+      right.taskUpdatedAtMs - left.taskUpdatedAtMs ||
+      left.index - right.index
+    )
     .map(({ adapter }) => adapter);
 }
 
@@ -814,6 +836,113 @@ function mergeAdapterUsageOrder(
     ordered.push(adapter);
   }
   return ordered;
+}
+
+export type MobileTaskRecentActivity = {
+  recentMessageCount: number;
+  activityObservedAt: string;
+};
+
+export function buildAdapterMessageEventKey(params: {
+  role: "user" | "assistant";
+  adapter: DaemonAdapterKind;
+  threadId?: string;
+  turnId?: string;
+  messageId?: string;
+  timestamp: string;
+  text: string;
+}): string {
+  const identity = params.messageId ??
+    (params.turnId
+      ? `${params.turnId}:${params.timestamp}:${createHash("sha1").update(params.text).digest("hex").slice(0, 12)}`
+      : params.timestamp);
+  return [
+    params.role,
+    params.adapter,
+    params.threadId ?? "unknown",
+    identity,
+  ].join(":");
+}
+
+export function countRecentTaskMessageActivity(
+  activities: readonly DaemonAdapterMessageActivity[],
+  adapter: DaemonAdapterKind,
+  threadId: string,
+  nowMs: number,
+  windowMs = MOBILE_ADAPTER_USAGE_WINDOW_MS,
+): MobileTaskRecentActivity {
+  const cutoffMs = nowMs - windowMs;
+  const seen = new Set<string>();
+  const legacyAssistantEventPrefix = `assistant:${adapter}:${threadId}:`;
+  let recentMessageCount = 0;
+  for (const activity of activities) {
+    if (
+      activity.adapter !== adapter ||
+      (
+        activity.threadId !== threadId &&
+        !(
+          activity.threadId === undefined &&
+          activity.eventKey.startsWith(legacyAssistantEventPrefix)
+        )
+      ) ||
+      seen.has(activity.eventKey)
+    ) {
+      continue;
+    }
+    const occurredAtMs = Date.parse(activity.occurredAt);
+    if (!Number.isFinite(occurredAtMs) || occurredAtMs < cutoffMs || occurredAtMs > nowMs) {
+      continue;
+    }
+    seen.add(activity.eventKey);
+    recentMessageCount++;
+  }
+  return {
+    recentMessageCount,
+    activityObservedAt: new Date(nowMs).toISOString(),
+  };
+}
+
+export function resolveLatestAdapterTaskActivityAt(
+  candidates: readonly Pick<BridgeResumeSessionCandidate, "lastUpdatedAt">[],
+  nowMs: number,
+): string | undefined {
+  let latestMs = 0;
+  for (const candidate of candidates) {
+    const candidateMs = Date.parse(candidate.lastUpdatedAt);
+    if (
+      Number.isFinite(candidateMs) &&
+      candidateMs <= nowMs &&
+      candidateMs > latestMs
+    ) {
+      latestMs = candidateMs;
+    }
+  }
+  return latestMs > 0 ? new Date(latestMs).toISOString() : undefined;
+}
+
+export function buildAdapterLatestTaskActivityMap(
+  adapters: readonly DaemonAdapterKind[],
+  candidates: readonly (Pick<BridgeResumeSessionCandidate, "lastUpdatedAt"> & {
+    adapter: DaemonAdapterKind;
+  })[],
+  nowMs: number,
+): Map<DaemonAdapterKind, string | undefined> {
+  const candidatesByAdapter = new Map<
+    DaemonAdapterKind,
+    Array<Pick<BridgeResumeSessionCandidate, "lastUpdatedAt">>
+  >();
+  for (const candidate of candidates) {
+    const adapterCandidates = candidatesByAdapter.get(candidate.adapter) ?? [];
+    adapterCandidates.push(candidate);
+    candidatesByAdapter.set(candidate.adapter, adapterCandidates);
+  }
+  return new Map(adapters.map((adapter) => [
+    adapter,
+    resolveLatestAdapterTaskActivityAt(
+      candidatesByAdapter.get(adapter) ?? [],
+      nowMs,
+    ),
+  ]));
 }
 
 function log(message: string): void {
@@ -2110,6 +2239,7 @@ export function resolveCreatedMobileTask(params: {
   canCreateInProject: boolean;
   sourceTask?: CodexMobileTask;
   nowIso?: string;
+  activity?: MobileTaskRecentActivity;
 }): CodexMobileTask | null {
   const threadId = params.threadId?.trim();
   if (!threadId || threadId === params.previousThreadId) {
@@ -2130,6 +2260,7 @@ export function resolveCreatedMobileTask(params: {
     };
   }
 
+  const nowIso = params.nowIso ?? new Date().toISOString();
   return {
     threadId,
     title: `新 ${params.adapterLabel} 任务`,
@@ -2139,11 +2270,15 @@ export function resolveCreatedMobileTask(params: {
     ...(params.sourceTask?.projectName
       ? { projectName: params.sourceTask.projectName }
       : {}),
-    lastUpdatedAt: params.nowIso ?? new Date().toISOString(),
+    lastUpdatedAt: nowIso,
     status: params.status,
     selected: true,
     canRename: params.canRename,
     canCreateInProject: params.canCreateInProject,
+    ...(params.activity ?? {
+      recentMessageCount: 0,
+      activityObservedAt: nowIso,
+    }),
   };
 }
 
@@ -3157,6 +3292,7 @@ export class WeRelayDaemon {
   private mobileAdapterUsageOrder: DaemonAdapterKind[];
   private mobileAdapterUsageOrderUpdatedAtMs: number | undefined;
   private mobileAdapterUsageOrderWindowMs: number | undefined;
+  private mobileAdapterUsageRefreshInFlight = false;
   // 全终端目录扫描会同步遍历各终端会话目录，必须与 Codex 候选一样做短时
   // 复用与并发合并，否则移动轮询与 Relay 预热会把主线程反复占满。
   private readonly globalTaskCatalogCache = createGlobalTaskCatalogCache<
@@ -3555,6 +3691,7 @@ export class WeRelayDaemon {
         readRemoteAccess: () => this.mobileRemoteAccess!.view(),
         changeRemoteAccess: (input, checkOnly) => this.mobileRemoteAccess!.change(input, checkOnly),
         authStore,
+        messageJournal: createMessageJournal({ permissionFile: path.join(workspaceDir, "message-journal-permissions.json") }),
         listAdapters: () => this.listMobileAdapters(),
         switchAdapter: (adapter) => this.switchMobileAdapter(adapter),
         readSettings: () => this.buildMobileSettings(),
@@ -3606,11 +3743,7 @@ export class WeRelayDaemon {
           this.createMobileTask(adapter, options?.sourceThreadId),
         renameTask: (threadId, title, adapter) =>
           this.renameMobileTask(threadId, title, adapter),
-        readNewTaskModel: async (adapter) => {
-          const runtime = this.getMobileSlot(adapter).runtime;
-          return runtime.getNewSessionModelState ? await runtime.getNewSessionModelState()
-            : { options: [], canChange: false, unavailableReason: "当前终端不支持预选新任务模型。" };
-        },
+        readNewTaskModel: (adapter) => this.readMobileNewTaskModel(adapter),
         readTaskComposerDraft: async (threadId, adapter) => {
           const slot = this.slots.get(this.resolveMobileAdapter(adapter));
           if (!slot?.runtime.getSessionComposerDraft) return { supported: false, draft: null };
@@ -4526,13 +4659,17 @@ export class WeRelayDaemon {
         }
         this.recordAdapterMessageActivity({
           adapter: slot.adapter,
+          ...(event.threadId ? { threadId: event.threadId } : {}),
           occurredAt: event.timestamp,
-          eventKey: [
-            "assistant",
-            slot.adapter,
-            event.threadId ?? "unknown",
-            event.turnId ?? event.timestamp,
-          ].join(":"),
+          eventKey: buildAdapterMessageEventKey({
+            role: "assistant",
+            adapter: slot.adapter,
+            threadId: event.threadId,
+            turnId: event.turnId,
+            messageId: event.messageId,
+            timestamp: event.timestamp,
+            text: event.text,
+          }),
         });
         if (!shouldForwardDaemonFinalReply(slot.adapter)) {
           appendDaemonLog(
@@ -4750,6 +4887,19 @@ export class WeRelayDaemon {
         appendDaemonLog(
           `mirrored_local_input: adapter=${slot.adapter} text=${truncatePreview(event.text)}`,
         );
+        this.recordAdapterMessageActivity({
+          adapter: slot.adapter,
+          ...(event.threadId ? { threadId: event.threadId } : {}),
+          occurredAt: event.timestamp,
+          eventKey: buildAdapterMessageEventKey({
+            role: "user",
+            adapter: slot.adapter,
+            threadId: event.threadId,
+            turnId: event.turnId,
+            timestamp: event.timestamp,
+            text: event.text,
+          }),
+        });
         if (shouldForwardBridgeEventToWechat(slot.adapter, event.type, { text: event.text })) {
           this.trackWechatForwardTask(slot.outputBatcher.flushNow().then(async () => {
             await this.queueWechatMessage(
@@ -6912,6 +7062,7 @@ export class WeRelayDaemon {
   private recordAdapterMessageActivity(activity: DaemonAdapterMessageActivity): void {
     try {
       this.stateStore.recordAdapterMessageActivity(activity);
+      this.refreshMobileAdapterUsageOrderIfDue();
       this.scheduleMobileAdapterUsageOrderRefresh();
     } catch (error) {
       appendDaemonLog(
@@ -6920,23 +7071,7 @@ export class WeRelayDaemon {
     }
   }
 
-  private hasBusyAdapterForUsageRefresh(): boolean {
-    for (const slot of this.slots.values()) {
-      const status = slot.runtime.getState().status;
-      if (
-        slot.activeTasks.size > 0 ||
-        status === "starting" ||
-        status === "busy" ||
-        status === "awaiting_approval" ||
-        status === "awaiting_input"
-      ) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  private scheduleMobileAdapterUsageOrderRefresh(delayMs = MOBILE_ADAPTER_USAGE_IDLE_DELAY_MS): void {
+  private scheduleMobileAdapterUsageOrderRefresh(delayMs = MOBILE_ADAPTER_USAGE_REFRESH_DELAY_MS): void {
     if (
       this.shutdownPromise ||
       this.mobileAdapterUsageRefreshTimer ||
@@ -6954,28 +7089,54 @@ export class WeRelayDaemon {
       if (this.shutdownPromise) {
         return;
       }
-      if (this.hasBusyAdapterForUsageRefresh()) {
-        this.scheduleMobileAdapterUsageOrderRefresh(MOBILE_ADAPTER_USAGE_BUSY_RETRY_MS);
-        return;
-      }
-      const nowMs = Date.now();
+      this.refreshMobileAdapterUsageOrderIfDue();
+    }, delayMs);
+    this.mobileAdapterUsageRefreshTimer.unref?.();
+  }
+
+  private refreshMobileAdapterUsageOrderIfDue(
+    adapters: readonly DaemonAdapterKind[] = DAEMON_ADAPTERS,
+    globalCandidates?: readonly GlobalTaskCandidate[],
+  ): void {
+    const nowMs = Date.now();
+    if (this.mobileAdapterUsageRefreshInFlight || !shouldRefreshAdapterUsageOrder(
+      this.mobileAdapterUsageOrderUpdatedAtMs,
+      nowMs,
+      MOBILE_ADAPTER_USAGE_REFRESH_INTERVAL_MS,
+      this.mobileAdapterUsageOrderWindowMs,
+    )) {
+      return;
+    }
+    this.mobileAdapterUsageRefreshInFlight = true;
+    try {
+      const taskUpdatedAtByAdapter = buildAdapterLatestTaskActivityMap(
+        DAEMON_ADAPTERS,
+        [
+          ...(globalCandidates ?? []),
+          ...this.latestAdapterTaskActivityCandidates(),
+        ],
+        nowMs,
+      );
       const order = sortAdaptersByRecentMessageActivity(
         mergeAdapterUsageOrder(this.mobileAdapterUsageOrder, DAEMON_ADAPTERS),
         this.stateStore.getAdapterMessageActivities(),
         nowMs,
+        MOBILE_ADAPTER_USAGE_WINDOW_MS,
+        taskUpdatedAtByAdapter,
       );
-      const updatedAt = new Date(nowMs).toISOString();
       this.mobileAdapterUsageOrder = order;
       this.mobileAdapterUsageOrderUpdatedAtMs = nowMs;
       this.mobileAdapterUsageOrderWindowMs = MOBILE_ADAPTER_USAGE_WINDOW_MS;
       this.stateStore.setAdapterUsageOrder({
         adapters: order,
-        updatedAt,
+        updatedAt: new Date(nowMs).toISOString(),
         windowMs: MOBILE_ADAPTER_USAGE_WINDOW_MS,
       });
       appendDaemonLog(`mobile_adapter_usage_order_refreshed: adapters=${order.join(",")}`);
-    }, delayMs);
-    this.mobileAdapterUsageRefreshTimer.unref?.();
+    } finally {
+      this.mobileAdapterUsageRefreshInFlight = false;
+    }
+    this.scheduleMobileAdapterUsageOrderRefresh();
   }
 
   private async readOpenMobileAdaptersCached(): Promise<Set<DaemonAdapterKind>> {
@@ -7020,9 +7181,10 @@ export class WeRelayDaemon {
     const globalCandidates = options.globalCandidates ??
       await this.listGlobalTaskCandidates(adapters);
     const runningAdapterIds = collectRunningMobileAdapterIds(globalCandidates);
+    this.refreshMobileAdapterUsageOrderIfDue(adapters, globalCandidates);
     this.scheduleMobileAdapterUsageOrderRefresh();
-    // Keep the list stable between low-frequency refreshes. Recomputing here
-    // made the order jump on every request despite the persisted daily order.
+    // Recompute at most once per five-minute window; cached order is returned
+    // between those refreshes so ordinary polling does not reshuffle the list.
     const orderedAdapters = mergeAdapterUsageOrder(
       this.mobileAdapterUsageOrder,
       DAEMON_ADAPTERS,
@@ -7179,6 +7341,24 @@ export class WeRelayDaemon {
     finally { if (this.mobileChildTaskReads.get(key) === request) this.mobileChildTaskReads.delete(key); }
   }
 
+  private latestAdapterTaskActivityCandidates(): GlobalTaskCandidate[] {
+    return DAEMON_ADAPTERS.flatMap((adapter) => {
+      const slot = this.slots.get(adapter);
+      const candidates = [
+        ...(slot?.taskCandidatesCache ?? []),
+        ...(slot?.taskListSnapshot?.candidates ?? []),
+        ...(this.globalTaskCatalogCache.read(adapter) ?? []),
+        ...(this.globalTaskListSnapshot?.candidates.filter(
+          (candidate) => candidate.adapter === adapter,
+        ) ?? []),
+      ];
+      return candidates.map((candidate) => ({
+        ...candidate,
+        adapter,
+      }));
+    });
+  }
+
   private async listMobileTasks(adapter?: string): Promise<CodexMobileTask[]> {
     const resolvedAdapter = this.resolveMobileAdapter(adapter);
     const slot = this.slots.get(resolvedAdapter);
@@ -7209,6 +7389,8 @@ export class WeRelayDaemon {
       throw error;
     }
     const selectedThreadId = this.getSlotThreadId(slot);
+    const nowMs = Date.now();
+    const activities = this.stateStore.getAdapterMessageActivities();
     return candidates.filter((candidate) => !isInternalTask(candidate)).map((candidate) => {
       const status = this.resolveMobileTaskStatus(
         slot,
@@ -7244,6 +7426,12 @@ export class WeRelayDaemon {
           slot.runtime.createSessionInProject
         ),
         canCreateTask: Boolean(slot.runtime.createSession),
+        ...countRecentTaskMessageActivity(
+          activities,
+          slot.adapter,
+          candidate.sessionId,
+          nowMs,
+        ),
       };
     });
   }
@@ -7256,6 +7444,8 @@ export class WeRelayDaemon {
     adapter: DaemonAdapterKind,
   ): Promise<CodexMobileTask[]> {
     const candidates = await this.listGlobalTaskCandidates([adapter]);
+    const nowMs = Date.now();
+    const activities = this.stateStore.getAdapterMessageActivities();
     return candidates.map((candidate) => ({
       threadId: candidate.sessionId,
       title: candidate.title,
@@ -7273,11 +7463,19 @@ export class WeRelayDaemon {
       canRename: false,
       canCreateInProject: false,
       canCreateTask: false,
+      ...countRecentTaskMessageActivity(
+        activities,
+        adapter,
+        candidate.sessionId,
+        nowMs,
+      ),
     }));
   }
 
   private async listMobileTaskBoard(): Promise<CodexMobileTaskBoard> {
     const candidates = await this.listGlobalTaskCandidates();
+    const nowMs = Date.now();
+    const activities = this.stateStore.getAdapterMessageActivities();
     const adapterLabels = new Map(
       (await this.listMobileAdapters({ globalCandidates: candidates })).adapters
         .map((adapter) => [adapter.id, adapter.label]),
@@ -7324,6 +7522,12 @@ export class WeRelayDaemon {
           slot?.runtime.createSessionInProject
         ),
         canCreateTask: Boolean(slot?.runtime.createSession),
+        ...countRecentTaskMessageActivity(
+          activities,
+          candidate.adapter,
+          candidate.sessionId,
+          nowMs,
+        ),
       });
       grouped.set(candidate.adapter, tasks);
     }
@@ -7522,6 +7726,30 @@ export class WeRelayDaemon {
   }
 
   /** 预热只读已有缓存，绝不为了预热去连接或唤醒 Agent。 */
+  private async readMobileNewTaskModel(adapter?: string): Promise<BridgeSessionModelState> {
+    const resolvedAdapter = this.resolveMobileAdapter(adapter);
+    const cacheKey = "new-task-catalog";
+    const fresh = this.mobileTaskModelStates.get(resolvedAdapter, cacheKey, MOBILE_TASK_MODEL_FRESH_MAX_AGE_MS);
+    if (fresh?.canChange && fresh.options.length) return fresh;
+    const runtime = this.getMobileSlot(resolvedAdapter).runtime;
+    try {
+      if (!runtime.getNewSessionModelState) {
+        return { options: [], canChange: false, unavailableReason: "当前终端不支持预选新任务模型。" };
+      }
+      const catalog = await runtime.getNewSessionModelState();
+      if (catalog.canChange && catalog.options.length) {
+        this.mobileTaskModelStates.remember(resolvedAdapter, cacheKey, catalog);
+        return catalog;
+      }
+      const cached = this.mobileTaskModelStates.get(resolvedAdapter, cacheKey, MOBILE_TASK_MODEL_STALE_MAX_AGE_MS);
+      return cached?.options.length ? staleModelStateFallback(cached, catalog.unavailableReason || "模型目录暂时不可用") : catalog;
+    } catch (error) {
+      const cached = this.mobileTaskModelStates.get(resolvedAdapter, cacheKey, MOBILE_TASK_MODEL_STALE_MAX_AGE_MS);
+      if (cached?.options.length) return staleModelStateFallback(cached, error);
+      throw error;
+    }
+  }
+
   private async readCachedMobileTaskModel(
     threadId: string,
     adapter?: string,

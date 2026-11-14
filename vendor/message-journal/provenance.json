@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "source": "magpie-message-journal",
+  "files": {
+    "src/parser.mjs": "d24fad4299122d8cca25616e2d4c06804ef073551a06d486d90df2d3d2a0cffe",
+    "src/scanner.mjs": "a2c60f1abe20a2fc2bedaadcd9cb29464e202f383c516cae78e8a6fd84498c3c",
+    "panel/core.mjs": "d99f4219886bded8919c6f3c802e655bf409b05b4a120fb9c40d04d4e16ab48e",
+    "panel/index.html": "1225c2e781a82465d341207d6a4b178c0a91dfe44fa3e53549651e328a88ea6b",
+    "panel/app.js": "f4fdb91e8a7401c0943b0ee63953c91dd0e0b9284645799b91d6b426c5ffe696",
+    "panel/panel.css": "9f548993f0e7fe19525435a0023b0c55ac70818bb292d09ed3c0c248a2bb414e"
+  }
+}

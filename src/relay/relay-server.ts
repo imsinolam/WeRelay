@@ -1,3 +1,4 @@
+import { messageJournalAsset, MESSAGE_JOURNAL_CSP } from "../message-journal/assets.ts";
 import { serveMobileAppBundle } from "../daemon/mobile-app-bundle.ts";
 import crypto from "node:crypto";
 import {
@@ -1442,6 +1443,11 @@ export async function startWeRelayRelayServer(
       const url = new URL(request.url ?? "/", "http://werelay-relay.local");
       const method = request.method ?? "GET";
 
+      const journalAsset = method === "GET" ? messageJournalAsset(url.pathname) : undefined;
+      if (journalAsset) {
+        sendText(response, 200, journalAsset.contentType, journalAsset.body, { "content-security-policy": MESSAGE_JOURNAL_CSP });
+        return;
+      }
       if (method === "GET" && url.pathname === "/") {
         sendText(response, 200, "text/html; charset=utf-8", MOBILE_HTML);
         return;

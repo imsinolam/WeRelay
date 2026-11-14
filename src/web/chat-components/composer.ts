@@ -12,6 +12,10 @@ function createChatComposer(root, options) {
   var listeners = [];
   var disposed = false;
   var resizeFrame = 0;
+  var composing = false;
+  var measuringInput = null;
+  var nativeSizing = Boolean(window.CSS && window.CSS.supports("field-sizing", "content"));
+  var sizeObserver = null;
   function part(name) { return root.querySelector('[data-chat-part="' + name + '"]'); }
   var composerForm = root;
   var composerInput = part("composer-input");
@@ -40,10 +44,59 @@ function createChatComposer(root, options) {
       if (!disposed && actions.onResize) actions.onResize(root.offsetHeight);
     });
   }
-  function resize() {
-    composerInput.style.height = "auto";
-    composerInput.style.height = Math.min(composerInput.scrollHeight, 168) + "px";
-    resized();
+  function compositionActive(event) {
+    return composing || Boolean(event && (event.isComposing || event.keyCode === 229));
+  }
+  function measureContentHeight(style) {
+    // 用独立的不可交互副本测量，避免收缩正在编辑的 textarea 导致 IME/光标跳动。
+    if (!measuringInput) {
+      measuringInput = document.createElement("textarea");
+      measuringInput.setAttribute("aria-hidden", "true");
+      measuringInput.tabIndex = -1;
+      measuringInput.readOnly = true;
+      root.appendChild(measuringInput);
+    }
+    var measurementStyle = measuringInput.style;
+    ["width", "boxSizing", "fontFamily", "fontSize", "fontWeight", "fontStyle", "lineHeight",
+      "letterSpacing", "wordSpacing", "textIndent", "textTransform", "whiteSpace", "wordBreak",
+      "overflowWrap", "tabSize", "paddingTop", "paddingBottom", "paddingLeft", "paddingRight",
+      "borderLeftWidth", "borderRightWidth", "borderTopWidth", "borderBottomWidth"].forEach(function (key) {
+      measurementStyle[key] = style[key];
+    });
+    measurementStyle.position = "fixed";
+    measurementStyle.visibility = "hidden";
+    measurementStyle.pointerEvents = "none";
+    measurementStyle.top = "0";
+    measurementStyle.left = "0";
+    measurementStyle.height = "0px";
+    measurementStyle.minHeight = "0px";
+    measurementStyle.maxHeight = "none";
+    measurementStyle.overflow = "hidden";
+    measuringInput.value = composerInput.value;
+    return measuringInput.scrollHeight;
+  }
+  function resize(revealTail) {
+    if (composing || disposed) return;
+    if (nativeSizing) { resized(); return; }
+    var style = window.getComputedStyle(composerInput);
+    var border = (Number.parseFloat(style.borderTopWidth) || 0) + (Number.parseFloat(style.borderBottomWidth) || 0);
+    var padding = (Number.parseFloat(style.paddingTop) || 0) + (Number.parseFloat(style.paddingBottom) || 0);
+    var maxHeight = Number.parseFloat(style.maxHeight) || 164;
+    var lineHeight = Number.parseFloat(style.lineHeight) || 24;
+    var minHeight = Math.max(Number.parseFloat(style.minHeight) || 36, lineHeight + padding);
+    var measured = measureContentHeight(style);
+    var naturalHeight = style.boxSizing === "content-box" ? measured - padding : measured + border;
+    var targetHeight = Math.min(Math.max(naturalHeight, minHeight), maxHeight);
+    if (Number.parseFloat(style.height) !== targetHeight) {
+      composerInput.style.height = targetHeight + "px";
+      resized();
+    }
+    // scrollHeight 包含软折行和末尾空行；只在光标确实位于末尾时跟随底部。
+    // 中间编辑保留浏览器的原生选区与滚动行为，不写 value 或 selection。
+    if (revealTail === true && composerInput.selectionStart === composerInput.value.length &&
+        composerInput.selectionEnd === composerInput.value.length) {
+      composerInput.scrollTop = Math.max(0, composerInput.scrollHeight - composerInput.clientHeight);
+    }
   }
   function renderNotice(view) {
     var notice = part("composer-notice");
@@ -446,11 +499,19 @@ function createChatComposer(root, options) {
 
   on(composerForm, "submit", function (event) {
     event.preventDefault();
-    if (actions.onSubmit) actions.onSubmit(event);
+    if (!compositionActive(event) && actions.onSubmit) actions.onSubmit(event);
   });
-  on(composerInput, "input", function (event) { resize(); if (actions.onInput) actions.onInput(event); });
+  on(composerInput, "compositionstart", function () { composing = true; });
+  on(composerInput, "compositionend", function () {
+    composing = false;
+    resize(true);
+  });
+  on(composerInput, "input", function (event) {
+    if (!compositionActive(event)) resize(true);
+    if (actions.onInput) actions.onInput(event);
+  });
   on(composerInput, "keydown", function (event) {
-    if (event.isComposing) return;
+    if (compositionActive(event)) return;
     if (event.key === "Escape" && actions.onEscape) actions.onEscape(event);
     if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
       event.preventDefault();
@@ -505,6 +566,11 @@ function createChatComposer(root, options) {
     if (document.hidden) composerOrbAnimation.stop();
     else if (["running", "pending"].includes(sendButton.dataset.state)) composerOrbAnimation.start();
   });
+  if (typeof window.addEventListener === "function") on(window, "resize", function () { resize(); });
+  if (nativeSizing && typeof window.ResizeObserver === "function") {
+    sizeObserver = new window.ResizeObserver(resized);
+    sizeObserver.observe(composerInput);
+  }
   composerOrbAnimation.setup();
   return {
     root: root, part: part, resize: resize, renderQueue: renderQueue, renderImages: renderImages,
@@ -517,6 +583,8 @@ function createChatComposer(root, options) {
       listeners = [];
       composerOrbAnimation.stop();
       if (resizeFrame) cancelAnimationFrame(resizeFrame);
+      if (measuringInput) { measuringInput.remove(); measuringInput = null; }
+      if (sizeObserver) { sizeObserver.disconnect(); sizeObserver = null; }
       if (composerBeam) {
         composerBeam.toggleAttribute("data-active", false);
         composerBeam.toggleAttribute("data-fading", false);

@@ -118,10 +118,15 @@ describe("documentation structure", () => {
     expect(flow).toContain("末位可以超过 9");
     expect(flow).toContain("版本已打包、部署或上传后不得覆盖为不同内容");
     expect(flow).toContain("仅把同一包公开到 GitHub 时不再次改号、不重新打包");
-    expect(flow).toContain("开发 Agent 实现、验证并提交");
+    expect(flow).toContain("开发 Agent 实现、自测并精确提交");
+    expect(flow).toContain("安全合入本地 main");
+    expect(flow).toContain("发布 Agent 从当时 main 锁定发布范围");
     expect(flow).toContain("等待用户明确的集中部署指令");
     expect(flow).toContain("不能并发覆盖服务器");
-    expect(flow).toContain("已提交但尚未部署");
+    expect(flow).toContain("已合入 main，尚未部署");
+    expect(collaboration).toContain("werelay-main-land.lock");
+    expect(collaboration).toContain("git update-ref");
+    expect(collaboration).toContain("未合入需求和未知脏改动保留并登记给原负责人");
     expect(flow).toContain("真实 Agent 与 ClawBot 的收发、审批和最终回复回推由用户部署后自行验收");
     expect(flow).toContain("不单独阻止用户已经明确授权的 GitHub 发布");
     expect(flow).toContain("GitHub 失败不回退 Mac 直推，不强推，不降低分支保护");

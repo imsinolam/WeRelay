@@ -1,3 +1,5 @@
+import { messageJournalAsset, MESSAGE_JOURNAL_CSP } from "../message-journal/assets.ts";
+import type { MessageJournal } from "../message-journal/journal.ts";
 import { serveMobileAppBundle } from "./mobile-app-bundle.ts";
 import { parseMobileNewTaskSettings, type MobileNewTaskSettings } from "./mobile-new-task-settings.ts";
 import crypto from "node:crypto";
@@ -150,6 +152,10 @@ export type CodexMobileTask = {
   projectOrder?: number;
   projectThreadOrder?: number;
   lastUpdatedAt?: string;
+  /** Observed user/assistant messages in the rolling 24h activity window. */
+  recentMessageCount?: number;
+  /** When recentMessageCount was calculated; allows the client to age it out. */
+  activityObservedAt?: string;
   status: CodexMobileTaskStatus;
   startedAtMs?: number;
   activeTurnId?: string;
@@ -453,6 +459,7 @@ export type StartCodexMobileServerOptions = {
     adapter: string,
     searchParams: URLSearchParams,
   ) => string | undefined;
+  messageJournal?: MessageJournal;
   accessToken: string;
   relayPrewarmToken?: string;
   authStore?: CodexMobileAuthStore;
@@ -1378,6 +1385,11 @@ function createRequestHandler(
       const url = new URL(request.url ?? "/", "http://localhost");
       const method = request.method ?? "GET";
 
+      const journalAsset = method === "GET" ? messageJournalAsset(url.pathname) : undefined;
+      if (journalAsset) {
+        sendText(response, 200, journalAsset.contentType, journalAsset.body, { "content-security-policy": MESSAGE_JOURNAL_CSP });
+        return;
+      }
       if (method === "GET" && url.pathname === "/") {
         sendText(response, 200, "text/html; charset=utf-8", CODEX_MOBILE_HTML_RESPONSE);
         return;
@@ -1693,6 +1705,24 @@ function createRequestHandler(
         }
         sendJson(response, 200, job);
         return;
+      }
+
+      if (url.pathname.startsWith("/api/message-journal/")) {
+        if (!options.messageJournal) throw new HttpError(409, "当前连接暂不支持消息日历。");
+        if (method === "GET" && url.pathname === "/api/message-journal/data") {
+          sendJson(response, 200, await options.messageJournal.read(false));
+          return;
+        }
+        if (method === "POST" && url.pathname === "/api/message-journal/permissions") {
+          // JSON is mandatory so cross-site HTML forms cannot change read consent.
+          if (!request.headers["content-type"]?.startsWith("application/json")) throw new HttpError(415, "请使用消息日历的读取来源面板。");
+          const body = await readJsonBody(request, 4096);
+          try { options.messageJournal.setPermissions(body.agents); }
+          catch { throw new HttpError(400, "无法保存读取来源，请检查选择和本机目录权限。"); }
+          sendJson(response, 200, { ok: true });
+          return;
+        }
+        throw new HttpError(404, "消息日历接口不存在。");
       }
 
       if (method === "GET" && url.pathname === "/api/network-route") {

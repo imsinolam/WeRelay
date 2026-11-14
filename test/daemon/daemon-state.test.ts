@@ -46,16 +46,19 @@ describe("daemon workspace state", () => {
       const store = new DaemonWorkspaceStateStore(cwd, { stateFile });
       store.recordAdapterMessageActivity({
         adapter: "grok",
+        threadId: "thread-grok",
         occurredAt: "2026-09-05T07:00:00.000Z",
         eventKey: "grok-turn-1",
       }, nowMs);
       store.recordAdapterMessageActivity({
         adapter: "grok",
+        threadId: "thread-grok",
         occurredAt: "2026-09-05T07:00:00.000Z",
         eventKey: "grok-turn-1",
       }, nowMs);
       store.recordAdapterMessageActivity({
         adapter: "codex",
+        threadId: "thread-codex",
         occurredAt: "2026-09-03T07:00:00.000Z",
         eventKey: "recent-codex-turn",
       }, nowMs);
@@ -78,11 +81,13 @@ describe("daemon workspace state", () => {
       expect(store.getAdapterMessageActivities()).toEqual([
         {
           adapter: "grok",
+          threadId: "thread-grok",
           occurredAt: "2026-09-05T07:00:00.000Z",
           eventKey: "grok-turn-1",
         },
         {
           adapter: "codex",
+          threadId: "thread-codex",
           occurredAt: "2026-09-03T07:00:00.000Z",
           eventKey: "recent-codex-turn",
         },
@@ -103,6 +108,48 @@ describe("daemon workspace state", () => {
         store.getAdapterMessageActivities(),
       );
       expect(restored.getAdapterUsageOrder()).toEqual(store.getAdapterUsageOrder());
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("upgrades a legacy unscoped activity with an observed thread id", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "werelay-daemon-state-"));
+    const stateFile = path.join(directory, "daemon-state.json");
+    const cwd = path.join(directory, "workspace");
+    const nowMs = Date.parse("2026-09-05T08:00:00.000Z");
+
+    try {
+      fs.writeFileSync(stateFile, JSON.stringify({
+        version: 1,
+        cwd,
+        adapterMessageActivities: [{
+          adapter: "codex",
+          occurredAt: "2026-09-05T07:00:00.000Z",
+          eventKey: "assistant:codex:thread-a:turn-a",
+        }],
+        updatedAt: "2026-09-05T07:00:00.000Z",
+      }));
+      const legacy = new DaemonWorkspaceStateStore(cwd, { stateFile });
+      expect(legacy.getAdapterMessageActivities()).toEqual([{
+        adapter: "codex",
+        occurredAt: "2026-09-05T07:00:00.000Z",
+        eventKey: "assistant:codex:thread-a:turn-a",
+      }]);
+
+      legacy.recordAdapterMessageActivity({
+        adapter: "codex",
+        threadId: "thread-a",
+        occurredAt: "2026-09-05T07:00:00.000Z",
+        eventKey: "assistant:codex:thread-a:turn-a",
+      }, nowMs);
+      const restored = new DaemonWorkspaceStateStore(cwd, { stateFile });
+      expect(restored.getAdapterMessageActivities()).toEqual([{
+        adapter: "codex",
+        threadId: "thread-a",
+        occurredAt: "2026-09-05T07:00:00.000Z",
+        eventKey: "assistant:codex:thread-a:turn-a",
+      }]);
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });
     }

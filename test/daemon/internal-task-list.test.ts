@@ -66,7 +66,10 @@ function fixture(candidates: GlobalTaskCandidate[]) {
   const completions = ["child", "parent"].map((threadId) => ({ adapter: "codex", threadId, title: threadId, completedAt: "2026-10-22T10:00:00Z" }));
   const daemon = Object.assign(Object.create(WeRelayDaemon.prototype), {
     cwd: "/fixture", slots, activeAdapter: "codex",
-    stateStore: { getRecentTaskCompletions: () => completions },
+    stateStore: {
+      getRecentTaskCompletions: () => completions,
+      getAdapterMessageActivities: () => [],
+    },
     globalTaskCatalogCache: { load: async (_key: string, load: () => Promise<unknown>) => load() },
     globalTaskCatalogWorker: {
       load: async (adapter: string) => adapter === "codex" ? candidates : [],

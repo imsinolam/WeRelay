@@ -7,6 +7,7 @@ import {
   appendCodexMobileTaskLink,
   buildCodexMobileTaskBoard,
   buildDaemonApprovalNotificationKey,
+  buildAdapterMessageEventKey,
   DaemonTaskApprovalAutoApprover,
   buildMacVisibleClientLaunchScript,
   buildMacVisibleClientOpenArgs,
@@ -64,6 +65,7 @@ import {
   resolveDaemonTaskTargetedMessage,
   resolveDaemonWechatReplyTarget,
   resolveCreatedMobileTask,
+  resolveLatestAdapterTaskActivityAt,
   resolveCodexWechatReplyThreadId,
   resolveCodexMobilePendingApprovalFromSignals,
   resolveCodexTaskCompletionDurationMs,
@@ -85,6 +87,7 @@ import {
   shouldRefreshAdapterUsageOrder,
   shouldResolveTaskTargetAgainstGlobalSnapshot,
   sortAdaptersByRecentMessageActivity,
+  countRecentTaskMessageActivity,
   retrySwitchedAdapterTaskList,
   waitForVisibleClientConnection,
 } from "../../src/daemon/werelay-daemon.ts";
@@ -183,6 +186,8 @@ describe("mobile task creation", () => {
       selected: true,
       canRename: true,
       canCreateInProject: false,
+      recentMessageCount: 0,
+      activityObservedAt: "2026-08-10T08:00:00.000Z",
     });
   });
 
@@ -679,34 +684,37 @@ describe("werelay-daemon helpers", () => {
     ]);
   });
 
-  test("sorts adapters by completed message activity from the latest three days", () => {
+  test("sorts adapters by recent message or task activity within 24 hours", () => {
     const nowMs = Date.parse("2026-09-05T08:00:00.000Z");
     expect(sortAdaptersByRecentMessageActivity(
-      ["codex", "claude", "grok", "workbuddy"],
+      ["codex", "claude", "grok", "workbuddy", "pi", "deepseek"],
       [
         { adapter: "grok", occurredAt: "2026-09-05T07:00:00.000Z", eventKey: "grok-1" },
         { adapter: "grok", occurredAt: "2026-09-05T06:00:00.000Z", eventKey: "grok-2" },
-        { adapter: "codex", occurredAt: "2026-09-03T20:00:00.000Z", eventKey: "codex-1" },
+        { adapter: "grok", occurredAt: "2026-09-05T06:00:00.000Z", eventKey: "grok-2" },
+        { adapter: "codex", occurredAt: "2026-09-04T08:00:00.000Z", eventKey: "codex-boundary" },
         { adapter: "workbuddy", occurredAt: "2026-09-02T09:00:00.000Z", eventKey: "workbuddy-1" },
-        { adapter: "claude", occurredAt: "2026-09-02T07:00:00.000Z", eventKey: "old-claude" },
+        { adapter: "claude", occurredAt: "2026-09-04T07:59:59.999Z", eventKey: "old-claude" },
+        { adapter: "pi", occurredAt: "2026-09-05T08:00:00.001Z", eventKey: "future-pi" },
       ],
       nowMs,
-    )).toEqual(["grok", "codex", "workbuddy", "claude"]);
+      24 * 60 * 60_000,
+      new Map([
+        ["codex", "2026-09-05T05:00:00.000Z"],
+        ["claude", "2026-09-06T08:00:00.000Z"],
+        ["workbuddy", "2026-09-02T09:00:00.000Z"],
+        ["deepseek", "2026-09-05T05:30:00.000Z"],
+      ]),
+    )).toEqual(["grok", "codex", "deepseek", "workbuddy", "claude", "pi"]);
     expect(shouldRefreshAdapterUsageOrder(undefined, nowMs)).toBe(true);
     expect(shouldRefreshAdapterUsageOrder(
-      nowMs - 23 * 60 * 60_000,
+      nowMs - 4 * 60_000,
       nowMs,
       undefined,
-      3 * 24 * 60 * 60_000,
+      24 * 60 * 60_000,
     )).toBe(false);
     expect(shouldRefreshAdapterUsageOrder(
-      nowMs - 24 * 60 * 60_000,
-      nowMs,
-      undefined,
-      3 * 24 * 60 * 60_000,
-    )).toBe(true);
-    expect(shouldRefreshAdapterUsageOrder(
-      nowMs - 60 * 60_000,
+      nowMs - 5 * 60_000,
       nowMs,
       undefined,
       24 * 60 * 60_000,
@@ -714,7 +722,143 @@ describe("werelay-daemon helpers", () => {
     expect(shouldRefreshAdapterUsageOrder(nowMs + 60_000, nowMs)).toBe(true);
   });
 
-  test("refreshes the persisted adapter usage order only during an idle daily window", () => {
+  test("keeps observed message-only activity ahead of a newer zero-message task", () => {
+    const nowMs = Date.parse("2026-09-05T08:00:00.000Z");
+    expect(sortAdaptersByRecentMessageActivity(
+      ["codex", "grok"],
+      [{
+        adapter: "codex",
+        occurredAt: "2026-09-01T00:00:00.000Z",
+        eventKey: "old-codex-message",
+      }, {
+        adapter: "codex",
+        occurredAt: "2026-09-05T07:30:00.000Z",
+        eventKey: "recent-codex-message",
+      }],
+      nowMs,
+      24 * 60 * 60_000,
+      new Map([["grok", "2026-09-05T07:59:00.000Z"]]),
+    )).toEqual(["codex", "grok"]);
+  });
+
+  test("keeps zero-evidence adapters in their previous stable order", () => {
+    const nowMs = Date.parse("2026-09-05T08:00:00.000Z");
+    expect(sortAdaptersByRecentMessageActivity(
+      ["pi", "workbuddy", "claude"],
+      [],
+      nowMs,
+      24 * 60 * 60_000,
+      new Map([
+        ["pi", "not-a-date"],
+        ["workbuddy", "2026-09-06T08:00:00.000Z"],
+      ]),
+    )).toEqual(["pi", "workbuddy", "claude"]);
+  });
+
+  test("counts task-scoped messages once at the exact 24-hour boundary", () => {
+    const nowMs = Date.parse("2026-09-05T08:00:00.000Z");
+    const activities = [
+      {
+        adapter: "codex" as const,
+        threadId: "thread-a",
+        occurredAt: "2026-09-04T08:00:00.000Z",
+        eventKey: "user:one",
+      },
+      {
+        adapter: "codex" as const,
+        threadId: "thread-a",
+        occurredAt: "2026-09-04T08:00:00.000Z",
+        eventKey: "user:one",
+      },
+      {
+        adapter: "codex" as const,
+        threadId: "thread-a",
+        occurredAt: "2026-09-04T07:59:59.999Z",
+        eventKey: "assistant:old",
+      },
+      {
+        adapter: "codex" as const,
+        threadId: "thread-a",
+        occurredAt: "2026-09-05T08:00:00.001Z",
+        eventKey: "assistant:future",
+      },
+      {
+        adapter: "codex" as const,
+        threadId: "thread-b",
+        occurredAt: "2026-09-05T07:00:00.000Z",
+        eventKey: "user:other-thread",
+      },
+      {
+        adapter: "grok" as const,
+        threadId: "thread-a",
+        occurredAt: "2026-09-05T07:00:00.000Z",
+        eventKey: "user:other-adapter",
+      },
+      {
+        adapter: "codex" as const,
+        occurredAt: "2026-09-05T07:10:00.000Z",
+        eventKey: "user:unscoped",
+      },
+      {
+        adapter: "codex" as const,
+        occurredAt: "2026-09-05T07:15:00.000Z",
+        eventKey: "assistant:codex:thread-a:legacy-turn",
+      },
+      {
+        adapter: "codex" as const,
+        occurredAt: "2026-09-05T07:16:00.000Z",
+        eventKey: "assistant:codex:thread-a-extra:legacy-turn",
+      },
+    ];
+    expect(countRecentTaskMessageActivity(
+      activities,
+      "codex",
+      "thread-a",
+      nowMs,
+    )).toEqual({
+      recentMessageCount: 2,
+      activityObservedAt: "2026-09-05T08:00:00.000Z",
+    });
+  });
+
+  test("uses unique stable keys for repeated user input in one turn", () => {
+    const first = buildAdapterMessageEventKey({
+      role: "user",
+      adapter: "codex",
+      threadId: "thread-a",
+      turnId: "turn-1",
+      timestamp: "2026-09-05T07:00:00.000Z",
+      text: "第一条",
+    });
+    const second = buildAdapterMessageEventKey({
+      role: "user",
+      adapter: "codex",
+      threadId: "thread-a",
+      turnId: "turn-1",
+      timestamp: "2026-09-05T07:00:01.000Z",
+      text: "第二条",
+    });
+    expect(first).not.toBe(second);
+    expect(buildAdapterMessageEventKey({
+      role: "assistant",
+      adapter: "codex",
+      threadId: "thread-a",
+      turnId: "turn-1",
+      messageId: "message-a",
+      timestamp: "2026-09-05T07:00:02.000Z",
+      text: "回答",
+    })).toBe(buildAdapterMessageEventKey({
+      role: "assistant",
+      adapter: "codex",
+      threadId: "thread-a",
+      turnId: "turn-1",
+      messageId: "message-a",
+      timestamp: "2026-09-05T07:00:03.000Z",
+      text: "回答",
+    }));
+  });
+
+  test("refreshes the persisted adapter usage order every five minutes regardless of busy state", () => {
     const source = readRepoFile("src/daemon/werelay-daemon.ts");
     const refreshStart = source.indexOf("  private scheduleMobileAdapterUsageOrderRefresh(");
     const refreshEnd = source.indexOf("\n  private async listMobileAdapters(", refreshStart);
@@ -724,14 +868,25 @@ describe("werelay-daemon helpers", () => {
     const adaptersBlock = source.slice(adaptersStart, adaptersEnd);
 
     expect(refreshBlock).toContain("shouldRefreshAdapterUsageOrder");
-    expect(refreshBlock).toContain("this.hasBusyAdapterForUsageRefresh()");
-    expect(refreshBlock).toContain("MOBILE_ADAPTER_USAGE_BUSY_RETRY_MS");
+    expect(refreshBlock).not.toContain("hasBusyAdapterForUsageRefresh");
+    expect(refreshBlock).not.toContain("MOBILE_ADAPTER_USAGE_BUSY_RETRY_MS");
+    expect(refreshBlock).toContain("MOBILE_ADAPTER_USAGE_REFRESH_DELAY_MS");
     expect(refreshBlock).toContain("this.stateStore.setAdapterUsageOrder");
     expect(refreshBlock).toContain("windowMs: MOBILE_ADAPTER_USAGE_WINDOW_MS");
     expect(refreshBlock).toContain("this.mobileAdapterUsageOrderWindowMs");
+    expect(refreshBlock).toContain("buildAdapterLatestTaskActivityMap(");
+    expect(refreshBlock).toContain("...this.latestAdapterTaskActivityCandidates()");
+    expect(source).toContain("const MOBILE_ADAPTER_USAGE_WINDOW_MS = 24 * 60 * 60_000;");
+    expect(source).toContain("const MOBILE_ADAPTER_USAGE_REFRESH_INTERVAL_MS = 5 * 60_000;");
     expect(source).toContain("this.recordAdapterMessageActivity({");
     expect(adaptersBlock).toContain("orderedAdapters.map");
     expect(adaptersBlock).toContain("mergeAdapterUsageOrder(");
+    expect(adaptersBlock).toContain(
+      "this.refreshMobileAdapterUsageOrderIfDue(adapters, globalCandidates)",
+    );
+    expect(
+      adaptersBlock.indexOf("this.refreshMobileAdapterUsageOrderIfDue(adapters, globalCandidates)"),
+    ).toBeLessThan(adaptersBlock.indexOf("const orderedAdapters"));
     expect(adaptersBlock).not.toContain("sortAdaptersByRecentMessageActivity(");
     expect(adaptersBlock).not.toContain("this.stateStore.getAdapterMessageActivities()");
     expect(refreshBlock).toContain("mergeAdapterUsageOrder(this.mobileAdapterUsageOrder, DAEMON_ADAPTERS)");

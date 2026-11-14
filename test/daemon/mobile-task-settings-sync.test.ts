@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { WeRelayDaemon } from "../../src/daemon/werelay-daemon.ts";
 import { MobileMessageOutbox, classifyMobileSendFailure } from "../../src/daemon/mobile-message-outbox.ts";
 import {
   MobileTaskModelStateCache,
@@ -170,4 +171,26 @@ test("the newest selection wins over settings carried by an earlier message", as
   // 已发出但电脑尚未确认时，继续显示刚发出的选择，不闪回旧模型。
   expect(unconfirmed({ currentModel: "a" })).toEqual({ model: "b" });
   expect(unconfirmed({ currentModel: "b" })).toBeNull();
+});
+
+
+test("new task catalogs share a successful per-Agent cache without creating or changing a task", async () => {
+  const daemon = Object.create(WeRelayDaemon.prototype) as any;
+  let now = 0;
+  let calls = 0;
+  const catalog = { options: [{ id: "a" }], canChange: true };
+  daemon.mobileTaskModelStates = new MobileTaskModelStateCache({ now: () => now });
+  daemon.resolveMobileAdapter = (adapter: string) => adapter;
+  daemon.getMobileSlot = () => ({ runtime: { getNewSessionModelState: async () => {
+    calls++;
+    if (calls > 1) throw new Error("目录暂不可用");
+    return catalog;
+  } } });
+  expect(await daemon.readMobileNewTaskModel("codex")).toEqual(catalog);
+  expect(await daemon.readMobileNewTaskModel("codex")).toEqual(catalog);
+  expect(calls).toBe(1);
+  now = 120000;
+  expect(await daemon.readMobileNewTaskModel("codex")).toMatchObject({ canChange: true, stale: true, options: [{ id: "a" }] });
+  expect(calls).toBe(2);
+  await expect(daemon.readMobileNewTaskModel("pi")).rejects.toThrow("目录暂不可用");
 });

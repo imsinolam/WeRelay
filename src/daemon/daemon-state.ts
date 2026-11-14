@@ -42,6 +42,7 @@ const MAX_RECENT_TASK_COMPLETIONS = 80;
 
 export type DaemonAdapterMessageActivity = {
   adapter: DaemonAdapterKind;
+  threadId?: string;
   occurredAt: string;
   eventKey: string;
 };
@@ -230,6 +231,9 @@ function normalizeAdapterMessageActivity(
   }
   return {
     adapter: value.adapter,
+    ...(typeof value.threadId === "string" && value.threadId.trim()
+      ? { threadId: value.threadId.trim() }
+      : {}),
     occurredAt: value.occurredAt.trim(),
     eventKey: value.eventKey.trim(),
   };
@@ -833,6 +837,7 @@ export class DaemonWorkspaceStateStore {
     );
     if (
       duplicate?.adapter === normalized.adapter &&
+      duplicate.threadId === normalized.threadId &&
       duplicate.occurredAt === normalized.occurredAt &&
       !hasExpiredEntries
     ) {

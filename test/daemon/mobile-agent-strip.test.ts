@@ -32,7 +32,7 @@ function stripHarness() {
       { id: "deepseek", label: "DeepSeek Harness", status: "awaiting_approval" },
       { id: "pi", label: "Pi", status: "idle" },
     ],
-    currentAdapter: "codex", switchingAdapter: false, switchingAdapterId: "", creatingTask: false,
+    currentAdapter: "codex", switchingAdapter: false, switchingAdapterId: "", switchingFromAdapterId: "", creatingTask: false,
   };
   const adapterMenu = new StripElement();
   const document = { activeElement: null as StripElement | null, createElement: () => new StripElement() };
@@ -52,8 +52,9 @@ function stripHarness() {
 }
 
 describe("sidebar Agent icon choices", () => {
-  test("shows three and a half choices and keeps only the brand in the sidebar header", () => {
-    expect(CODEX_MOBILE_CSS).toContain("flex: 0 0 calc((100% - 12px) / 3.5)");
+  test("uses fixed compact choices and keeps only the brand in the sidebar header", () => {
+    expect(CODEX_MOBILE_CSS).toContain("flex: 0 0 44px");
+    expect(CODEX_MOBILE_CSS).not.toContain("/ 3.5");
     const header = CODEX_MOBILE_HTML.slice(CODEX_MOBILE_HTML.indexOf('<div class="sidebar-head">'), CODEX_MOBILE_HTML.indexOf('<nav class="sidebar-primary-nav"'));
     expect(header).toContain('class="sidebar-brand brand-logo"');
     expect(header).not.toContain("workspace-switcher");
@@ -64,12 +65,7 @@ describe("sidebar Agent icon choices", () => {
     expect(CODEX_MOBILE_HTML).toContain('id="auth-logout"');
   });
 
-  test("wraps full names at word boundaries and fades only while more Agents remain", () => {
-    const rule = CODEX_MOBILE_CSS.match(/\.adapter-menu-label \{([^}]+)\}/)![1];
-    expect(rule).toContain("white-space: normal");
-    expect(rule).toContain("word-break: normal");
-    expect(rule).toContain("overflow-wrap: normal");
-    expect(rule).not.toContain("ellipsis");
+  test("uses icon-only choices with discoverable names and scroll overflow hints", () => {
     expect(CODEX_MOBILE_CSS).toContain(".adapter-menu.has-more");
     expect(CODEX_MOBILE_CSS).toContain("mask-image: linear-gradient(to right");
     const h = stripHarness(); h.render();
@@ -78,27 +74,30 @@ describe("sidebar Agent icon choices", () => {
     expect(h.adapterMenu.classList.contains("has-more")).toBe(false);
     h.adapterMenu.scrollLeft = 0; h.adapterMenu.scrollWidth = 100; h.render();
     expect(h.adapterMenu.classList.contains("has-more")).toBe(false);
-    expect(h.adapterMenu.children[2].querySelector(".adapter-menu-label")!.textContent).toBe("DeepSeek Harness");
+    expect(h.adapterMenu.children[2].querySelector(".adapter-menu-label")).toBeNull();
+    expect(h.adapterMenu.children[2].attributes["aria-label"]).toBe("DeepSeek Harness · 待审批");
+    expect(h.adapterMenu.children.every(button => button.children.length === 1)).toBe(true);
   });
 
-  test("uses one equal neutral frame around the active Agent logo", () => {
-    expect(CODEX_MOBILE_CSS).toContain("align-items: flex-start;");
-    expect(CODEX_MOBILE_CSS).toContain(".adapter-menu-icon { position: relative; display: grid; place-items: center; width: 38px; height: 38px;");
-    expect(CODEX_MOBILE_CSS).toContain(".adapter-menu-icon img { display: block; width: 34px; height: 34px;");
-    const labelRule = CODEX_MOBILE_CSS.match(/\.adapter-menu-label \{([^}]+)\}/)![1];
-    expect(labelRule).toContain("font-size: 10px");
-    expect(labelRule).toContain("line-height: 13px");
-    const activeRule = CODEX_MOBILE_CSS.match(/\.adapter-menu-item\.is-active \{([^}]+)\}/)![1];
-    expect(activeRule).not.toContain("background: var(--surface-selected)");
-    expect(activeRule).not.toContain("box-shadow");
-    expect(activeRule).not.toContain("green");
-    expect(CODEX_MOBILE_CSS).not.toContain(".adapter-menu-item.is-active::before");
-    const activeIconRule = CODEX_MOBILE_CSS.match(/\.adapter-menu-item\.is-active \.adapter-menu-icon \{([^}]+)\}/)![1];
-    expect(activeIconRule).toContain("background: var(--surface-selected)");
-    expect(activeIconRule).toContain("box-shadow: inset 0 0 0 1px var(--border)");
+  test("uses stable touch targets and neutral selection without recolouring brand marks", () => {
+    const item = CODEX_MOBILE_CSS.match(/\.adapter-menu-item \{([^}]+)\}/)![1];
+    expect(item).toContain("min-height: 44px");
+    expect(CODEX_MOBILE_CSS).toContain("min-width: 44px");
+    const active = CODEX_MOBILE_CSS.match(/\.adapter-menu-item\.is-active \{([^}]+)\}/)![1];
+    expect(active).toContain("background: transparent");
+    const marker = CODEX_MOBILE_CSS.match(/\.adapter-menu-item\.is-active::before \{([^}]+)\}/)![1];
+    expect(marker).toContain("width: 14px");
+    expect(marker).toContain("height: 2px");
+    expect(marker).toContain("background: var(--muted-strong)");
+    expect(active).not.toContain("green");
+    expect(CODEX_MOBILE_CSS).not.toContain(".adapter-menu-item.is-active .adapter-menu-icon {");
+    expect(CODEX_MOBILE_CSS).toContain(".adapter-menu-item:not(:disabled):hover");
+    expect(CODEX_MOBILE_CSS).toContain(".adapter-menu-item:focus-visible");
+    expect(CODEX_MOBILE_CSS).toContain(".adapter-menu-item:disabled:not(.is-switching)");
+    expect(CODEX_MOBILE_CSS).toContain("prefers-reduced-motion: reduce");
   });
 
-  test("preserves server order, brand logos, labels, busy state and existing switch action", () => {
+  test("preserves server order, brand logos, accessible names, busy state and existing switch action", () => {
     const h = stripHarness(); h.render();
     expect(h.adapterMenu.children.map(button => button.dataset.adapterId)).toEqual(["codex", "claude", "deepseek", "pi"]);
     expect(h.adapterMenu.children[0].attributes["aria-pressed"]).toBe("true");
@@ -166,4 +165,34 @@ describe("sidebar Agent icon choices", () => {
     expect(h.adapterMenu.children[0].dataset.adapterId).toBe("workbuddy");
     expect(h.adapterMenu.scrollLeft).toBe(0);
   });
+});
+
+test("switching hides the running pulse, prevents duplicate actions and restores normal state after failure", () => {
+  const h = stripHarness(); h.render();
+  h.state.switchingAdapter = true; h.state.switchingAdapterId = "codex"; h.render();
+  const codex = h.adapterMenu.children[0] as StripElement;
+  expect(codex.attributes["aria-busy"]).toBe("true");
+  expect(codex.querySelector(".adapter-menu-running-dot")!.hidden).toBe(true);
+  codex.emit("click"); expect(h.switched).toEqual([]);
+  h.state.switchingAdapter = false; h.state.switchingAdapterId = ""; h.render();
+  expect(codex.attributes["aria-busy"]).toBe("false");
+  expect(codex.disabled).toBe(false);
+  expect(codex.querySelector(".adapter-menu-running-dot")!.hidden).toBe(false);
+  codex.emit("click"); expect(h.switched).toEqual(["codex"]);
+});
+
+test("switching keeps the underline on the confirmed Agent until the switch succeeds", () => {
+  const h = stripHarness(); h.render();
+  h.state.switchingFromAdapterId = "codex";
+  h.state.switchingAdapter = true;
+  h.state.switchingAdapterId = "pi";
+  h.state.currentAdapter = "pi"; // target content may be shown from cache optimistically
+  h.render();
+  expect(h.adapterMenu.children[0].attributes["aria-pressed"]).toBe("true");
+  expect(h.adapterMenu.children[3].attributes["aria-pressed"]).toBe("false");
+  expect(h.adapterMenu.children[3].attributes["aria-busy"]).toBe("true");
+  h.state.switchingAdapter = false;
+  h.state.switchingFromAdapterId = "";
+  h.render();
+  expect(h.adapterMenu.children[3].attributes["aria-pressed"]).toBe("true");
 });
