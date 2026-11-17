@@ -476,6 +476,7 @@ export class CodexDesktopIpcClient {
   private connectPromise: Promise<void> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private disposed = false;
+  private threadStreamVersion: number | null = null;
   private requestCounter = 0;
   private pendingRequests = new Map<string, PendingRequest>();
   private followedThreadIds = new Set<string>();
@@ -849,7 +850,7 @@ export class CodexDesktopIpcClient {
   ): Promise<void> {
     await this.sendFollowerRequest(
       "thread-follower-set-queued-follow-ups-state",
-      1,
+      this.threadStreamVersion === 13 ? 3 : 1,
       {
         conversationId: threadId.trim(),
         state: cloneValue(state),
@@ -1292,9 +1293,12 @@ export class CodexDesktopIpcClient {
   }
 
   private handleThreadStateBroadcast(message: Record<string, unknown>): void {
-    if (message.version !== 11 || !isRecord(message.params)) {
+    // v13 adds desktop fields; snapshot/patch envelopes and turn identities remain compatible.
+    // Reject unknown versions rather than treating arbitrary future payloads as a receipt.
+    if (![11, 13].includes(message.version as number) || !isRecord(message.params)) {
       return;
     }
+    if (message.params.hostId !== undefined && message.params.hostId !== "local") return;
     const threadId = typeof message.params.conversationId === "string"
       ? message.params.conversationId
       : null;
@@ -1302,6 +1306,7 @@ export class CodexDesktopIpcClient {
     if (!threadId || !isRecord(change) || !this.followedThreadIds.has(threadId)) {
       return;
     }
+    this.threadStreamVersion = Number(message.version);
 
     if (
       change.type === "snapshot" &&

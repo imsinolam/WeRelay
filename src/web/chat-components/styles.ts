@@ -18,8 +18,11 @@ export const MESSAGE_BUBBLE_CSS = String.raw`
 export const MESSAGE_MEDIA_CSS = String.raw`
 .message-row.user.pending .message-card { opacity: 1; }
 .message-row.user.failed .message-card { border: 1px solid rgba(208,14,23,.22); }
-.message-delivery { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 5px; color: var(--muted); font-size: 10px; line-height: 1.3; }
+.message-delivery { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 4px 12px; margin-top: 5px; color: var(--muted); font-size: 10px; line-height: 1.3; }
 .message-delivery.failed { color: var(--red); }
+.message-delivery > span { flex: 1 1 180px; min-width: 0; }
+.message-delivery-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 16px; margin-left: auto; }
+.message-delivery-actions:empty { display: none; }
 .message-images { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 0 0 9px; }
 .message-images.single { grid-template-columns: minmax(0, 1fr); }
 .message-image-button { position: relative; width: 100%; min-width: 0; margin: 0; padding: 0; overflow: hidden; border: 0; border-radius: 12px; background: var(--surface); cursor: zoom-in; }
@@ -36,7 +39,7 @@ export const MESSAGE_MEDIA_CSS = String.raw`
 .image-viewer-stage { min-height: 0; display: grid; place-items: center; overflow: auto; }
 .image-viewer-stage img { display: block; max-width: 100%; max-height: 100%; object-fit: contain; }
 body.image-viewer-open { overflow: hidden; }
-.message-retry { padding: 0; border: 0; background: transparent; color: inherit; font-size: inherit; font-weight: 650; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+.message-retry { flex: 0 0 auto; white-space: nowrap; min-height: 32px; padding: 0; border: 0; background: transparent; color: inherit; font-size: inherit; font-weight: 650; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
 .message-content { -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; }
 `;
 

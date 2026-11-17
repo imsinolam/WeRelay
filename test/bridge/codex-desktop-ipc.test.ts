@@ -1959,3 +1959,37 @@ describe("Codex desktop IPC client", () => {
     await client.dispose();
   });
 });
+
+test("accepts Codex v13 snapshots and patches before sending once through the same owner", async () => {
+  const starts: Record<string, unknown>[] = [];
+  const queues: Record<string, unknown>[] = [];
+  const { socketPath } = await createMockRouter((socket, message) => {
+    initializeRouter(socket, message);
+    if (message.method === "thread-follower-set-queued-follow-ups-state") {
+      queues.push(message);
+      sendFrame(socket, { type: "response", requestId: message.requestId, resultType: "success", result: { ok: true } });
+    }
+    const params = message.params as Record<string, unknown>;
+    if (message.method === "thread-stream-following-changed" && params.following) {
+      sendFrame(socket, { type: "broadcast", method: "thread-stream-state-changed", version: 13,
+        params: { hostId: "local", conversationId: "v13-task", change: { type: "snapshot", revision: 1,
+          conversationState: receiptState("old", [{ type: "text", text: "old" }], "completed") } } });
+    }
+    if (message.method === "thread-follower-start-turn") {
+      starts.push(message);
+      sendFrame(socket, { type: "broadcast", method: "thread-stream-state-changed", version: 13,
+        params: { hostId: "local", conversationId: "v13-task", change: { type: "patches", baseRevision: 1, revision: 2,
+          patches: [{ op: "add", path: ["turnHistory", "history", "entitiesByKey", "tail:new"],
+            value: { turnId: "new", status: "inProgress", params: { input: [{ type: "text", text: "新消息", text_elements: [] }] }, items: [] } }] } } });
+    }
+  });
+  const client = new CodexDesktopIpcClient({ socketPath, requestTimeoutMs: 150,
+    openThread: async () => { throw new Error("must not open another owner"); } });
+  try {
+    const result = await client.startTurn("v13-task", "新消息");
+    expect(result.id).toBe("new");
+    expect(starts).toHaveLength(1);
+    await client.setQueuedFollowUpsState("v13-task", { "v13-task": [] });
+    expect(queues[0]?.version).toBe(3);
+  } finally { await client.dispose(); }
+});

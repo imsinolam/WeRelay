@@ -48,9 +48,9 @@ function createMessageBubble(options) {
     row.id = view.id;
     var delivery = view.delivery;
     var deliveryHtml = delivery ? '<div class="message-delivery ' + (delivery.failed ? 'failed' : '') + '"><span>' +
-      escapeHtml(delivery.text) + '</span>' +
+      escapeHtml(delivery.text) + '</span><div class="message-delivery-actions">' +
       (delivery.copy ? '<button class="message-retry" type="button" data-copy-message="' + escapeHtml(message.clientId) + '">复制消息</button>' : '') +
-      (delivery.retryLabel ? '<button class="message-retry" type="button" data-retry="' + escapeHtml(message.clientId) + '">' + escapeHtml(delivery.retryLabel) + '</button>' : '') + '</div>' : '';
+      (delivery.retryLabel ? '<button class="message-retry" type="button" data-retry="' + escapeHtml(message.clientId) + '">' + escapeHtml(delivery.retryLabel) + '</button>' : '') + '</div></div>' : '';
     var footer = view.footer || {};
     var source = message.sourceTask || {};
     row.innerHTML = '<div class="message-card">' +

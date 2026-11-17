@@ -115,7 +115,7 @@ function createChatComposer(root, options) {
     var label = part("composer-" + kind + "-label");
     var menu = part("composer-" + kind + "-menu");
     control.hidden = !view.visible;
-    label.textContent = view.label || "";
+    if (label.textContent !== (view.label || "")) label.textContent = view.label || "";
     button.classList.toggle("is-readonly", !view.canChange);
     button.classList.toggle("is-loading", Boolean(view.changing));
     button.setAttribute("aria-disabled", (view.canChange || view.retry) && !view.changing ? "false" : "true");

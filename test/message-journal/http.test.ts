@@ -74,9 +74,16 @@ test("application relay serves identical assets and carries authenticated consen
     expect(await fetch(base+"/journal/"+asset).then(r=>r.text())).toBe(await fetch(local.root+"/journal/"+asset).then(r=>r.text()));
   }
   expect((await fetch(base+"/api/message-journal/data")).status).toBe(401);
+  expect((await fetch(base+"/api/message-journal/permissions")).status).toBe(401);
   const headers = {cookie:local.cookie,"content-type":"application/json"};
   expect((await fetch(base+"/api/message-journal/permissions",{method:"POST",headers,body:JSON.stringify({agents:["pi"]})})).status).toBe(200);
-  expect((await waitForMessages(base,local.cookie)).messages[0].text).toBe("日历接口回归");
+  expect((await fetch(base+"/api/message-journal/permissions",{headers}).then(r=>r.json()) as any).permissions.agents).toEqual(["pi"]);
+  const first = await waitForMessages(base,local.cookie);
+  expect(first.messages[0].text).toBe("日历接口回归");
+  const conditional = base+"/api/message-journal/data?revision="+encodeURIComponent(first.revision);
+  expect((await fetch(conditional,{headers}).then(r=>r.json()) as any).unchanged).toBe(true);
   await fetch(base+"/api/message-journal/permissions",{method:"POST",headers,body:JSON.stringify({agents:[]})});
-  expect((await fetch(base+"/api/message-journal/data",{headers}).then(r=>r.json()) as any).messages).toEqual([]);
+  const revoked = await fetch(conditional,{headers}).then(r=>r.json()) as any;
+  expect(revoked.unchanged).toBe(false);
+  expect(revoked.messages).toEqual([]);
 });

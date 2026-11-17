@@ -1,6 +1,6 @@
 {
   "name": "werelay",
-  "version": "1.0.4",
+  "version": "1.0.6",
   "private": true,
   "description": "Extend real desktop coding-agent sessions to WeChat, LAN web, and an optional public relay without forking context",
   "type": "module",
@@ -106,6 +106,7 @@
     "smoke:global": "node scripts/smoke-global-install.mjs",
     "setup": "node --no-warnings --experimental-strip-types src/wechat/setup.ts",
     "start": "node --no-warnings --experimental-strip-types src/wechat/wechat-channel.ts",
+    "diagnostics:failures": "node --experimental-strip-types scripts/review-task-failures.mjs",
     "check": "node --no-warnings --experimental-strip-types src/wechat/wechat-channel.ts --check",
     "bridge": "node --no-warnings --experimental-strip-types src/bridge/werelay-bridge.ts",
     "daemon": "node --no-warnings --experimental-strip-types src/daemon/werelay-daemon.ts",

@@ -7885,7 +7885,14 @@ ${CHILD_TASK_LINKS_JS}
           if (remote[key] !== undefined) pending[key] = remote[key];
         });
         if (remote.status === "queued" && typeof remote.text === "string") pending.text = remote.text;
-        if (Array.isArray(remote.images) && remote.images.length) pending.images = remote.images;
+        if (Array.isArray(remote.images) && remote.images.length) {
+          pending.images = remote.images.map(function (image, index) {
+            var local = pending.images && pending.images[index];
+            // This clientId owns the same immutable attachment order. Keep the visible
+            // local source and original bytes while enriching it with the server URL.
+            return local ? Object.assign({}, image, local, { url: image.url || local.url }) : image;
+          });
+        }
       }
       pending.serverAcknowledged = true;
       acknowledgePendingMessageSubmission(pending);
@@ -7965,6 +7972,17 @@ ${CHILD_TASK_LINKS_JS}
       pending.deliveryConfirmed = true;
       acknowledgePendingMessageSubmission(pending);
       matchedMessage.clientId = pending.clientId;
+      if (pending.images && pending.images.length) {
+        matchedMessage.images = pending.images.map(function (image, index) {
+          var nativeImage = matchedMessage.images && matchedMessage.images[index];
+          var preview = image.previewUrl || image.url;
+          return Object.assign({}, nativeImage || {}, {
+            previewUrl: preview || nativeImage && (nativeImage.previewUrl || nativeImage.url) || "",
+            url: nativeImage && nativeImage.url || image.url || "",
+            fileName: image.fileName || nativeImage && nativeImage.fileName || ""
+          });
+        });
+      }
       if (state.localRunSummary && state.localRunSummary.clientId === pending.clientId) {
         state.localRunSummary.turnId = matchedMessage.turnId || pending.turnId || "";
         state.localRunSummary.status = "syncing";
@@ -8822,11 +8840,22 @@ ${CHILD_TASK_LINKS_JS}
 
   function mergeMessagePages(existing, incoming) {
     var previous = existing || [];
-    var clientIds = Object.create(null);
-    previous.forEach(function (message) { if (message.clientId) clientIds[messagePageKey(message)] = message.clientId; });
+    var previousByKey = Object.create(null);
+    previous.forEach(function (message) { previousByKey[messagePageKey(message)] = message; });
     var next = (incoming || []).map(function (message) {
-      var clientId = clientIds[messagePageKey(message)];
-      return clientId ? Object.assign({}, message, {clientId: clientId}) : message;
+      var prior = previousByKey[messagePageKey(message)];
+      if (!prior) return message;
+      var merged = Object.assign({}, message);
+      if (prior.clientId) merged.clientId = prior.clientId;
+      if (prior.role === "user" && prior.images && prior.images.length) {
+        var incomingImages = Array.isArray(message.images) ? message.images : [];
+        merged.images = Array.from({ length: Math.max(prior.images.length, incomingImages.length) }, function (_, index) {
+          var image = prior.images[index] || {};
+          var remote = incomingImages[index];
+          return Object.assign({}, image, remote || {}, image.previewUrl ? { previewUrl: image.previewUrl } : {});
+        });
+      }
+      return merged;
     });
     var alignment = messagePageAlignment(previous, next);
     if (alignment) {
@@ -10310,6 +10339,14 @@ ${CHILD_TASK_LINKS_JS}
     passive: true
   });
   document.addEventListener("selectionchange", function () {
+    // Native textarea/IME selection is never a transcript selection. Android can
+    // retain an earlier message range when focus moves through the keyboard.
+    var focused = document.activeElement;
+    if (focused && (focused === composerInput || focused.isContentEditable ||
+        /^(INPUT|TEXTAREA)$/.test(focused.tagName || ""))) {
+      activeMessageSelectionScope = null;
+      return;
+    }
     if (!hasActiveTextSelection()) return;
     if (!taskContextMenu.hidden) {
       clearActiveTextSelection();

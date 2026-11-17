@@ -166,3 +166,60 @@ test("taskSettings is included in the next message request without a model confi
     taskSettings: { model: "fixture-model" },
   })]);
 });
+
+test("server outbox updates preserve local image preview and original bytes", () => {
+  const h = harness(async () => ({}));
+  const image = { fileName: "draft.png", dataBase64: "cHJldmlldw==", previewUrl: "data:image/png;base64,cHJldmlldw==" };
+  const pending = h.pending("photo", { images: [image], imageCount: 1 });
+  h.reconcilePendingMessages([], [{ clientId: "photo", status: "failed", images: [{ source: "remote", url: "/image-expiring" }] }]);
+  expect(pending.images[0]).toMatchObject(image);
+  expect(pending.images[0].url).toBe("/image-expiring");
+});
+
+test("native acknowledgement retains the already visible image when the transcript has no image yet", () => {
+  const h = harness(async () => ({}));
+  const image = { fileName: "draft.png", previewUrl: "data:image/png;base64,cHJldmlldw==", dataBase64: "cHJldmlldw==" };
+  h.pending("photo", { images: [image], imageCount: 1 });
+  const native: any = { id: "native", role: "user", clientId: "photo", text: "photo" };
+  h.reconcilePendingMessages([native]);
+  expect(h.state.pendingMessages).toHaveLength(0);
+  expect(native.images[0].previewUrl).toBe(image.previewUrl);
+  expect(native.images[0].dataBase64).toBeUndefined();
+});
+
+test("later transcript polls retain the same local image preview after pending acknowledgement", () => {
+  const merge = new Function(block("  function messagePageKey(", "  function rebuildServerMessages(") + "\nreturn mergeMessagePages;")();
+  const original = { id: "native", role: "user", text: "photo", clientId: "photo", images: [{ previewUrl: "data:image/png;base64,cHJldmlldw==" }] };
+  const next = merge([original], [{ id: "native", role: "user", text: "photo", images: [{ url: "/server-image" }] }]);
+  expect(next[0].clientId).toBe("photo");
+  expect(next[0].images[0]).toEqual({ previewUrl: original.images[0]!.previewUrl, url: "/server-image" });
+  expect(merge(next, [{ id: "native", role: "user", text: "photo" }])[0].images).toEqual(next[0].images);
+  expect(merge([original], [{ id: "other", role: "user", text: "photo" }])[1].images).toBeUndefined();
+});
+
+test("transcript selection handler never changes a focused native input selection", () => {
+  const start = CODEX_MOBILE_APP_JS.indexOf('  document.addEventListener("selectionchange",');
+  const end = CODEX_MOBILE_APP_JS.indexOf('  document.addEventListener("click",', start);
+  let handler!: () => void;
+  let clamps = 0;
+  const input = { tagName: "TEXTAREA" };
+  const doc = { activeElement: input as unknown, addEventListener: (_: string, fn: () => void) => { handler = fn; } };
+  const run = new Function("document", "composerInput", "clampSelectionToMessageContent", `
+    var activeMessageSelectionScope = {isConnected:true}; var clampingMessageSelection=false;
+    var taskContextMenu={hidden:true}; var window={getSelection(){return {}}};
+    function hasActiveTextSelection(){return true} function clearActiveTextSelection(){throw Error("native selection cleared")}
+    ${CODEX_MOBILE_APP_JS.slice(start,end)}
+    return {setScope(){activeMessageSelectionScope={isConnected:true}}};
+  `)(doc, input, () => { clamps++; });
+  handler(); expect(clamps).toBe(0);
+  run.setScope(); doc.activeElement = { tagName: "INPUT" }; handler(); expect(clamps).toBe(0);
+  run.setScope(); doc.activeElement = null; handler(); expect(clamps).toBe(1);
+});
+
+test("image continuity does not discard additional native attachments", () => {
+  const merge = new Function(block("  function messagePageKey(", "  function rebuildServerMessages(") + "\nreturn mergeMessagePages;")();
+  const original = { id: "native", role: "user", text: "photo", images: [{ previewUrl: "data:image/png;base64,cHJldmlldw==" }] };
+  const result = merge([original], [{ id: "native", role: "user", text: "photo", images: [{ url: "/one" }, { url: "/two" }] }]);
+  expect(result[0].images).toHaveLength(2);
+  expect(result[0].images[1].url).toBe("/two");
+});

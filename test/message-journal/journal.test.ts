@@ -43,3 +43,29 @@ test("revocation during an in-flight scan discards the result", async () => {
   finish({ messages: [{ agent: "pi", id: "private", text: "old" }], sources: [] });
   expect((await pending).messages).toEqual([]);
 });
+
+test("unchanged polling omits large message bodies and revisions change after revocation or restart", async () => {
+  const { permissionFile } = setup();
+  let scans = 0;
+  const scan = async () => {
+    scans++;
+    return { sources: [], messages: Array.from({length: 2000}, (_, i) => ({agent:"pi", id:String(i), text:"回归数据".repeat(250)})) };
+  };
+  const journal = createMessageJournal({ permissionFile, scan });
+  journal.setPermissions(["pi"]);
+  const first = await journal.read();
+  expect(first.messages).toHaveLength(2000);
+  expect(Buffer.byteLength(JSON.stringify(first))).toBeGreaterThan(2_000_000);
+  journal.setPermissions(["pi"]);
+  const next = await journal.read(false, first.revision);
+  expect(next.unchanged).toBe(true);
+  expect(next.messages).toEqual([]);
+  expect(Buffer.byteLength(JSON.stringify(next))).toBeLessThan(2048);
+  expect(scans).toBe(1);
+  journal.setPermissions([]);
+  const revoked = await journal.read(false, first.revision);
+  expect(revoked.unchanged).toBe(false);
+  expect(revoked.permissions.agents).toEqual([]);
+  expect(revoked.messages).toEqual([]);
+  expect((await createMessageJournal({permissionFile, scan}).read()).revision).not.toBe(revoked.revision);
+});

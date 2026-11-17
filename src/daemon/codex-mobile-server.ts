@@ -1710,7 +1710,11 @@ function createRequestHandler(
       if (url.pathname.startsWith("/api/message-journal/")) {
         if (!options.messageJournal) throw new HttpError(409, "当前连接暂不支持消息日历。");
         if (method === "GET" && url.pathname === "/api/message-journal/data") {
-          sendJson(response, 200, await options.messageJournal.read(false));
+          sendJson(response, 200, await options.messageJournal.read(false, url.searchParams.get("revision") ?? undefined));
+          return;
+        }
+        if (method === "GET" && url.pathname === "/api/message-journal/permissions") {
+          sendJson(response, 200, { permissions: options.messageJournal.permissions() });
           return;
         }
         if (method === "POST" && url.pathname === "/api/message-journal/permissions") {

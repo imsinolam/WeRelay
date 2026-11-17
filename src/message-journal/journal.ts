@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { randomUUID } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { writePrivateFileAtomic } from "../utils/private-files.ts";
 
@@ -29,6 +30,7 @@ export function createMessageJournal(options: {
   let lastScan = 0;
   let error = "";
   let scanner: { run(): Promise<ScanResult> } | undefined;
+  const instance = randomUUID();
 
   function reads() {
     // Supply an explicit permission entry for every supported source.
@@ -61,21 +63,26 @@ export function createMessageJournal(options: {
     })().finally(() => { pending = null; });
   }
   return {
+    permissions() { return structuredClone(permissions); },
     setPermissions(agents: unknown) {
       if (!Array.isArray(agents) || agents.some(agent => !JOURNAL_AGENTS.includes(agent))) throw new Error("请选择有效的消息来源。");
       const next: Permissions = { version: 1, agents: JOURNAL_AGENTS.filter(agent => agents.includes(agent)) };
+      if (JSON.stringify(next) === JSON.stringify(permissions)) return;
       writePrivateFileAtomic(options.permissionFile, JSON.stringify(next));
       permissions = next; generation++; latest = null; lastScan = 0; error = ""; scanner = undefined;
     },
-    async read(waitForScan = true) {
+    async read(waitForScan = true, knownRevision?: string) {
       if (permissions.agents.length && Date.now() - lastScan >= refreshMs) startScan();
       if (waitForScan) await pending;
       const agents = new Set<string>(permissions.agents);
+      const loading = Boolean(pending) && !latest && agents.size > 0;
+      const revision = `${instance}:${generation}:${lastScan}:${loading}`;
+      const unchanged = knownRevision === revision;
       // Keep responses bounded for the application relay, without persisting message bodies.
       let bytes = 0;
       const messages: Message[] = [];
       let truncated = false;
-      for (const message of latest?.messages ?? []) {
+      for (const message of unchanged ? [] : latest?.messages ?? []) {
         if (!agents.has(message.agent)) continue;
         const item = { ...message, text: message.text.slice(0, 30_000) };
         const size = Buffer.byteLength(JSON.stringify(item));
@@ -84,7 +91,7 @@ export function createMessageJournal(options: {
       }
       return {
         version: 1, generatedAt: lastScan, lookbackDays: 30, refreshMs,
-        loading: Boolean(pending) && !latest && agents.size > 0,
+        loading, revision, unchanged,
         messages,
         sources: JOURNAL_AGENTS.map(agent => agents.has(agent)
           ? latest?.sources.find(source => source.agent === agent) ?? { agent, status: "ok", messages: 0 }
