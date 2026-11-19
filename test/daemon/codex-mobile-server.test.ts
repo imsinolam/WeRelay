@@ -6508,6 +6508,11 @@ describe("Codex mobile server", () => {
       expect(responsePendingRule).not.toContain("border");
       expect(css).toContain(".run-progress-item {");
       expect(css).toContain(".adapter-menu-item.is-switching .adapter-menu-icon::after");
+      expect(css).not.toContain(".adapter-menu-item.is-switching::after");
+      expect(css).toContain("@keyframes switch-breathe");
+      expect(css).toContain("animation: switch-breathe 1.8s ease-out infinite");
+      expect(css).toContain("0% { inset: -1px; opacity: .9; }");
+      expect(css).toContain("100% { inset: -7px; opacity: 0; }");
       expect(css).not.toContain(".workspace-menu { position: fixed;");
       expect(css).toContain("overflow-y: auto;");
       expect(css).toContain(".queued-followup-status");
@@ -6546,7 +6551,7 @@ describe("Codex mobile server", () => {
       expect(js).toContain(': "WeRelay \\u00B7 " + currentAdapterName();');
       expect(js).toContain('var requestedAdapter = pageUrl.searchParams.get("adapter") || "";');
       expect(js).toContain('requestedAdapter !== adapterPayload.activeAdapter');
-      expect(js).toContain('if (!initial) canonicalUrl.searchParams.delete("task");');
+      expect(js).toContain('if (!initial && changingAdapter) canonicalUrl.searchParams.delete("task");');
       expect(js).toContain('if (requestedAdapter) state.currentAdapter = requestedAdapter;');
       expect(js).toContain(
         "state.loadingTasks = needsInitialTask && !restoredCache && !state.tasks.length;",
@@ -6681,9 +6686,11 @@ describe("Codex mobile server", () => {
       expect(appVisibleIndex).toBeLessThan(
         js.indexOf("adapterPayload = await loadAdapters();", startAuthenticatedAppIndex),
       );
-      expect(appVisibleIndex).toBeLessThan(js.indexOf("await loadTasks(true);", startAuthenticatedAppIndex));
-      expect(js.indexOf("scheduleLiveRefresh(2200);", js.indexOf("function startAuthenticatedApp")))
-        .toBeGreaterThan(js.indexOf("await loadTasks(true);"));
+      const startupTaskLoadIndex = js.indexOf("await loadTasks(true);", startAuthenticatedAppIndex);
+      const startupEndIndex = js.indexOf("function taskStatusLabel(", startupTaskLoadIndex);
+      expect(appVisibleIndex).toBeLessThan(startupTaskLoadIndex);
+      const startupRefreshIndex = js.lastIndexOf("scheduleLiveRefresh(2200);", startupEndIndex);
+      expect(startupRefreshIndex).toBeGreaterThan(startupTaskLoadIndex);
       expect(js).toContain("Math.max(96, composerHeight + 16)");
       expect(js).not.toContain("messageNavigation.style.bottom");
       expect(js).not.toContain('if (pending.status === "sending") return true;');

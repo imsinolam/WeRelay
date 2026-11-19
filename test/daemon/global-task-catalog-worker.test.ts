@@ -221,3 +221,24 @@ test("real source worker starts under Node eval and lets an idle process exit", 
      expect(await result).toEqual([]);
    } finally { await catalog.close(); }
  });
+
+test("a timed-out whole catalog read leaves child-task reads on the same adapter alive", async () => {
+  const workers: FakeWorker[] = [];
+  const catalog = new GlobalTaskCatalogWorker({ timeoutMs: 20,
+    workerFactory: () => { const w = new FakeWorker(); workers.push(w); return w as unknown as Worker; },
+  });
+  try {
+    const fullList = catalog.load("codex", "/tmp").catch((e: Error) => e.message);
+    await new Promise(r => setTimeout(r, 8));
+    const children = catalog.loadChildren("codex", "/tmp", "parent", 20).catch((e: Error) => e.message);
+    expect(workers).toHaveLength(2);
+    expect(await fullList).toContain("超时");
+    expect(workers[0]!.terminated).toBe(true);
+    expect(workers[1]!.terminated).toBe(false);
+    const childWorker = workers[1]!;
+    childWorker.emit("message", { id: childWorker.requests[0]!.id, ok: true, candidates: [
+      { sessionId: "child", parentThreadId: "parent", title: "子任务" },
+    ] });
+    expect(await children).toMatchObject([{ sessionId: "child", title: "子任务" }]);
+  } finally { await catalog.close(); }
+});

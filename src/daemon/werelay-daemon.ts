@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { readDailyReviewHistory } from "./daily-review-history.ts";
 import { createMessageJournal } from "../message-journal/journal.ts";
 import { resolveWorkBuddyDesktopSocketPath } from "../bridge/workbuddy-desktop-rpc.ts";
 import { ScreenNotificationPolicy } from "./screen-notification-policy.ts";
@@ -143,6 +144,7 @@ import {
   shouldForwardBridgeEventToWechat,
 } from "../bridge/werelay-bridge.ts";
 import {
+  CHANNEL_DATA_DIR,
   BRIDGE_LOCK_FILE,
   BRIDGE_LOG_FILE,
   appendBoundedLog,
@@ -3695,6 +3697,7 @@ export class WeRelayDaemon {
         listAdapters: () => this.listMobileAdapters(),
         switchAdapter: (adapter) => this.switchMobileAdapter(adapter),
         readSettings: () => this.buildMobileSettings(),
+        readDailyReviews: () => readDailyReviewHistory(CHANNEL_DATA_DIR),
         updateSettings: (patch) => this.updateMobileSettings(patch),
         readMessageRecords: (query, exporting) => {
           const payload = exporting ? this.messageRecords.export(query) : this.messageRecords.query(query);

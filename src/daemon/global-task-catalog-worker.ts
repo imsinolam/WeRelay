@@ -68,13 +68,17 @@ type Pending = {
   resolve: (value: CatalogResponse) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
-  adapter: DaemonAdapterKind;
+  slotKey: string;
 };
 
 type CatalogSlot = { worker: Worker; idleTimer?: ReturnType<typeof setTimeout> };
 
+function catalogSlotKey(adapter: DaemonAdapterKind, operation?: CatalogRequest["operation"]): string {
+  return `${adapter}\u0000${operation ?? "list"}`;
+}
+
 export class GlobalTaskCatalogWorker {
-  private readonly workers = new Map<DaemonAdapterKind, CatalogSlot>();
+  private readonly workers = new Map<string, CatalogSlot>();
   private closed = false;
   private nextId = 0;
   private readonly pending = new Map<number, Pending>();
@@ -85,13 +89,13 @@ export class GlobalTaskCatalogWorker {
     idleMs?: number;
   } = {}) {}
 
-  private fail(adapter: DaemonAdapterKind, worker: Worker, error: Error): void {
-    const slot = this.workers.get(adapter);
+  private fail(slotKey: string, worker: Worker, error: Error): void {
+    const slot = this.workers.get(slotKey);
     if (slot?.worker !== worker) return;
     clearTimeout(slot.idleTimer);
-    this.workers.delete(adapter);
+    this.workers.delete(slotKey);
     for (const [id, pending] of this.pending) {
-      if (pending.adapter !== adapter) continue;
+      if (pending.slotKey !== slotKey) continue;
       clearTimeout(pending.timer);
       this.pending.delete(id);
       pending.reject(error);
@@ -99,20 +103,21 @@ export class GlobalTaskCatalogWorker {
     void worker.terminate();
   }
 
-  private idle(adapter: DaemonAdapterKind, worker: Worker): void {
-    if ([...this.pending.values()].some((item) => item.adapter === adapter)) return;
-    const slot = this.workers.get(adapter);
+  private idle(slotKey: string, worker: Worker): void {
+    if ([...this.pending.values()].some((item) => item.slotKey === slotKey)) return;
+    const slot = this.workers.get(slotKey);
     if (!slot || slot.worker !== worker) return;
     worker.unref();
     clearTimeout(slot.idleTimer);
     slot.idleTimer = setTimeout(() => {
-      this.fail(adapter, worker, new Error("任务目录读取空闲，已释放后台资源。"));
+      this.fail(slotKey, worker, new Error("任务目录读取空闲，已释放后台资源。"));
     }, this.options.idleMs ?? 60_000);
     slot.idleTimer.unref();
   }
 
-  private getWorker(adapter: DaemonAdapterKind): Worker {
-    const existing = this.workers.get(adapter);
+  private getWorker(adapter: DaemonAdapterKind, operation?: CatalogRequest["operation"]): Worker {
+    const slotKey = catalogSlotKey(adapter, operation);
+    const existing = this.workers.get(slotKey);
     if (existing) {
       clearTimeout(existing.idleTimer);
       return existing.worker;
@@ -124,20 +129,20 @@ export class GlobalTaskCatalogWorker {
         !/^--input-type(?:=|$)/u.test(arg) && args[index - 1] !== "--input-type"),
     });
     worker.on("message", (response: CatalogResponse) => {
-      if (this.workers.get(adapter)?.worker !== worker) return;
+      if (this.workers.get(slotKey)?.worker !== worker) return;
       const pending = this.pending.get(response.id);
-      if (!pending || pending.adapter !== adapter) return;
+      if (!pending || pending.slotKey !== slotKey) return;
       this.pending.delete(response.id);
       clearTimeout(pending.timer);
-      this.idle(adapter, worker);
+      this.idle(slotKey, worker);
       if (response.ok) pending.resolve(response);
       else pending.reject(new Error(response.error || "任务目录读取失败。"));
     });
-    worker.on("error", (error) => this.fail(adapter, worker, error));
-    worker.on("exit", (code) => this.fail(adapter, worker, new Error(
+    worker.on("error", (error) => this.fail(slotKey, worker, error));
+    worker.on("exit", (code) => this.fail(slotKey, worker, new Error(
       `任务目录后台读取进程已退出（代码 ${code}）。`,
     )));
-    this.workers.set(adapter, { worker });
+    this.workers.set(slotKey, { worker });
     worker.unref();
     return worker;
   }
@@ -161,20 +166,21 @@ export class GlobalTaskCatalogWorker {
   private async request(adapter: DaemonAdapterKind, cwd: string, limit: number, operation?: CatalogRequest["operation"], sessionId?: string): Promise<CatalogResponse> {
     if (this.closed) throw new Error("任务目录后台读取已停止。");
     if (this.pending.size >= 32) throw new Error("任务目录读取繁忙，请稍后重试。");
-    const worker = this.getWorker(adapter);
+    const slotKey = catalogSlotKey(adapter, operation);
+    const worker = this.getWorker(adapter, operation);
     const id = ++this.nextId;
     return await new Promise<CatalogResponse>((resolve, reject) => {
       const timer = setTimeout(() => {
-        this.fail(adapter, worker, new Error("任务目录后台读取超时，稍后将重新连接。"));
+        this.fail(slotKey, worker, new Error("任务目录后台读取超时，稍后将重新连接。"));
       }, this.options.timeoutMs ?? 6_000);
       worker.ref();
-      this.pending.set(id, { resolve, reject, timer, adapter });
+      this.pending.set(id, { resolve, reject, timer, slotKey });
       try {
         worker.postMessage({ id, adapter, cwd, limit, ...(operation ? { operation } : {}), ...(sessionId ? { sessionId } : {}) } satisfies CatalogRequest);
       } catch (error) {
         this.pending.delete(id);
         clearTimeout(timer);
-        this.idle(adapter, worker);
+        this.idle(slotKey, worker);
         reject(error instanceof Error ? error : new Error(String(error)));
       }
     });
@@ -182,8 +188,8 @@ export class GlobalTaskCatalogWorker {
 
   async close(): Promise<void> {
     this.closed = true;
-    for (const [adapter, slot] of this.workers) {
-      this.fail(adapter, slot.worker, new Error("任务目录后台读取已停止。"));
+    for (const [slotKey, slot] of this.workers) {
+      this.fail(slotKey, slot.worker, new Error("任务目录后台读取已停止。"));
     }
   }
 }

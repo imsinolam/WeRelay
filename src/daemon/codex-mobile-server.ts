@@ -1,3 +1,4 @@
+import type { readDailyReviewHistory } from "./daily-review-history.ts";
 import { messageJournalAsset, MESSAGE_JOURNAL_CSP } from "../message-journal/assets.ts";
 import type { MessageJournal } from "../message-journal/journal.ts";
 import { serveMobileAppBundle } from "./mobile-app-bundle.ts";
@@ -470,6 +471,7 @@ export type StartCodexMobileServerOptions = {
   listAdapters?: () => Promise<CodexMobileAdapterList>;
   switchAdapter?: (adapter: string) => Promise<CodexMobileAdapterSwitchResult>;
   readSettings?: () => Promise<CodexMobileSettings>;
+  readDailyReviews?: () => ReturnType<typeof readDailyReviewHistory>;
   readMessageRecords?: (query: Parameters<MessageRecords["query"]>[0], exporting?: boolean) => ReturnType<MessageRecords["query"]> | ReturnType<MessageRecords["export"]>;
   changeMessageRecords?: (patch: Partial<MessageRecordPolicy>) => ReturnType<MessageRecords["query"]>;
   clearMessageRecords?: () => ReturnType<MessageRecords["query"]>;
@@ -1839,6 +1841,17 @@ function createRequestHandler(
           return;
         }
         throw new HttpError(405, "不支持这种设置操作。");
+      }
+
+      if (url.pathname === "/api/settings/daily-reviews") {
+        if (method !== "GET") throw new HttpError(405, "巡检记录仅支持查看。");
+        if (!options.readDailyReviews) throw new HttpError(409, "当前电脑尚不支持巡检记录，请更新电脑端 WeRelay。");
+        try {
+          sendJson(response, 200, options.readDailyReviews());
+        } catch {
+          throw new HttpError(503, "暂时无法读取巡检记录，请稍后刷新重试。");
+        }
+        return;
       }
 
       if (url.pathname === "/api/settings/message-records" || url.pathname === "/api/settings/message-records/export") {

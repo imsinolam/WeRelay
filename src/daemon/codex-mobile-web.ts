@@ -1,3 +1,4 @@
+import { DAILY_REVIEW_SETTINGS_JS, DAILY_REVIEW_SETTINGS_CSS } from "../web/daily-review-settings.ts";
 import { CHAT_COMPONENTS_JS, renderChatComposerHtml } from "../web/chat-components/index.ts";
 import { MESSAGE_RECORD_SETTINGS_JS, MESSAGE_RECORD_SETTINGS_CSS } from "../web/message-record-settings.ts";
 import { CHILD_TASK_LINKS_JS, CHILD_TASK_LINKS_CSS } from "../web/child-task-links.ts";
@@ -147,7 +148,7 @@ export const CODEX_MOBILE_HTML = `<!doctype html>
           </button>
           <div>
             <h1 id="settings-title">设置</h1>
-            <p>远程访问、任务审批与电脑终端</p>
+            <p>管理连接与任务，查看消息和巡检进展</p>
           </div>
         </header>
         <nav class="settings-tabs" aria-label="设置分类">
@@ -155,6 +156,7 @@ export const CODEX_MOBILE_HTML = `<!doctype html>
           <button type="button" data-settings-tab="tasks" aria-pressed="false">任务与审批</button>
           <button type="button" data-settings-tab="providers" aria-pressed="false">电脑终端</button>
           <button type="button" data-settings-tab="records" aria-pressed="false">消息记录</button>
+          <button type="button" data-settings-tab="reviews" aria-pressed="false">巡检记录</button>
         </nav>
         <nav class="settings-utilities" aria-label="应用操作">
           <a href="/about">项目说明</a>
@@ -339,7 +341,7 @@ export const WE_RELAY_ABOUT_HTML = `<!doctype html>
 </body>
 </html>`;
 
-export const CODEX_MOBILE_CSS = MESSAGE_RECORD_SETTINGS_CSS + CHILD_TASK_LINKS_CSS + String.raw`
+export const CODEX_MOBILE_CSS = DAILY_REVIEW_SETTINGS_CSS + MESSAGE_RECORD_SETTINGS_CSS + CHILD_TASK_LINKS_CSS + String.raw`
 :root {
   color-scheme: light;
   --page: #ffffff;
@@ -733,8 +735,12 @@ svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.75; stro
 .adapter-menu-item:disabled { cursor: progress; }
 .adapter-menu-item:disabled:not(.is-switching) { opacity: 1; }
 .adapter-menu-item.is-switching { background: transparent; }
-.adapter-menu-item.is-switching .adapter-menu-icon::after { content: ""; position: absolute; inset: -3px; border: 1.5px solid var(--border); border-top-color: var(--green); border-radius: 50%; animation: switch-spin .8s linear infinite; }
-@media (prefers-reduced-motion: reduce) { .adapter-menu-item { transition: none; } .adapter-menu-item.is-switching .adapter-menu-icon::after, .adapter-menu-running-dot { animation: none; } }
+.adapter-menu-item.is-switching .adapter-menu-icon::after { content: ""; position: absolute; inset: -3px; border: 1.5px solid var(--green); border-radius: 9px; pointer-events: none; animation: switch-breathe 1.8s ease-out infinite; }
+@keyframes switch-breathe {
+  0% { inset: -1px; opacity: .9; }
+  100% { inset: -7px; opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) { .adapter-menu-item { transition: none; } .adapter-menu-item.is-switching .adapter-menu-icon::after { inset: -3px; opacity: 1; animation: none; } .adapter-menu-running-dot { animation: none; } }
 .topbar-actions { flex: 0 0 auto; height: 100%; display: flex; flex-wrap: nowrap; align-items: center; gap: 4px; }
 .cache-sync-slot { width: 0; height: 100%; flex: 0 0 auto; display: flex; align-items: center; justify-content: flex-end; overflow: hidden; }
 .cache-sync-indicator { height: 24px; display: inline-flex; align-items: center; gap: 5px; padding: 0 7px; border-radius: 999px; color: var(--muted); background: var(--surface); font-size: 11px; line-height: 1; white-space: nowrap; }
@@ -1291,6 +1297,7 @@ export const CODEX_MOBILE_APP_JS = String.raw`
   "use strict";
 
 ${MESSAGE_RECORD_SETTINGS_JS}
+${DAILY_REVIEW_SETTINGS_JS}
 ${CHILD_TASK_LINKS_JS}
 
   var AGENT_BRAND_ICON_DATA = ${JSON.stringify(AGENT_BRAND_ICON_DATA)};
@@ -1413,6 +1420,7 @@ ${CHILD_TASK_LINKS_JS}
   var settingsRefreshTimer = null;
   var settingsTab = "remote";
   var messageRecordSettings = null;
+  var dailyReviewSettings = null;
   var settingsEpoch = 0;
   var settingsExpandedProviders = Object.create(null);
   var remoteRefreshTimer = null;
@@ -4516,17 +4524,20 @@ ${CHILD_TASK_LINKS_JS}
     rememberCurrentTaskSnapshot();
     var previousAdapterId = state.currentAdapter;
     var previousThreadId = state.currentThreadId;
+    var changingAdapter = adapterId !== previousAdapterId;
     state.switchingAdapter = true;
     state.switchingAdapterId = adapterId;
     state.switchingFromAdapterId = previousAdapterId;
     state.switchStartedAtMs = Date.now();
-    state.currentAdapter = adapterId;
-    resetTaskStateForAdapterSwitch();
-    restoreCachedAdapterState(adapterId, "");
+    if (changingAdapter) {
+      state.currentAdapter = adapterId;
+      resetTaskStateForAdapterSwitch();
+      restoreCachedAdapterState(adapterId, "");
+    }
     syncLiveSubscriptions();
     var canonicalUrl = new URL(window.location.href);
     canonicalUrl.searchParams.set("adapter", adapterId);
-    if (!initial) canonicalUrl.searchParams.delete("task");
+    if (!initial && changingAdapter) canonicalUrl.searchParams.delete("task");
     history.replaceState(null, "", canonicalUrl.pathname + canonicalUrl.search + canonicalUrl.hash);
     renderAdapterMenu();
     renderTasks();
@@ -4545,9 +4556,11 @@ ${CHILD_TASK_LINKS_JS}
         canonicalUrl.searchParams.set("adapter", state.currentAdapter);
         history.replaceState(null, "", canonicalUrl.pathname + canonicalUrl.search + canonicalUrl.hash);
       }
+      state.adapterError = "";
+      clearAdapterConnectionNotice(state.currentAdapter);
       await loadAdapters();
-      if (!initial) await loadTasks(true);
-      if (!initial) showToast("已切换到 " + currentAdapterName());
+      if (!initial) await loadTasks(changingAdapter);
+      if (!initial) showToast((changingAdapter ? "已切换到 " : "已连接 ") + currentAdapterName());
       return true;
     } catch (error) {
       state.adapterError = error.message || "暂时无法连接这个终端。";
@@ -6107,6 +6120,7 @@ ${CHILD_TASK_LINKS_JS}
       selectSettingsTab(settingsTab);
     } else {
       if (messageRecordSettings) { messageRecordSettings.destroy(); messageRecordSettings = null; }
+      if (dailyReviewSettings) { dailyReviewSettings.destroy(); dailyReviewSettings = null; }
       settingsEpoch++;
       clearTimeout(settingsRefreshTimer);
       clearTimeout(remoteRefreshTimer);
@@ -6118,6 +6132,7 @@ ${CHILD_TASK_LINKS_JS}
   }
 
   function selectSettingsTab(tab) {
+    if (dailyReviewSettings) { dailyReviewSettings.destroy(); dailyReviewSettings = null; }
     if (messageRecordSettings) { messageRecordSettings.destroy(); messageRecordSettings = null; }
     settingsTab = tab;
     var epoch = ++settingsEpoch;
@@ -6136,6 +6151,10 @@ ${CHILD_TASK_LINKS_JS}
         }
       });
       void messageRecordSettings.load();
+    }
+    else if (tab === "reviews") {
+      dailyReviewSettings = createDailyReviewSettings({ root: settingsBody, api: api, escape: escapeHtml });
+      void dailyReviewSettings.load();
     }
     else void loadSettings();
   }
@@ -6579,6 +6598,7 @@ ${CHILD_TASK_LINKS_JS}
   }
 
   async function loadSettings() {
+    if (settingsTab === "reviews" && dailyReviewSettings) return dailyReviewSettings.load();
     if (settingsTab === "records" && messageRecordSettings) return messageRecordSettings.load();
     var epoch = settingsEpoch;
     var tab = settingsTab;
